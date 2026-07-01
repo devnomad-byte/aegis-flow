@@ -3,6 +3,9 @@ from uuid import UUID
 
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
+    CredentialAccessIntentRead,
+    CredentialRefCreateRequest,
+    CredentialRefRead,
     EnvironmentCreateRequest,
     EnvironmentRead,
     McpServerCreateRequest,
@@ -72,6 +75,42 @@ class ToolRegistryStore(Protocol):
         actor_id: UUID,
         request: ShellTemplateCreateRequest,
     ) -> ShellTemplateRead:
+        raise NotImplementedError
+
+    async def create_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: CredentialRefCreateRequest,
+    ) -> CredentialRefRead:
+        raise NotImplementedError
+
+    async def list_project_credential_refs(self, project_id: UUID) -> list[CredentialRefRead]:
+        raise NotImplementedError
+
+    async def archive_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+    ) -> CredentialRefRead:
+        raise NotImplementedError
+
+    async def record_credential_access_intent(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref: str,
+        actor_id: UUID,
+        requester_type: str,
+        requester_ref: str,
+        purpose: str,
+        run_id: str = "",
+        node_id: str = "",
+        trace_id: str = "",
+    ) -> CredentialAccessIntentRead:
         raise NotImplementedError
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:

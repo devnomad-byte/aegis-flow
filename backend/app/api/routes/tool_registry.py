@@ -15,6 +15,8 @@ from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
+    CredentialRefCreateRequest,
+    CredentialRefRead,
     EnvironmentCreateRequest,
     EnvironmentRead,
     McpServerCreateRequest,
@@ -75,6 +77,110 @@ async def get_tool_registry_catalog(
 
 
 @router.post(
+    "/credential-refs",
+    response_model=CredentialRefRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_credential_ref(
+    project_id: UUID,
+    request: CredentialRefCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> CredentialRefRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    resource = await _create_or_conflict(
+        registry_store.create_credential_ref(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    )
+    await _record_create_event(
+        audit_store,
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.credential_ref.create",
+        target_type="tool_registry_credential_ref",
+        target_id=str(resource.id),
+        reference=request.credential_ref,
+        risk_level="high",
+    )
+    return resource
+
+
+@router.get("/credential-refs", response_model=list[CredentialRefRead])
+async def list_credential_refs(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[CredentialRefRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    refs = await registry_store.list_project_credential_refs(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.credential_ref.list",
+        target_type="tool_registry_credential_ref",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={"credential_ref_count": len(refs)},
+    )
+    return refs
+
+
+@router.delete("/credential-refs/{credential_ref_id}", response_model=CredentialRefRead)
+async def archive_credential_ref(
+    project_id: UUID,
+    credential_ref_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> CredentialRefRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        resource = await registry_store.archive_credential_ref(
+            project_id=project_id,
+            credential_ref_id=credential_ref_id,
+            actor_id=current_account.account_id,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Credential reference not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.credential_ref.archive",
+        target_type="tool_registry_credential_ref",
+        target_id=str(resource.id),
+        risk_level="high",
+        metadata={"reference": resource.credential_ref},
+    )
+    return resource
+
+
+@router.post(
     "/environments",
     response_model=EnvironmentRead,
     status_code=status.HTTP_201_CREATED,
@@ -131,13 +237,19 @@ async def create_mcp_server(
         project_id,
         "tool-registry:write",
     )
-    resource = await _create_or_conflict(
-        registry_store.create_mcp_server(
-            project_id=project_id,
-            actor_id=current_account.account_id,
-            request=request,
+    try:
+        resource = await _create_or_conflict(
+            registry_store.create_mcp_server(
+                project_id=project_id,
+                actor_id=current_account.account_id,
+                request=request,
+            )
         )
-    )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Credential reference not found or inactive",
+        ) from exc
     await _record_create_event(
         audit_store,
         project_id=project_id,
@@ -300,13 +412,19 @@ async def create_shell_template(
         project_id,
         "tool-registry:write",
     )
-    resource = await _create_or_conflict(
-        registry_store.create_shell_template(
-            project_id=project_id,
-            actor_id=current_account.account_id,
-            request=request,
+    try:
+        resource = await _create_or_conflict(
+            registry_store.create_shell_template(
+                project_id=project_id,
+                actor_id=current_account.account_id,
+                request=request,
+            )
         )
-    )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Credential reference not found or inactive",
+        ) from exc
     await _record_create_event(
         audit_store,
         project_id=project_id,

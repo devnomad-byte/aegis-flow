@@ -10,6 +10,28 @@ ToolDefinitionStatus = Literal["active", "stale", "disabled"]
 SyncStatus = Literal["never", "success", "failed"]
 HealthStatus = Literal["unknown", "healthy", "unhealthy"]
 McpTransport = Literal["streamable_http", "sse"]
+CredentialProvider = Literal[
+    "external_vault",
+    "kubernetes_secret",
+    "docker_secret",
+    "environment_broker",
+    "manual_placeholder",
+]
+SecretKind = Literal[
+    "api_key",
+    "bearer_token",
+    "basic_auth",
+    "oauth_client",
+    "ssh_key",
+    "certificate",
+    "database",
+    "generic",
+]
+CredentialUsageScope = Literal["mcp", "http", "shell", "model", "generic"]
+DataClassification = Literal["internal", "confidential", "restricted", "secret"]
+CredentialStatus = Literal["active", "archived", "disabled"]
+CredentialRequesterType = Literal["tool_gateway", "execution_gateway", "api", "system"]
+CredentialAccessDecision = Literal["recorded", "denied"]
 
 
 class ToolRegistryCatalogResponse(BaseModel):
@@ -26,6 +48,8 @@ class EnvironmentCreateRequest(BaseModel):
 
 
 class McpServerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     server_ref: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=160)
     base_url: HttpUrl
@@ -33,6 +57,7 @@ class McpServerCreateRequest(BaseModel):
     transport: McpTransport = "streamable_http"
     owner: str = ""
     description: str = ""
+    credential_ref: str = Field(default="", max_length=240)
 
 
 class ToolGroupCreateRequest(BaseModel):
@@ -44,12 +69,33 @@ class ToolGroupCreateRequest(BaseModel):
 
 
 class ShellTemplateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     template_ref: str = Field(min_length=1, max_length=120)
     template_version: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=160)
     risk_level: RiskLevel = "medium"
     environment_key: str = Field(min_length=1, max_length=80)
     description: str = ""
+    credential_ref: str = Field(default="", max_length=240)
+
+
+class CredentialRefCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credential_ref: str = Field(min_length=1, max_length=240)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    provider: CredentialProvider
+    external_path: str = Field(min_length=1, max_length=512)
+    secret_kind: SecretKind = "generic"
+    environment_key: str = Field(min_length=1, max_length=80)
+    usage_scope: CredentialUsageScope = "generic"
+    data_classification: DataClassification = "secret"
+    rotation_policy: str = Field(default="", max_length=160)
+    expires_at: datetime | None = None
+    last_rotated_at: datetime | None = None
+    owner: str = Field(default="", max_length=160)
 
 
 class RegistryResourceRead(BaseModel):
@@ -76,6 +122,7 @@ class McpServerRead(RegistryResourceRead):
     transport: McpTransport
     environment_key: str
     owner: str
+    credential_ref: str
     last_health_status: HealthStatus
     last_health_checked_at: datetime | None
     last_sync_version: int
@@ -94,6 +141,54 @@ class ShellTemplateRead(RegistryResourceRead):
     template_version: int
     risk_level: RiskLevel
     environment_key: str
+    credential_ref: str
+
+
+class CredentialRefRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    credential_ref: str
+    name: str
+    description: str
+    provider: CredentialProvider
+    external_path: str
+    secret_kind: SecretKind
+    environment_key: str
+    usage_scope: CredentialUsageScope
+    data_classification: DataClassification
+    rotation_policy: str
+    expires_at: datetime | None
+    last_rotated_at: datetime | None
+    owner: str
+    status: CredentialStatus
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class CredentialAccessIntentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    credential_ref_id: UUID
+    credential_ref: str
+    actor_id: UUID
+    requester_type: CredentialRequesterType
+    requester_ref: str
+    purpose: str
+    run_id: str
+    node_id: str
+    trace_id: str
+    decision: CredentialAccessDecision
+    denial_reason: str
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class ToolDefinitionRead(BaseModel):

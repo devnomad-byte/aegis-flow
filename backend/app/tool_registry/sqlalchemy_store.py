@@ -14,6 +14,8 @@ from backend.app.tool_registry.mcp_client import (
     tool_schema_hash,
 )
 from backend.app.tool_registry.models import (
+    ToolRegistryCredentialAccessIntent,
+    ToolRegistryCredentialRef,
     ToolRegistryEnvironment,
     ToolRegistryMcpServer,
     ToolRegistryShellTemplate,
@@ -22,6 +24,9 @@ from backend.app.tool_registry.models import (
     ToolRegistryToolSyncRun,
 )
 from backend.app.tool_registry.schemas import (
+    CredentialAccessIntentRead,
+    CredentialRefCreateRequest,
+    CredentialRefRead,
     EnvironmentCreateRequest,
     EnvironmentRead,
     McpServerCreateRequest,
@@ -48,6 +53,7 @@ ModelT = TypeVar(
     ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
     ToolRegistryToolSyncRun,
+    ToolRegistryCredentialRef,
 )
 
 
@@ -103,6 +109,10 @@ class SqlAlchemyToolRegistryStore:
         actor_id: UUID,
         request: McpServerCreateRequest,
     ) -> McpServerRead:
+        await self._ensure_active_credential_ref(
+            project_id=project_id,
+            credential_ref=request.credential_ref,
+        )
         resource = ToolRegistryMcpServer(
             project_id=project_id,
             server_ref=request.server_ref,
@@ -111,6 +121,7 @@ class SqlAlchemyToolRegistryStore:
             transport=request.transport,
             environment_key=request.environment_key,
             owner=request.owner,
+            credential_ref=request.credential_ref,
             description=request.description,
             created_by=actor_id,
             updated_by=actor_id,
@@ -143,6 +154,10 @@ class SqlAlchemyToolRegistryStore:
         actor_id: UUID,
         request: ShellTemplateCreateRequest,
     ) -> ShellTemplateRead:
+        await self._ensure_active_credential_ref(
+            project_id=project_id,
+            credential_ref=request.credential_ref,
+        )
         resource = ToolRegistryShellTemplate(
             project_id=project_id,
             template_ref=request.template_ref,
@@ -150,11 +165,100 @@ class SqlAlchemyToolRegistryStore:
             name=request.name,
             risk_level=request.risk_level,
             environment_key=request.environment_key,
+            credential_ref=request.credential_ref,
             description=request.description,
             created_by=actor_id,
             updated_by=actor_id,
         )
         return ShellTemplateRead.model_validate(await self._insert(resource))
+
+    async def create_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: CredentialRefCreateRequest,
+    ) -> CredentialRefRead:
+        resource = ToolRegistryCredentialRef(
+            project_id=project_id,
+            credential_ref=request.credential_ref,
+            name=request.name,
+            description=request.description,
+            provider=request.provider,
+            external_path=request.external_path,
+            secret_kind=request.secret_kind,
+            environment_key=request.environment_key,
+            usage_scope=request.usage_scope,
+            data_classification=request.data_classification,
+            rotation_policy=request.rotation_policy,
+            expires_at=request.expires_at,
+            last_rotated_at=request.last_rotated_at,
+            owner=request.owner,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        return CredentialRefRead.model_validate(await self._insert(resource))
+
+    async def list_project_credential_refs(self, project_id: UUID) -> list[CredentialRefRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryCredentialRef)
+            .where(ToolRegistryCredentialRef.project_id == project_id)
+            .order_by(ToolRegistryCredentialRef.credential_ref)
+        )
+        return [CredentialRefRead.model_validate(resource) for resource in result.all()]
+
+    async def archive_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+    ) -> CredentialRefRead:
+        credential = await self._get_project_credential_ref_by_id(project_id, credential_ref_id)
+        if credential is None:
+            raise ToolRegistryResourceNotFoundError("credential ref not found")
+        credential.status = "archived"
+        credential.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(credential)
+        return CredentialRefRead.model_validate(credential)
+
+    async def record_credential_access_intent(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref: str,
+        actor_id: UUID,
+        requester_type: str,
+        requester_ref: str,
+        purpose: str,
+        run_id: str = "",
+        node_id: str = "",
+        trace_id: str = "",
+    ) -> CredentialAccessIntentRead:
+        credential = await self._get_active_credential_ref(project_id, credential_ref)
+        if credential is None:
+            raise ToolRegistryResourceNotFoundError("credential ref not found")
+        intent = ToolRegistryCredentialAccessIntent(
+            project_id=project_id,
+            credential_ref_id=credential.id,
+            credential_ref=credential.credential_ref,
+            actor_id=actor_id,
+            requester_type=requester_type,
+            requester_ref=requester_ref,
+            purpose=purpose,
+            run_id=run_id,
+            node_id=node_id,
+            trace_id=trace_id,
+            decision="recorded",
+            denial_reason="",
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(intent)
+        await self._session.commit()
+        await self._session.refresh(intent)
+        return CredentialAccessIntentRead.model_validate(intent)
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
         result = await self._session.scalars(
@@ -294,6 +398,51 @@ class SqlAlchemyToolRegistryStore:
                 )
             ),
         )
+
+    async def _get_project_credential_ref_by_id(
+        self,
+        project_id: UUID,
+        credential_ref_id: UUID,
+    ) -> ToolRegistryCredentialRef | None:
+        return cast(
+            ToolRegistryCredentialRef | None,
+            await self._session.scalar(
+                select(ToolRegistryCredentialRef).where(
+                    ToolRegistryCredentialRef.project_id == project_id,
+                    ToolRegistryCredentialRef.id == credential_ref_id,
+                )
+            ),
+        )
+
+    async def _get_active_credential_ref(
+        self,
+        project_id: UUID,
+        credential_ref: str,
+    ) -> ToolRegistryCredentialRef | None:
+        if not credential_ref:
+            return None
+        return cast(
+            ToolRegistryCredentialRef | None,
+            await self._session.scalar(
+                select(ToolRegistryCredentialRef).where(
+                    ToolRegistryCredentialRef.project_id == project_id,
+                    ToolRegistryCredentialRef.credential_ref == credential_ref,
+                    ToolRegistryCredentialRef.status == "active",
+                )
+            ),
+        )
+
+    async def _ensure_active_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref: str,
+    ) -> None:
+        if not credential_ref:
+            return
+        credential = await self._get_active_credential_ref(project_id, credential_ref)
+        if credential is None:
+            raise ToolRegistryResourceNotFoundError("credential ref not found")
 
     async def _record_failed_sync_run(
         self,

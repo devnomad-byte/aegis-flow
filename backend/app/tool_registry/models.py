@@ -37,6 +37,7 @@ class ToolRegistryMcpServer(Base, TimestampMixin):
     transport: Mapped[str] = mapped_column(String(32), nullable=False, default="streamable_http")
     environment_key: Mapped[str] = mapped_column(String(80), nullable=False)
     owner: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    credential_ref: Mapped[str] = mapped_column(String(240), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     last_health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
@@ -91,8 +92,70 @@ class ToolRegistryShellTemplate(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     risk_level: Mapped[str] = mapped_column(String(32), nullable=False, default="low")
     environment_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    credential_ref: Mapped[str] = mapped_column(String(240), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryCredentialRef(Base, TimestampMixin):
+    __tablename__ = "tool_registry_credential_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "credential_ref",
+            name="uq_tool_credential_ref_project_ref",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    credential_ref: Mapped[str] = mapped_column(String(240), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    external_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    secret_kind: Mapped[str] = mapped_column(String(40), nullable=False, default="generic")
+    environment_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    usage_scope: Mapped[str] = mapped_column(String(40), nullable=False, default="generic")
+    data_classification: Mapped[str] = mapped_column(String(32), nullable=False, default="secret")
+    rotation_policy: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_rotated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    owner: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryCredentialAccessIntent(Base, TimestampMixin):
+    __tablename__ = "tool_registry_credential_access_intents"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    credential_ref_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_credential_refs.id"),
+        nullable=False,
+        index=True,
+    )
+    credential_ref: Mapped[str] = mapped_column(String(240), nullable=False)
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    requester_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    requester_ref: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    node_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    trace_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    decision: Mapped[str] = mapped_column(String(32), nullable=False, default="recorded")
+    denial_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

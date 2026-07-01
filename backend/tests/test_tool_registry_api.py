@@ -12,6 +12,9 @@ from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
 from backend.app.tool_registry.schemas import (
+    CredentialAccessIntentRead,
+    CredentialRefCreateRequest,
+    CredentialRefRead,
     EnvironmentCreateRequest,
     EnvironmentRead,
     McpServerCreateRequest,
@@ -52,6 +55,8 @@ class PermissionAwareProjectProvider(ProjectAccessProvider):
 class InMemoryToolRegistryStore:
     def __init__(self) -> None:
         self.catalogs: dict[UUID, ProjectResourceCatalog] = {}
+        self.credential_refs: dict[UUID, list[CredentialRefRead]] = {}
+        self.credential_access_intents: list[CredentialAccessIntentRead] = []
         self.tool_definitions: dict[UUID, list[ToolDefinitionRead]] = {}
         self.fail_next_sync = False
 
@@ -94,6 +99,7 @@ class InMemoryToolRegistryStore:
                 transport=str(request.transport),
                 environment_key=str(request.environment_key),
                 owner=str(request.owner),
+                credential_ref=str(request.credential_ref),
                 last_health_status="unknown",
                 last_health_checked_at=None,
                 last_sync_version=0,
@@ -126,6 +132,100 @@ class InMemoryToolRegistryStore:
                 environment_key=str(request.environment_key),
             )
         )
+
+    async def create_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: CredentialRefCreateRequest,
+    ) -> CredentialRefRead:
+        now = datetime.now(UTC).isoformat()
+        credential = CredentialRefRead(
+            id=uuid4(),
+            project_id=project_id,
+            credential_ref=str(request.credential_ref),
+            name=str(request.name),
+            description=str(request.description),
+            provider=str(request.provider),
+            external_path=str(request.external_path),
+            secret_kind=str(request.secret_kind),
+            environment_key=str(request.environment_key),
+            usage_scope=str(request.usage_scope),
+            data_classification=str(request.data_classification),
+            rotation_policy=str(request.rotation_policy),
+            expires_at=request.expires_at,
+            last_rotated_at=request.last_rotated_at,
+            owner=str(request.owner),
+            status="active",
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.credential_refs.setdefault(project_id, []).append(credential)
+        return credential
+
+    async def list_project_credential_refs(self, project_id: UUID) -> list[CredentialRefRead]:
+        return self.credential_refs.get(project_id, [])
+
+    async def archive_credential_ref(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+    ) -> CredentialRefRead:
+        for credential in self.credential_refs.get(project_id, []):
+            if credential.id == credential_ref_id:
+                archived = credential.model_copy(
+                    update={"status": "archived", "updated_by": actor_id}
+                )
+                self.credential_refs[project_id] = [
+                    archived if item.id == credential_ref_id else item
+                    for item in self.credential_refs[project_id]
+                ]
+                return archived
+        raise ToolRegistryResourceNotFoundError("credential ref not found")
+
+    async def record_credential_access_intent(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref: str,
+        actor_id: UUID,
+        requester_type: str,
+        requester_ref: str,
+        purpose: str,
+        run_id: str = "",
+        node_id: str = "",
+        trace_id: str = "",
+    ) -> CredentialAccessIntentRead:
+        for credential in self.credential_refs.get(project_id, []):
+            if credential.credential_ref == credential_ref and credential.status == "active":
+                now = datetime.now(UTC).isoformat()
+                intent = CredentialAccessIntentRead(
+                    id=uuid4(),
+                    project_id=project_id,
+                    credential_ref_id=credential.id,
+                    credential_ref=credential_ref,
+                    actor_id=actor_id,
+                    requester_type=requester_type,
+                    requester_ref=requester_ref,
+                    purpose=purpose,
+                    run_id=run_id,
+                    node_id=node_id,
+                    trace_id=trace_id,
+                    decision="recorded",
+                    denial_reason="",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.credential_access_intents.append(intent)
+                return intent
+        raise ToolRegistryResourceNotFoundError("credential ref not found")
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
         return self.tool_definitions.get(project_id, [])
@@ -212,6 +312,7 @@ class InMemoryToolRegistryStore:
                 template_version=template_version,
                 risk_level=str(request.risk_level),
                 environment_key=str(request.environment_key),
+                credential_ref=str(request.credential_ref),
             )
         )
 
@@ -381,6 +482,79 @@ def test_tool_registry_creates_project_resources_and_returns_catalog() -> None:
     ]
 
 
+def test_tool_registry_creates_lists_and_archives_credential_refs_without_secret_values() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs",
+        json={
+            "credential_ref": "vault://ops/k8s/readonly",
+            "name": "K8s 只读凭据",
+            "provider": "external_vault",
+            "external_path": "ops/k8s/readonly",
+            "secret_kind": "bearer_token",
+            "environment_key": "test",
+            "usage_scope": "mcp",
+            "data_classification": "secret",
+            "owner": "platform-security",
+        },
+    )
+    list_response = client.get(f"/api/v1/projects/{project.id}/tool-registry/credential-refs")
+    archive_response = client.delete(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs/"
+        f"{create_response.json()['id']}"
+    )
+
+    assert create_response.status_code == 201
+    assert create_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
+    assert "secret_value" not in create_response.text
+    assert "token-value" not in create_response.text
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["provider"] == "external_vault"
+    assert archive_response.status_code == 200
+    assert archive_response.json()["status"] == "archived"
+    assert [event["action"] for event in audit_store.events] == [
+        "tool_registry.credential_ref.create",
+        "tool_registry.credential_ref.list",
+        "tool_registry.credential_ref.archive",
+    ]
+
+
+def test_tool_registry_rejects_plain_secret_fields_in_credential_ref_request() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs",
+        json={
+            "credential_ref": "vault://ops/k8s/admin",
+            "name": "K8s 管理凭据",
+            "provider": "external_vault",
+            "external_path": "ops/k8s/admin",
+            "secret_kind": "bearer_token",
+            "environment_key": "prod",
+            "usage_scope": "mcp",
+            "secret_value": "token-value",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "token-value" not in response.text
+
+
 def test_tool_registry_syncs_mcp_tools_and_lists_project_tool_definitions() -> None:
     project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
     registry_store = InMemoryToolRegistryStore()
@@ -419,6 +593,60 @@ def test_tool_registry_syncs_mcp_tools_and_lists_project_tool_definitions() -> N
         "tool_registry.mcp_server.sync_tools",
         "tool_registry.tool_definition.list",
     ]
+
+
+def test_tool_registry_resources_bind_credential_refs_without_exposing_secrets() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    credential = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs",
+        json={
+            "credential_ref": "vault://ops/k8s/readonly",
+            "name": "K8s 只读凭据",
+            "provider": "external_vault",
+            "external_path": "ops/k8s/readonly",
+            "secret_kind": "bearer_token",
+            "environment_key": "test",
+            "usage_scope": "mcp",
+        },
+    )
+    assert credential.status_code == 201
+
+    mcp_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers",
+        json={
+            "server_ref": "mcp-k8s-test",
+            "name": "K8s 测试 MCP",
+            "base_url": "https://mcp.internal.example/k8s",
+            "environment_key": "test",
+            "credential_ref": "vault://ops/k8s/readonly",
+        },
+    )
+    shell_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "k8s-log-collector",
+            "template_version": 3,
+            "name": "日志采集",
+            "risk_level": "medium",
+            "environment_key": "test",
+            "credential_ref": "vault://ops/k8s/readonly",
+        },
+    )
+
+    assert mcp_response.status_code == 201
+    assert mcp_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
+    assert shell_response.status_code == 201
+    assert shell_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
+    assert "token-value" not in mcp_response.text
+    assert "token-value" not in shell_response.text
 
 
 def test_tool_registry_sync_failure_returns_sanitized_error_and_audit_failure() -> None:
