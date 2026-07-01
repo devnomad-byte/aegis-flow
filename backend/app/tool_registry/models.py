@@ -1,7 +1,8 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -38,6 +39,14 @@ class ToolRegistryMcpServer(Base, TimestampMixin):
     owner: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    last_health_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_sync_version: Mapped[int] = mapped_column(nullable=False, default=0)
+    last_sync_status: Mapped[str] = mapped_column(String(32), nullable=False, default="never")
+    last_sync_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]
@@ -84,6 +93,68 @@ class ToolRegistryShellTemplate(Base, TimestampMixin):
     environment_key: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryToolDefinition(Base, TimestampMixin):
+    __tablename__ = "tool_registry_tool_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "mcp_server_id",
+            "tool_name",
+            name="uq_tool_definition_project_server_name",
+        ),
+        UniqueConstraint("project_id", "tool_ref", name="uq_tool_definition_project_ref"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    mcp_server_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_mcp_servers.id"),
+        nullable=False,
+        index=True,
+    )
+    server_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_ref: Mapped[str] = mapped_column(String(260), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    output_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    annotations: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    schema_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    sync_version: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryToolSyncRun(Base, TimestampMixin):
+    __tablename__ = "tool_registry_tool_sync_runs"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    mcp_server_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_mcp_servers.id"),
+        nullable=False,
+        index=True,
+    )
+    server_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    sync_version: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tool_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    error_type: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
+    get_mcp_tools_client,
     get_project_access_provider,
     get_tool_registry_store,
 )
 from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     EnvironmentCreateRequest,
     EnvironmentRead,
@@ -19,13 +21,17 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
+    ToolDefinitionRead,
     ToolGroupCreateRequest,
     ToolGroupRead,
     ToolRegistryCatalogResponse,
+    ToolSyncRunRead,
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
+    ToolRegistryResourceNotFoundError,
     ToolRegistryStore,
+    ToolSyncFailedError,
 )
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
 
@@ -34,6 +40,7 @@ CurrentAccount = Depends(get_current_account)
 ProjectAccess = Depends(get_project_access_provider)
 RegistryStore = Depends(get_tool_registry_store)
 AuditStore = Depends(get_audit_event_store)
+McpToolsClientDependency = Depends(get_mcp_tools_client)
 
 
 @router.get("/catalog", response_model=ToolRegistryCatalogResponse)
@@ -142,6 +149,97 @@ async def create_mcp_server(
         risk_level="medium",
     )
     return resource
+
+
+@router.post(
+    "/mcp-servers/{server_id}/sync-tools",
+    response_model=ToolSyncRunRead,
+)
+async def sync_mcp_server_tools(
+    project_id: UUID,
+    server_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    tools_client: McpToolsClient = McpToolsClientDependency,
+) -> ToolSyncRunRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        sync_run = await registry_store.sync_mcp_server_tools(
+            project_id=project_id,
+            mcp_server_id=server_id,
+            actor_id=current_account.account_id,
+            tools_client=tools_client,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="MCP server not found",
+        ) from exc
+    except ToolSyncFailedError as exc:
+        await audit_store.record_project_event(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            action="tool_registry.mcp_server.sync_tools",
+            target_type="tool_registry_mcp_server",
+            target_id=exc.target_id,
+            result="failure",
+            risk_level="medium",
+            metadata={"error_message": exc.public_message},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=exc.public_message,
+        ) from exc
+
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.mcp_server.sync_tools",
+        target_type="tool_registry_mcp_server",
+        target_id=str(server_id),
+        risk_level=_highest_risk_level(
+            [definition.risk_level for definition in sync_run.tool_definitions]
+        ),
+        metadata={
+            "server_ref": sync_run.server_ref,
+            "sync_version": sync_run.sync_version,
+            "tool_count": sync_run.tool_count,
+        },
+    )
+    return sync_run
+
+
+@router.get("/tool-definitions", response_model=list[ToolDefinitionRead])
+async def list_tool_definitions(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[ToolDefinitionRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    definitions = await registry_store.list_project_tool_definitions(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.tool_definition.list",
+        target_type="tool_registry_tool_definition",
+        target_id=str(project_id),
+        metadata={"tool_definition_count": len(definitions)},
+    )
+    return definitions
 
 
 @router.post(
@@ -286,3 +384,10 @@ def _catalog_response(catalog: ProjectResourceCatalog) -> ToolRegistryCatalogRes
         shell_templates=sorted(catalog.shell_templates),
         environments=sorted(catalog.environments),
     )
+
+
+def _highest_risk_level(risk_levels: list[str]) -> str:
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    if not risk_levels:
+        return "low"
+    return max(risk_levels, key=lambda risk_level: order.get(risk_level, 0))

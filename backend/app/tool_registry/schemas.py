@@ -1,11 +1,14 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ResourceStatus = Literal["active", "disabled", "archived"]
+ToolDefinitionStatus = Literal["active", "stale", "disabled"]
+SyncStatus = Literal["never", "success", "failed"]
+HealthStatus = Literal["unknown", "healthy", "unhealthy"]
 McpTransport = Literal["streamable_http", "sse"]
 
 
@@ -73,6 +76,11 @@ class McpServerRead(RegistryResourceRead):
     transport: McpTransport
     environment_key: str
     owner: str
+    last_health_status: HealthStatus
+    last_health_checked_at: datetime | None
+    last_sync_version: int
+    last_sync_status: SyncStatus
+    last_sync_error: str
 
 
 class ToolGroupRead(RegistryResourceRead):
@@ -86,3 +94,49 @@ class ShellTemplateRead(RegistryResourceRead):
     template_version: int
     risk_level: RiskLevel
     environment_key: str
+
+
+class ToolDefinitionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    mcp_server_id: UUID
+    server_ref: str
+    tool_ref: str
+    tool_name: str
+    display_name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    annotations: dict[str, Any]
+    risk_level: RiskLevel
+    schema_hash: str
+    sync_version: int
+    status: ToolDefinitionStatus
+    last_seen_at: datetime
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolSyncRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    mcp_server_id: UUID
+    server_ref: str
+    sync_version: int
+    status: Literal["success", "failed"]
+    started_at: datetime
+    finished_at: datetime
+    tool_count: int
+    error_type: str
+    error_message: str
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+    tool_definitions: list[ToolDefinitionRead] = Field(default_factory=list)

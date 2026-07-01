@@ -1,6 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     EnvironmentCreateRequest,
     EnvironmentRead,
@@ -8,14 +9,29 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
+    ToolDefinitionRead,
     ToolGroupCreateRequest,
     ToolGroupRead,
+    ToolSyncRunRead,
 )
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
 
 
 class DuplicateToolRegistryResourceError(ValueError):
     """Raised when a project resource reference already exists."""
+
+
+class ToolRegistryResourceNotFoundError(LookupError):
+    """Raised when a project-scoped registry resource cannot be found."""
+
+
+class ToolSyncFailedError(RuntimeError):
+    """Raised when an MCP tools/list sync fails after recording the failed run."""
+
+    def __init__(self, *, public_message: str, target_id: str) -> None:
+        super().__init__(public_message)
+        self.public_message = public_message
+        self.target_id = target_id
 
 
 class ToolRegistryStore(Protocol):
@@ -56,4 +72,17 @@ class ToolRegistryStore(Protocol):
         actor_id: UUID,
         request: ShellTemplateCreateRequest,
     ) -> ShellTemplateRead:
+        raise NotImplementedError
+
+    async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
+        raise NotImplementedError
+
+    async def sync_mcp_server_tools(
+        self,
+        *,
+        project_id: UUID,
+        mcp_server_id: UUID,
+        actor_id: UUID,
+        tools_client: McpToolsClient,
+    ) -> ToolSyncRunRead:
         raise NotImplementedError

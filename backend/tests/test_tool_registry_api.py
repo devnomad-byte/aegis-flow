@@ -18,9 +18,12 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
+    ToolDefinitionRead,
     ToolGroupCreateRequest,
     ToolGroupRead,
+    ToolSyncRunRead,
 )
+from backend.app.tool_registry.store import ToolRegistryResourceNotFoundError, ToolSyncFailedError
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
 from fastapi.testclient import TestClient
 
@@ -49,6 +52,8 @@ class PermissionAwareProjectProvider(ProjectAccessProvider):
 class InMemoryToolRegistryStore:
     def __init__(self) -> None:
         self.catalogs: dict[UUID, ProjectResourceCatalog] = {}
+        self.tool_definitions: dict[UUID, list[ToolDefinitionRead]] = {}
+        self.fail_next_sync = False
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
         return self.catalogs.get(project_id, ProjectResourceCatalog())
@@ -79,7 +84,7 @@ class InMemoryToolRegistryStore:
         self.catalogs[project_id] = catalog.model_copy(
             update={"mcp_servers": catalog.mcp_servers | frozenset({server_ref})}
         )
-        return McpServerRead(
+        resource = McpServerRead(
             **_resource(
                 project_id,
                 actor_id,
@@ -89,8 +94,15 @@ class InMemoryToolRegistryStore:
                 transport=str(request.transport),
                 environment_key=str(request.environment_key),
                 owner=str(request.owner),
+                last_health_status="unknown",
+                last_health_checked_at=None,
+                last_sync_version=0,
+                last_sync_status="never",
+                last_sync_error="",
             )
         )
+        self.tool_definitions.setdefault(project_id, [])
+        return resource
 
     async def create_tool_group(
         self,
@@ -113,6 +125,68 @@ class InMemoryToolRegistryStore:
                 risk_level=str(request.risk_level),
                 environment_key=str(request.environment_key),
             )
+        )
+
+    async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
+        return self.tool_definitions.get(project_id, [])
+
+    async def sync_mcp_server_tools(
+        self,
+        *,
+        project_id: UUID,
+        mcp_server_id: UUID,
+        actor_id: UUID,
+        tools_client: object,
+    ) -> ToolSyncRunRead:
+        if self.fail_next_sync:
+            raise ToolSyncFailedError(
+                public_message="Authorization failed for bearer [redacted]",
+                target_id=str(mcp_server_id),
+            )
+        if project_id not in self.catalogs:
+            raise ToolRegistryResourceNotFoundError("mcp server not found")
+
+        now = datetime.now(UTC).isoformat()
+        definition = ToolDefinitionRead(
+            id=uuid4(),
+            project_id=project_id,
+            mcp_server_id=mcp_server_id,
+            server_ref="mcp-k8s-test",
+            tool_ref="mcp-k8s-test.kubectl_get_pods",
+            tool_name="kubectl_get_pods",
+            display_name="获取 Pod",
+            description="List pods",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            annotations={"readOnlyHint": True, "openWorldHint": False},
+            risk_level="low",
+            schema_hash="sha256:pods",
+            sync_version=1,
+            status="active",
+            last_seen_at=now,
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.tool_definitions[project_id] = [definition]
+        return ToolSyncRunRead(
+            id=uuid4(),
+            project_id=project_id,
+            mcp_server_id=mcp_server_id,
+            server_ref="mcp-k8s-test",
+            sync_version=1,
+            status="success",
+            started_at=now,
+            finished_at=now,
+            tool_count=1,
+            error_type="",
+            error_message="",
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+            tool_definitions=[definition],
         )
 
     async def create_shell_template(
@@ -307,6 +381,79 @@ def test_tool_registry_creates_project_resources_and_returns_catalog() -> None:
     ]
 
 
+def test_tool_registry_syncs_mcp_tools_and_lists_project_tool_definitions() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    account = make_account()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    created = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers",
+        json={
+            "server_ref": "mcp-k8s-test",
+            "name": "K8s 测试 MCP",
+            "base_url": "https://mcp.internal.example/k8s",
+            "environment_key": "test",
+        },
+    )
+    server_id = created.json()["id"]
+
+    sync_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers/{server_id}/sync-tools"
+    )
+    list_response = client.get(f"/api/v1/projects/{project.id}/tool-registry/tool-definitions")
+
+    assert sync_response.status_code == 200
+    assert sync_response.json()["status"] == "success"
+    assert sync_response.json()["tool_definitions"][0]["tool_ref"] == (
+        "mcp-k8s-test.kubectl_get_pods"
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["risk_level"] == "low"
+    assert [event["action"] for event in audit_store.events][-2:] == [
+        "tool_registry.mcp_server.sync_tools",
+        "tool_registry.tool_definition.list",
+    ]
+
+
+def test_tool_registry_sync_failure_returns_sanitized_error_and_audit_failure() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    registry_store.fail_next_sync = True
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    created = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers",
+        json={
+            "server_ref": "mcp-k8s-test",
+            "name": "K8s 测试 MCP",
+            "base_url": "https://mcp.internal.example/k8s",
+            "environment_key": "test",
+        },
+    )
+    server_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers/{server_id}/sync-tools"
+    )
+
+    assert response.status_code == 502
+    assert "bearer [redacted]" in response.json()["detail"]
+    assert "secret" not in response.text.lower()
+    assert audit_store.events[-1]["action"] == "tool_registry.mcp_server.sync_tools"
+    assert audit_store.events[-1]["result"] == "failure"
+
+
 def test_tool_registry_enforces_view_and_write_permissions() -> None:
     project = make_project(permissions=["tool-registry:view"])
     client = build_client(
@@ -320,9 +467,13 @@ def test_tool_registry_enforces_view_and_write_permissions() -> None:
         f"/api/v1/projects/{project.id}/tool-registry/environments",
         json={"key": "test", "name": "测试环境"},
     )
+    denied_sync = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers/{uuid4()}/sync-tools"
+    )
     allowed_view = client.get(f"/api/v1/projects/{project.id}/tool-registry/catalog")
 
     assert denied_write.status_code == 403
+    assert denied_sync.status_code == 403
     assert allowed_view.status_code == 200
 
 
