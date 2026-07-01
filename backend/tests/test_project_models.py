@@ -17,6 +17,16 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "tool_registry_shell_templates",
         "tool_registry_tool_groups",
         "workflow_drafts",
+        "knowledge_acl_entries",
+        "knowledge_bases",
+        "knowledge_chunks",
+        "knowledge_document_versions",
+        "knowledge_documents",
+        "retrieval_eval_cases",
+        "retrieval_eval_datasets",
+        "retrieval_query_logs",
+        "agent_memories",
+        "run_lessons",
     }
 
     assert expected_tables.issubset(Base.metadata.tables)
@@ -32,6 +42,16 @@ def test_project_scoped_tables_have_project_id() -> None:
         "tool_registry_shell_templates",
         "tool_registry_tool_groups",
         "workflow_drafts",
+        "knowledge_acl_entries",
+        "knowledge_bases",
+        "knowledge_chunks",
+        "knowledge_document_versions",
+        "knowledge_documents",
+        "retrieval_eval_cases",
+        "retrieval_eval_datasets",
+        "retrieval_query_logs",
+        "agent_memories",
+        "run_lessons",
     }
 
     for table_name in project_scoped_tables:
@@ -49,6 +69,18 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         ("tool_registry_mcp_servers", ("project_id", "server_ref")),
         ("tool_registry_shell_templates", ("project_id", "template_ref", "template_version")),
         ("tool_registry_tool_groups", ("project_id", "group_ref")),
+        ("knowledge_bases", ("project_id", "key")),
+        ("knowledge_documents", ("project_id", "knowledge_base_id", "document_ref")),
+        ("knowledge_document_versions", ("project_id", "document_id", "version")),
+        ("knowledge_chunks", ("project_id", "document_version_id", "chunk_ref")),
+        (
+            "knowledge_acl_entries",
+            ("project_id", "scope_type", "scope_id", "subject_type", "subject_ref"),
+        ),
+        ("retrieval_eval_datasets", ("project_id", "key")),
+        ("retrieval_eval_cases", ("project_id", "dataset_id", "case_ref")),
+        ("agent_memories", ("project_id", "memory_scope", "namespace", "memory_key")),
+        ("run_lessons", ("project_id", "lesson_ref")),
     }
 
     actual: set[tuple[str, tuple[str, ...]]] = set()
