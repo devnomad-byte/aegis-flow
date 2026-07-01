@@ -6,6 +6,7 @@ from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
     get_project_access_provider,
+    get_tool_registry_store,
     get_workflow_draft_store,
 )
 from backend.app.iam.access import AccountPrincipal
@@ -13,7 +14,11 @@ from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
 from backend.app.workflows.dsl import WorkflowDefinition
 from backend.app.workflows.schemas import WorkflowDraftRead
-from backend.app.workflows.yaml_io import WorkflowImportAnalysis, import_workflow_yaml
+from backend.app.workflows.yaml_io import (
+    ProjectResourceCatalog,
+    WorkflowImportAnalysis,
+    import_workflow_yaml,
+)
 from fastapi.testclient import TestClient
 
 
@@ -162,18 +167,30 @@ class InMemoryAuditEventStore:
         )
 
 
+class InMemoryToolRegistryStore:
+    def __init__(self, catalogs: dict[UUID, ProjectResourceCatalog] | None = None) -> None:
+        self.catalogs = catalogs or {}
+
+    async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
+        return self.catalogs.get(project_id, ProjectResourceCatalog())
+
+
 def build_client(
     *,
     account: AccountPrincipal,
     provider: ProjectAccessProvider,
     draft_store: InMemoryWorkflowDraftStore,
     audit_store: InMemoryAuditEventStore,
+    registry_store: InMemoryToolRegistryStore | None = None,
 ) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_account] = lambda: account
     app.dependency_overrides[get_project_access_provider] = lambda: provider
     app.dependency_overrides[get_workflow_draft_store] = lambda: draft_store
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
+    app.dependency_overrides[get_tool_registry_store] = lambda: (
+        registry_store or InMemoryToolRegistryStore()
+    )
     return TestClient(app)
 
 
@@ -299,6 +316,36 @@ def test_import_yaml_preview_requires_write_and_does_not_persist_draft() -> None
     }
     assert draft_store.drafts == {}
     assert [event["action"] for event in audit_store.events] == ["workflow.import_preview"]
+
+
+def test_import_yaml_preview_uses_project_tool_registry_catalog() -> None:
+    project = make_project(permissions=["workflow:view", "workflow:write"])
+    registry_store = InMemoryToolRegistryStore(
+        {
+            project.id: ProjectResourceCatalog(
+                tool_groups=frozenset({"k8s.readonly"}),
+                mcp_servers=frozenset({"mcp-k8s-test"}),
+                shell_templates=frozenset(),
+                environments=frozenset({"test"}),
+            )
+        }
+    )
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        draft_store=InMemoryWorkflowDraftStore(),
+        audit_store=InMemoryAuditEventStore(),
+        registry_store=registry_store,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/workflows/import-yaml/preview",
+        json={"yaml_text": workflow_yaml(project.id)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis"]["missing_references"] == []
+    assert response.json()["analysis"]["can_publish_or_run"] is True
 
 
 def test_import_draft_persists_project_draft_and_exports_round_trippable_yaml() -> None:

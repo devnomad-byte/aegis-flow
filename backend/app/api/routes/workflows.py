@@ -6,11 +6,13 @@ from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
     get_project_access_provider,
+    get_tool_registry_store,
     get_workflow_draft_store,
 )
 from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.tool_registry.store import ToolRegistryStore
 from backend.app.workflows.dsl import WorkflowDefinition
 from backend.app.workflows.schemas import (
     WorkflowDraftListResponse,
@@ -22,7 +24,6 @@ from backend.app.workflows.schemas import (
 )
 from backend.app.workflows.store import WorkflowDraftStore
 from backend.app.workflows.yaml_io import (
-    ProjectResourceCatalog,
     WorkflowImportAnalysis,
     WorkflowYamlError,
     analyze_workflow_import,
@@ -35,6 +36,7 @@ CurrentAccount = Depends(get_current_account)
 ProjectAccess = Depends(get_project_access_provider)
 DraftStore = Depends(get_workflow_draft_store)
 AuditStore = Depends(get_audit_event_store)
+RegistryStore = Depends(get_tool_registry_store)
 
 
 @router.post(
@@ -47,6 +49,7 @@ async def preview_workflow_yaml_import(
     current_account: AccountPrincipal = CurrentAccount,
     project_access: ProjectAccessProvider = ProjectAccess,
     audit_store: AuditEventStore = AuditStore,
+    registry_store: ToolRegistryStore = RegistryStore,
 ) -> WorkflowImportPreviewResponse:
     _require_project_permission(
         project_access,
@@ -54,7 +57,11 @@ async def preview_workflow_yaml_import(
         project_id,
         "workflow:write",
     )
-    workflow, analysis = _parse_workflow_yaml_for_project(project_id, request.yaml_text)
+    workflow, analysis = await _parse_workflow_yaml_for_project(
+        project_id,
+        request.yaml_text,
+        registry_store,
+    )
     await audit_store.record_project_event(
         project_id=project_id,
         actor_id=current_account.account_id,
@@ -82,6 +89,7 @@ async def import_workflow_yaml_as_draft(
     project_access: ProjectAccessProvider = ProjectAccess,
     draft_store: WorkflowDraftStore = DraftStore,
     audit_store: AuditEventStore = AuditStore,
+    registry_store: ToolRegistryStore = RegistryStore,
 ) -> WorkflowDraftRead:
     _require_project_permission(
         project_access,
@@ -89,7 +97,11 @@ async def import_workflow_yaml_as_draft(
         project_id,
         "workflow:write",
     )
-    workflow, analysis = _parse_workflow_yaml_for_project(project_id, request.yaml_text)
+    workflow, analysis = await _parse_workflow_yaml_for_project(
+        project_id,
+        request.yaml_text,
+        registry_store,
+    )
     draft = await draft_store.upsert_project_draft(
         project_id=project_id,
         actor_id=current_account.account_id,
@@ -157,6 +169,7 @@ async def update_workflow_draft(
     project_access: ProjectAccessProvider = ProjectAccess,
     draft_store: WorkflowDraftStore = DraftStore,
     audit_store: AuditEventStore = AuditStore,
+    registry_store: ToolRegistryStore = RegistryStore,
 ) -> WorkflowDraftRead:
     _require_project_permission(
         project_access,
@@ -166,7 +179,10 @@ async def update_workflow_draft(
     )
     workflow = request.definition
     _ensure_workflow_project_matches(project_id, workflow)
-    analysis = analyze_workflow_import(workflow, catalog=_empty_project_resource_catalog())
+    analysis = analyze_workflow_import(
+        workflow,
+        catalog=await registry_store.build_project_resource_catalog(project_id),
+    )
     draft = await draft_store.update_project_draft(
         project_id=project_id,
         draft_id=draft_id,
@@ -279,12 +295,16 @@ def _require_project_permission(
         )
 
 
-def _parse_workflow_yaml_for_project(
+async def _parse_workflow_yaml_for_project(
     project_id: UUID,
     yaml_text: str,
+    registry_store: ToolRegistryStore,
 ) -> tuple[WorkflowDefinition, WorkflowImportAnalysis]:
     try:
-        imported = import_workflow_yaml(yaml_text, catalog=_empty_project_resource_catalog())
+        imported = import_workflow_yaml(
+            yaml_text,
+            catalog=await registry_store.build_project_resource_catalog(project_id),
+        )
     except WorkflowYamlError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -301,10 +321,6 @@ def _ensure_workflow_project_matches(project_id: UUID, workflow: WorkflowDefinit
             status_code=422,
             detail="workflow project_id must match project path",
         )
-
-
-def _empty_project_resource_catalog() -> ProjectResourceCatalog:
-    return ProjectResourceCatalog()
 
 
 def _draft_not_found() -> HTTPException:

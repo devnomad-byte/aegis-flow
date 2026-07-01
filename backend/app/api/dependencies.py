@@ -6,6 +6,8 @@ from backend.app.audit.store import AuditEventStore
 from backend.app.db.session import get_async_session
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
+from backend.app.tool_registry.store import ToolRegistryStore
 from backend.app.workflows.sqlalchemy_store import SqlAlchemyWorkflowDraftStore
 from backend.app.workflows.store import WorkflowDraftStore
 
@@ -36,3 +38,9 @@ def get_audit_event_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> AuditEventStore:
     return SqlAlchemyAuditEventStore(session)
+
+
+def get_tool_registry_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> ToolRegistryStore:
+    return SqlAlchemyToolRegistryStore(session)
