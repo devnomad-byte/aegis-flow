@@ -16,12 +16,14 @@ NodeType = Literal[
 ]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 WorkflowStatus = Literal["draft", "published", "archived"]
+WorkflowInputType = Literal["string", "number", "integer", "boolean", "object", "array"]
 
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+STRICT_MODEL_CONFIG = ConfigDict(frozen=True, extra="forbid")
 
 
 class WorkflowMetadata(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     id: str
     name: str
@@ -30,8 +32,17 @@ class WorkflowMetadata(BaseModel):
     status: WorkflowStatus = "draft"
 
 
+class WorkflowInputDefinition(BaseModel):
+    model_config = STRICT_MODEL_CONFIG
+
+    key: str
+    type: WorkflowInputType
+    required: bool = True
+    description: str = ""
+
+
 class AgentBudget(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     max_iterations: int = Field(default=6, ge=1, le=30)
     max_tool_calls: int = Field(default=5, ge=0, le=100)
@@ -39,7 +50,7 @@ class AgentBudget(BaseModel):
 
 
 class AgentNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     goal: str
     tool_groups: list[str] = Field(default_factory=list)
@@ -48,14 +59,14 @@ class AgentNodeData(BaseModel):
 
 
 class ConditionNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     expression: str
     cases: list[str]
 
 
 class McpToolNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     mcp_server_ref: str
     tool_group_ref: str
@@ -65,7 +76,7 @@ class McpToolNodeData(BaseModel):
 
 
 class HttpNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     action_ref: str
     tool_group_ref: str
@@ -74,7 +85,7 @@ class HttpNodeData(BaseModel):
 
 
 class ShellNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     template_ref: str
     template_version: int = Field(ge=1)
@@ -83,7 +94,7 @@ class ShellNodeData(BaseModel):
 
 
 class HumanApprovalNodeData(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     approval_policy_ref: str
     message_template: str
@@ -102,14 +113,14 @@ NodeData = Annotated[
 
 
 class NodePosition(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     x: float
     y: float
 
 
 class NodeDefinition(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     id: str
     name: str
@@ -138,7 +149,7 @@ class NodeDefinition(BaseModel):
 
 
 class EdgeDefinition(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     source: str
     target: str
@@ -147,7 +158,7 @@ class EdgeDefinition(BaseModel):
 
 
 class WorkflowPolicies(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     default_environment: str = "test"
     max_runtime_seconds: int = Field(default=900, ge=1, le=86400)
@@ -155,7 +166,7 @@ class WorkflowPolicies(BaseModel):
 
 
 class PermissionImpact(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     tool_groups: list[str]
     mcp_servers: list[str]
@@ -166,7 +177,7 @@ class PermissionImpact(BaseModel):
 
 
 class TraceSpanPlan(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     node_id: str
     node_type: NodeType
@@ -174,10 +185,11 @@ class TraceSpanPlan(BaseModel):
 
 
 class WorkflowDefinition(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = STRICT_MODEL_CONFIG
 
     schema_version: Literal["workflow.dsl/v0.1"] = "workflow.dsl/v0.1"
     workflow: WorkflowMetadata
+    inputs: list[WorkflowInputDefinition] = Field(default_factory=list)
     nodes: list[NodeDefinition]
     edges: list[EdgeDefinition]
     policies: WorkflowPolicies = Field(default_factory=WorkflowPolicies)
