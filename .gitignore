@@ -1,0 +1,70 @@
+# Local product and agent planning docs
+AGENTS.md
+产品设计文档.md
+DESIGN.md
+task.md
+docs/01-技术架构选型文档.md
+docs/02-前端设计与技术选型文档.md
+docs/memory/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# Local caches on D drive or workspace
+.cache/
+cache/
+.uv-cache/
+.pip-cache/
+.playwright/
+*.whl
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+logs/
+*.log
+tmp/
+temp/
+artifacts/
+exports/
