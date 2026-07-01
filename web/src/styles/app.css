@@ -1,0 +1,156 @@
+@import "../design/tokens.css";
+@import "tailwindcss";
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background:
+    linear-gradient(rgba(46, 243, 197, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(46, 243, 197, 0.035) 1px, transparent 1px),
+    var(--color-primary);
+  background-size: 32px 32px;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.aegis-shell {
+  display: grid;
+  grid-template-areas:
+    "nav scope inspector"
+    "nav main inspector"
+    "nav timeline inspector";
+  grid-template-columns: var(--shell-sidebar) minmax(0, 1fr) var(--shell-inspector);
+  grid-template-rows: 72px minmax(460px, 1fr) var(--shell-timeline);
+  min-height: 100vh;
+}
+
+.aegis-nav {
+  grid-area: nav;
+  border-right: 1px solid var(--color-border);
+  background: rgba(11, 15, 14, 0.94);
+  padding: var(--space-xl);
+}
+
+.aegis-scope {
+  grid-area: scope;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-glass);
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  justify-content: space-between;
+  min-height: 72px;
+  padding: 0 var(--space-xl);
+}
+
+.aegis-main {
+  grid-area: main;
+  padding: var(--space-xl);
+}
+
+.aegis-inspector {
+  grid-area: inspector;
+  border-left: 1px solid var(--color-border);
+  background: rgba(16, 22, 21, 0.98);
+  padding: var(--space-xl);
+}
+
+.aegis-timeline {
+  grid-area: timeline;
+  border-top: 1px solid var(--color-border);
+  background: rgba(17, 24, 22, 0.96);
+  padding: var(--space-lg) var(--space-xl);
+}
+
+.telemetry {
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.workbench-stage {
+  min-height: 420px;
+  padding: var(--space-xl) 0 0;
+}
+
+.stat-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 28px;
+}
+
+@media (max-width: 1180px) {
+  .aegis-shell {
+    grid-template-areas:
+      "scope"
+      "nav"
+      "main"
+      "inspector"
+      "timeline";
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+  }
+
+  .aegis-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .aegis-scope {
+    align-items: flex-start;
+    flex-direction: column;
+    justify-content: center;
+    padding: var(--space-lg);
+  }
+
+  .aegis-main,
+  .aegis-inspector,
+  .aegis-timeline,
+  .aegis-nav {
+    padding: var(--space-lg);
+  }
+
+  .aegis-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .aegis-main,
+  .aegis-inspector,
+  .aegis-timeline,
+  .aegis-nav,
+  .aegis-scope {
+    padding: var(--space-md);
+  }
+
+  .stat-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

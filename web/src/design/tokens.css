@@ -1,0 +1,38 @@
+:root {
+  --color-primary: #0b0f0e;
+  --color-primary-2: #111816;
+  --color-surface: #101615;
+  --color-surface-high: #18211f;
+  --color-surface-raised: #1d2926;
+  --color-surface-glass: #14201dcc;
+  --color-border: #2b3b36;
+  --color-border-strong: #3e5a52;
+  --color-text: #eaf2ef;
+  --color-text-muted: #9aa8a3;
+  --color-text-soft: #6f817a;
+  --color-accent: #2ef3c5;
+  --color-accent-soft: #124c42;
+  --color-signal: #7ee787;
+  --color-warning: #ffb020;
+  --color-danger: #ff4d5e;
+  --color-info: #60a5fa;
+  --color-neutral: #f5f7f6;
+
+  --font-sans: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Code", monospace;
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+  --shell-sidebar: 264px;
+  --shell-inspector: 360px;
+  --shell-timeline: 220px;
+
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
