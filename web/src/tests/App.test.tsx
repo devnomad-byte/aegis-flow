@@ -10,7 +10,8 @@ describe("App", () => {
     expect(screen.getByText("御流 AegisFlow")).toBeInTheDocument();
     expect(screen.getByText("运维排障项目")).toBeInTheDocument();
     expect(screen.getByText("Workflow Studio")).toBeInTheDocument();
-    expect(screen.getByText("Inspector")).toBeInTheDocument();
+    expect(screen.getByText("Workflow Canvas")).toBeInTheDocument();
+    expect(screen.getByText("导入预览")).toBeInTheDocument();
     expect(screen.getByText("Harness Loop Timeline")).toBeInTheDocument();
   });
 });
