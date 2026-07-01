@@ -5,12 +5,14 @@ from sqlalchemy import UniqueConstraint
 def test_rbac_tables_are_registered_in_metadata() -> None:
     expected_tables = {
         "accounts",
+        "audit_logs",
         "projects",
         "project_members",
         "project_roles",
         "project_permissions",
         "project_role_permissions",
         "project_member_roles",
+        "workflow_drafts",
     }
 
     assert expected_tables.issubset(Base.metadata.tables)
@@ -18,8 +20,10 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
 
 def test_project_scoped_tables_have_project_id() -> None:
     project_scoped_tables = {
+        "audit_logs",
         "project_members",
         "project_roles",
+        "workflow_drafts",
     }
 
     for table_name in project_scoped_tables:

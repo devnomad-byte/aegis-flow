@@ -1,7 +1,15 @@
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.audit.sqlalchemy_store import SqlAlchemyAuditEventStore
+from backend.app.audit.store import AuditEventStore
+from backend.app.db.session import get_async_session
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.workflows.sqlalchemy_store import SqlAlchemyWorkflowDraftStore
+from backend.app.workflows.store import WorkflowDraftStore
+
+AsyncSessionDependency = Depends(get_async_session)
 
 
 def get_current_account() -> AccountPrincipal:
@@ -16,3 +24,15 @@ def get_project_access_provider() -> ProjectAccessProvider:
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="Project access provider is not configured",
     )
+
+
+def get_workflow_draft_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> WorkflowDraftStore:
+    return SqlAlchemyWorkflowDraftStore(session)
+
+
+def get_audit_event_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> AuditEventStore:
+    return SqlAlchemyAuditEventStore(session)
