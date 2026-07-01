@@ -21,9 +21,13 @@ from backend.app.tool_registry.models import (
     ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
     ToolRegistryToolGroup,
+    ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
 )
 from backend.app.tool_registry.schemas import (
+    AuthorizedToolRead,
+    AuthorizedToolsResolveRequest,
+    AuthorizedToolsResolveResponse,
     CredentialAccessIntentRead,
     CredentialRefCreateRequest,
     CredentialRefRead,
@@ -35,6 +39,8 @@ from backend.app.tool_registry.schemas import (
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
+    ToolGroupItemCreateRequest,
+    ToolGroupItemRead,
     ToolGroupRead,
     ToolSyncRunRead,
 )
@@ -52,6 +58,7 @@ ModelT = TypeVar(
     ToolRegistryToolGroup,
     ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
+    ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
     ToolRegistryCredentialRef,
 )
@@ -271,6 +278,164 @@ class SqlAlchemyToolRegistryStore:
         )
         return [ToolDefinitionRead.model_validate(resource) for resource in result.all()]
 
+    async def create_tool_group_item(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+        actor_id: UUID,
+        request: ToolGroupItemCreateRequest,
+    ) -> ToolGroupItemRead:
+        group = await self._get_active_tool_group(project_id, tool_group_id)
+        if group is None:
+            raise ToolRegistryResourceNotFoundError("tool group not found")
+        definition = await self._get_active_tool_definition(project_id, request.tool_definition_id)
+        if definition is None:
+            raise ToolRegistryResourceNotFoundError("tool definition not found")
+
+        effective_risk_level = _highest_risk_level(
+            [group.risk_level, definition.risk_level, request.risk_level_override]
+        )
+        resource = ToolRegistryToolGroupItem(
+            project_id=project_id,
+            tool_group_id=group.id,
+            tool_definition_id=definition.id,
+            group_ref=group.group_ref,
+            tool_ref=definition.tool_ref,
+            server_ref=definition.server_ref,
+            tool_name=definition.tool_name,
+            display_name=definition.display_name,
+            description=definition.description,
+            input_schema=definition.input_schema,
+            output_schema=definition.output_schema,
+            annotations=definition.annotations,
+            risk_level_override=request.risk_level_override,
+            effective_risk_level=effective_risk_level,
+            approval_required=request.approval_required
+            or effective_risk_level in {"high", "critical"},
+            parameter_policy=request.parameter_policy,
+            allowed_role_refs=request.allowed_role_refs,
+            allowed_workflow_refs=request.allowed_workflow_refs,
+            allowed_agent_refs=request.allowed_agent_refs,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        return ToolGroupItemRead.model_validate(await self._insert(resource))
+
+    async def list_tool_group_items(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+    ) -> list[ToolGroupItemRead]:
+        group = await self._get_active_tool_group(project_id, tool_group_id)
+        if group is None:
+            raise ToolRegistryResourceNotFoundError("tool group not found")
+        result = await self._session.scalars(
+            select(ToolRegistryToolGroupItem)
+            .where(
+                ToolRegistryToolGroupItem.project_id == project_id,
+                ToolRegistryToolGroupItem.tool_group_id == tool_group_id,
+                ToolRegistryToolGroupItem.status == "active",
+            )
+            .order_by(ToolRegistryToolGroupItem.tool_ref)
+        )
+        return [ToolGroupItemRead.model_validate(resource) for resource in result.all()]
+
+    async def archive_tool_group_item(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+        item_id: UUID,
+        actor_id: UUID,
+    ) -> ToolGroupItemRead:
+        group = await self._get_active_tool_group(project_id, tool_group_id)
+        if group is None:
+            raise ToolRegistryResourceNotFoundError("tool group not found")
+        item = await self._get_tool_group_item(project_id, tool_group_id, item_id)
+        if item is None:
+            raise ToolRegistryResourceNotFoundError("tool group item not found")
+        item.status = "archived"
+        item.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(item)
+        return ToolGroupItemRead.model_validate(item)
+
+    async def resolve_authorized_tools(
+        self,
+        *,
+        project_id: UUID,
+        request: AuthorizedToolsResolveRequest,
+    ) -> AuthorizedToolsResolveResponse:
+        requested_refs = sorted(set(request.tool_group_refs))
+        if not requested_refs:
+            return AuthorizedToolsResolveResponse(
+                project_id=project_id,
+                workflow_ref=request.workflow_ref,
+                agent_ref=request.agent_ref,
+                role_refs=request.role_refs,
+                tool_group_refs=[],
+                tools=[],
+            )
+
+        result = await self._session.scalars(
+            select(ToolRegistryToolGroupItem)
+            .join(
+                ToolRegistryToolGroup,
+                ToolRegistryToolGroup.id == ToolRegistryToolGroupItem.tool_group_id,
+            )
+            .join(
+                ToolRegistryToolDefinition,
+                ToolRegistryToolDefinition.id == ToolRegistryToolGroupItem.tool_definition_id,
+            )
+            .where(
+                ToolRegistryToolGroupItem.project_id == project_id,
+                ToolRegistryToolGroupItem.status == "active",
+                ToolRegistryToolGroup.status == "active",
+                ToolRegistryToolDefinition.status == "active",
+                ToolRegistryToolGroupItem.group_ref.in_(requested_refs),
+            )
+            .order_by(ToolRegistryToolGroupItem.group_ref, ToolRegistryToolGroupItem.tool_ref)
+        )
+        tools = [
+            AuthorizedToolRead(
+                project_id=item.project_id,
+                tool_group_id=item.tool_group_id,
+                tool_definition_id=item.tool_definition_id,
+                group_ref=item.group_ref,
+                tool_ref=item.tool_ref,
+                server_ref=item.server_ref,
+                tool_name=item.tool_name,
+                display_name=item.display_name,
+                description=item.description,
+                input_schema=item.input_schema,
+                output_schema=item.output_schema,
+                annotations=item.annotations,
+                effective_risk_level=item.effective_risk_level,
+                approval_required=item.approval_required,
+                parameter_policy=item.parameter_policy,
+                allowed_role_refs=item.allowed_role_refs,
+                allowed_workflow_refs=item.allowed_workflow_refs,
+                allowed_agent_refs=item.allowed_agent_refs,
+            )
+            for item in result.all()
+            if _authorized_context_matches(
+                item,
+                workflow_ref=request.workflow_ref,
+                agent_ref=request.agent_ref,
+                role_refs=request.role_refs,
+            )
+        ]
+        return AuthorizedToolsResolveResponse(
+            project_id=project_id,
+            workflow_ref=request.workflow_ref,
+            agent_ref=request.agent_ref,
+            role_refs=request.role_refs,
+            tool_group_refs=requested_refs,
+            tools=tools,
+        )
+
     async def sync_mcp_server_tools(
         self,
         *,
@@ -395,6 +560,55 @@ class SqlAlchemyToolRegistryStore:
                 select(ToolRegistryMcpServer).where(
                     ToolRegistryMcpServer.project_id == project_id,
                     ToolRegistryMcpServer.id == mcp_server_id,
+                )
+            ),
+        )
+
+    async def _get_active_tool_group(
+        self,
+        project_id: UUID,
+        tool_group_id: UUID,
+    ) -> ToolRegistryToolGroup | None:
+        return cast(
+            ToolRegistryToolGroup | None,
+            await self._session.scalar(
+                select(ToolRegistryToolGroup).where(
+                    ToolRegistryToolGroup.project_id == project_id,
+                    ToolRegistryToolGroup.id == tool_group_id,
+                    ToolRegistryToolGroup.status == "active",
+                )
+            ),
+        )
+
+    async def _get_active_tool_definition(
+        self,
+        project_id: UUID,
+        tool_definition_id: UUID,
+    ) -> ToolRegistryToolDefinition | None:
+        return cast(
+            ToolRegistryToolDefinition | None,
+            await self._session.scalar(
+                select(ToolRegistryToolDefinition).where(
+                    ToolRegistryToolDefinition.project_id == project_id,
+                    ToolRegistryToolDefinition.id == tool_definition_id,
+                    ToolRegistryToolDefinition.status == "active",
+                )
+            ),
+        )
+
+    async def _get_tool_group_item(
+        self,
+        project_id: UUID,
+        tool_group_id: UUID,
+        item_id: UUID,
+    ) -> ToolRegistryToolGroupItem | None:
+        return cast(
+            ToolRegistryToolGroupItem | None,
+            await self._session.scalar(
+                select(ToolRegistryToolGroupItem).where(
+                    ToolRegistryToolGroupItem.project_id == project_id,
+                    ToolRegistryToolGroupItem.tool_group_id == tool_group_id,
+                    ToolRegistryToolGroupItem.id == item_id,
                 )
             ),
         )
@@ -569,3 +783,25 @@ class SqlAlchemyToolRegistryStore:
             .order_by(ToolRegistryToolDefinition.tool_name)
         )
         return [ToolDefinitionRead.model_validate(resource) for resource in result.all()]
+
+
+def _highest_risk_level(risk_levels: list[str | None]) -> str:
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    cleaned = [risk_level for risk_level in risk_levels if risk_level]
+    if not cleaned:
+        return "low"
+    return max(cleaned, key=lambda risk_level: order.get(risk_level, 0))
+
+
+def _authorized_context_matches(
+    item: ToolRegistryToolGroupItem,
+    *,
+    workflow_ref: str,
+    agent_ref: str,
+    role_refs: list[str],
+) -> bool:
+    if item.allowed_workflow_refs and workflow_ref not in item.allowed_workflow_refs:
+        return False
+    if item.allowed_agent_refs and agent_ref not in item.allowed_agent_refs:
+        return False
+    return not (item.allowed_role_refs and not set(role_refs).intersection(item.allowed_role_refs))

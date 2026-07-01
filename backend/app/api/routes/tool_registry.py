@@ -15,6 +15,8 @@ from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
+    AuthorizedToolsResolveRequest,
+    AuthorizedToolsResolveResponse,
     CredentialRefCreateRequest,
     CredentialRefRead,
     EnvironmentCreateRequest,
@@ -25,6 +27,8 @@ from backend.app.tool_registry.schemas import (
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
+    ToolGroupItemCreateRequest,
+    ToolGroupItemRead,
     ToolGroupRead,
     ToolRegistryCatalogResponse,
     ToolSyncRunRead,
@@ -391,6 +395,176 @@ async def create_tool_group(
         risk_level=request.risk_level,
     )
     return resource
+
+
+@router.post(
+    "/tool-groups/{tool_group_id}/items",
+    response_model=ToolGroupItemRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tool_group_item(
+    project_id: UUID,
+    tool_group_id: UUID,
+    request: ToolGroupItemCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ToolGroupItemRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        resource = await _create_or_conflict(
+            registry_store.create_tool_group_item(
+                project_id=project_id,
+                tool_group_id=tool_group_id,
+                actor_id=current_account.account_id,
+                request=request,
+            )
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tool group or tool definition not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.tool_group_item.create",
+        target_type="tool_registry_tool_group_item",
+        target_id=str(resource.id),
+        risk_level=resource.effective_risk_level,
+        metadata={
+            "group_ref": resource.group_ref,
+            "tool_ref": resource.tool_ref,
+            "approval_required": resource.approval_required,
+        },
+    )
+    return resource
+
+
+@router.get("/tool-groups/{tool_group_id}/items", response_model=list[ToolGroupItemRead])
+async def list_tool_group_items(
+    project_id: UUID,
+    tool_group_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[ToolGroupItemRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    try:
+        items = await registry_store.list_tool_group_items(
+            project_id=project_id,
+            tool_group_id=tool_group_id,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tool group not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.tool_group_item.list",
+        target_type="tool_registry_tool_group",
+        target_id=str(tool_group_id),
+        risk_level=_highest_risk_level([item.effective_risk_level for item in items]),
+        metadata={"tool_group_item_count": len(items)},
+    )
+    return items
+
+
+@router.delete(
+    "/tool-groups/{tool_group_id}/items/{item_id}",
+    response_model=ToolGroupItemRead,
+)
+async def archive_tool_group_item(
+    project_id: UUID,
+    tool_group_id: UUID,
+    item_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ToolGroupItemRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        resource = await registry_store.archive_tool_group_item(
+            project_id=project_id,
+            tool_group_id=tool_group_id,
+            item_id=item_id,
+            actor_id=current_account.account_id,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tool group item not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.tool_group_item.archive",
+        target_type="tool_registry_tool_group_item",
+        target_id=str(resource.id),
+        risk_level=resource.effective_risk_level,
+        metadata={"group_ref": resource.group_ref, "tool_ref": resource.tool_ref},
+    )
+    return resource
+
+
+@router.post(
+    "/authorized-tools/resolve",
+    response_model=AuthorizedToolsResolveResponse,
+)
+async def resolve_authorized_tools(
+    project_id: UUID,
+    request: AuthorizedToolsResolveRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> AuthorizedToolsResolveResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    response = await registry_store.resolve_authorized_tools(
+        project_id=project_id,
+        request=request,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.authorized_tools.resolve",
+        target_type="tool_registry_authorized_tools",
+        target_id=str(project_id),
+        risk_level=_highest_risk_level([tool.effective_risk_level for tool in response.tools]),
+        metadata={
+            "tool_count": len(response.tools),
+            "tool_group_refs": response.tool_group_refs,
+            "workflow_ref": response.workflow_ref,
+            "agent_ref": response.agent_ref,
+            "role_refs": response.role_refs,
+        },
+    )
+    return response
 
 
 @router.post(

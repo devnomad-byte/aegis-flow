@@ -3,6 +3,8 @@ from uuid import UUID
 
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
+    AuthorizedToolsResolveRequest,
+    AuthorizedToolsResolveResponse,
     CredentialAccessIntentRead,
     CredentialRefCreateRequest,
     CredentialRefRead,
@@ -14,6 +16,8 @@ from backend.app.tool_registry.schemas import (
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
+    ToolGroupItemCreateRequest,
+    ToolGroupItemRead,
     ToolGroupRead,
     ToolSyncRunRead,
 )
@@ -114,6 +118,42 @@ class ToolRegistryStore(Protocol):
         raise NotImplementedError
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
+        raise NotImplementedError
+
+    async def create_tool_group_item(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+        actor_id: UUID,
+        request: ToolGroupItemCreateRequest,
+    ) -> ToolGroupItemRead:
+        raise NotImplementedError
+
+    async def list_tool_group_items(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+    ) -> list[ToolGroupItemRead]:
+        raise NotImplementedError
+
+    async def archive_tool_group_item(
+        self,
+        *,
+        project_id: UUID,
+        tool_group_id: UUID,
+        item_id: UUID,
+        actor_id: UUID,
+    ) -> ToolGroupItemRead:
+        raise NotImplementedError
+
+    async def resolve_authorized_tools(
+        self,
+        *,
+        project_id: UUID,
+        request: AuthorizedToolsResolveRequest,
+    ) -> AuthorizedToolsResolveResponse:
         raise NotImplementedError
 
     async def sync_mcp_server_tools(

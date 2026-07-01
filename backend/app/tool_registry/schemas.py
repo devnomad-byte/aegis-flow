@@ -68,6 +68,18 @@ class ToolGroupCreateRequest(BaseModel):
     description: str = ""
 
 
+class ToolGroupItemCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_definition_id: UUID
+    risk_level_override: RiskLevel | None = None
+    approval_required: bool = False
+    parameter_policy: dict[str, Any] = Field(default_factory=dict)
+    allowed_role_refs: list[str] = Field(default_factory=list)
+    allowed_workflow_refs: list[str] = Field(default_factory=list)
+    allowed_agent_refs: list[str] = Field(default_factory=list)
+
+
 class ShellTemplateCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -134,6 +146,36 @@ class ToolGroupRead(RegistryResourceRead):
     group_ref: str
     risk_level: RiskLevel
     environment_key: str
+
+
+class ToolGroupItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    tool_group_id: UUID
+    tool_definition_id: UUID
+    group_ref: str
+    tool_ref: str
+    server_ref: str
+    tool_name: str
+    display_name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    annotations: dict[str, Any]
+    risk_level_override: RiskLevel | None
+    effective_risk_level: RiskLevel
+    approval_required: bool
+    parameter_policy: dict[str, Any]
+    allowed_role_refs: list[str]
+    allowed_workflow_refs: list[str]
+    allowed_agent_refs: list[str]
+    status: ResourceStatus
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class ShellTemplateRead(RegistryResourceRead):
@@ -235,3 +277,42 @@ class ToolSyncRunRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     tool_definitions: list[ToolDefinitionRead] = Field(default_factory=list)
+
+
+class AuthorizedToolsResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_group_refs: list[str] = Field(default_factory=list)
+    workflow_ref: str = Field(default="", max_length=160)
+    agent_ref: str = Field(default="", max_length=160)
+    role_refs: list[str] = Field(default_factory=list)
+
+
+class AuthorizedToolRead(BaseModel):
+    project_id: UUID
+    tool_group_id: UUID
+    tool_definition_id: UUID
+    group_ref: str
+    tool_ref: str
+    server_ref: str
+    tool_name: str
+    display_name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    annotations: dict[str, Any]
+    effective_risk_level: RiskLevel
+    approval_required: bool
+    parameter_policy: dict[str, Any]
+    allowed_role_refs: list[str]
+    allowed_workflow_refs: list[str]
+    allowed_agent_refs: list[str]
+
+
+class AuthorizedToolsResolveResponse(BaseModel):
+    project_id: UUID
+    workflow_ref: str
+    agent_ref: str
+    role_refs: list[str]
+    tool_group_refs: list[str]
+    tools: list[AuthorizedToolRead]

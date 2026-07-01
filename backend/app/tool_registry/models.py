@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -194,6 +194,58 @@ class ToolRegistryToolDefinition(Base, TimestampMixin):
     sync_version: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryToolGroupItem(Base, TimestampMixin):
+    __tablename__ = "tool_registry_tool_group_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "tool_group_id",
+            "tool_definition_id",
+            name="uq_tool_group_item_project_group_definition",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "group_ref",
+            "tool_ref",
+            name="uq_tool_group_item_project_group_tool_ref",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    tool_group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_tool_groups.id"),
+        nullable=False,
+        index=True,
+    )
+    tool_definition_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_tool_definitions.id"),
+        nullable=False,
+        index=True,
+    )
+    group_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_ref: Mapped[str] = mapped_column(String(260), nullable=False)
+    server_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    output_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    annotations: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    risk_level_override: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    effective_risk_level: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parameter_policy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    allowed_role_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    allowed_workflow_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    allowed_agent_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]
