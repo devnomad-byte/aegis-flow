@@ -50,6 +50,9 @@ plugins = ["pydantic.mypy"]
 testpaths = ["backend/tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+  "integration: tests that require local external services such as Docker",
+]
 
 [tool.coverage.run]
 branch = true
