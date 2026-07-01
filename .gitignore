@@ -5,7 +5,9 @@ DESIGN.md
 task.md
 docs/01-技术架构选型文档.md
 docs/02-前端设计与技术选型文档.md
+docs/features/
 docs/memory/
+docs/superpowers/
 
 # Local environment and secrets
 .env
