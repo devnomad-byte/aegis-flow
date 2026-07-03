@@ -9,6 +9,7 @@ PROJECT_SCOPED_TABLES = {
     "knowledge_documents",
     "retrieval_eval_cases",
     "retrieval_eval_datasets",
+    "retrieval_eval_runs",
     "retrieval_query_logs",
     "agent_memories",
     "run_lessons",
@@ -132,6 +133,29 @@ def test_retrieval_query_logs_have_actor_trace_and_result_metrics() -> None:
     assert required_columns.issubset(table.columns.keys())
 
 
+def test_retrieval_eval_cases_and_runs_capture_quality_metrics() -> None:
+    case_table = Base.metadata.tables["retrieval_eval_cases"]
+    run_table = Base.metadata.tables["retrieval_eval_runs"]
+
+    assert "expected_faithfulness" in case_table.columns
+    assert {
+        "dataset_id",
+        "actor_id",
+        "retrieval_mode",
+        "top_k",
+        "candidate_limit",
+        "case_count",
+        "average_recall_at_k",
+        "average_mrr",
+        "average_context_precision",
+        "average_context_recall",
+        "average_faithfulness",
+        "leakage_count",
+        "deleted_visible_count",
+        "report",
+    }.issubset(run_table.columns.keys())
+
+
 def test_knowledge_memory_indexes_cover_retrieval_hot_paths() -> None:
     indexes = {
         index.name
@@ -146,4 +170,5 @@ def test_knowledge_memory_indexes_cover_retrieval_hot_paths() -> None:
         "ix_agent_memories_project_scope_namespace",
         "ix_run_lessons_project_status_severity",
         "ix_retrieval_query_logs_project_created_at",
+        "ix_retrieval_eval_runs_project_dataset_created_at",
     }.issubset(indexes)

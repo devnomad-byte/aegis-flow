@@ -109,3 +109,10 @@ class RetrievalQueryLogRead(BaseModel):
     updated_by: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class RetrievalEvalMetrics(BaseModel):
+    recall_at_k: float = 0.0
+    mrr: float = 0.0
+    context_precision: float = 0.0
+    context_recall: float = 0.0

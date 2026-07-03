@@ -238,6 +238,39 @@ class RetrievalEvalCase(Base, ProjectAuditMixin):
     expected_chunk_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     expected_answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    expected_faithfulness: Mapped[float | None] = mapped_column(nullable=True)
+
+
+class RetrievalEvalRun(Base, ProjectAuditMixin):
+    __tablename__ = "retrieval_eval_runs"
+    __table_args__ = (
+        Index(
+            "ix_retrieval_eval_runs_project_dataset_created_at",
+            "project_id",
+            "dataset_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    dataset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("retrieval_eval_datasets.id"),
+        nullable=False,
+        index=True,
+    )
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    retrieval_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="hybrid")
+    top_k: Mapped[int] = mapped_column(nullable=False, default=5)
+    candidate_limit: Mapped[int] = mapped_column(nullable=False, default=50)
+    case_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    average_recall_at_k: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    average_mrr: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    average_context_precision: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    average_context_recall: Mapped[float] = mapped_column(nullable=False, default=0.0)
+    average_faithfulness: Mapped[float | None] = mapped_column(nullable=True)
+    leakage_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    deleted_visible_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    report: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class AgentMemory(Base, ProjectAuditMixin, SoftDeleteMixin):

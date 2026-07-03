@@ -10,7 +10,9 @@ from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.knowledge.object_store import build_knowledge_object_store
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from backend.app.knowledge.store import KnowledgeIngestionStore
+from backend.app.retrieval.eval_store import RetrievalEvalStore
 from backend.app.retrieval.milvus_client import build_milvus_retrieval_client
+from backend.app.retrieval.sqlalchemy_eval_store import SqlAlchemyRetrievalEvalStore
 from backend.app.retrieval.sqlalchemy_store import SqlAlchemyRetrievalGatewayStore
 from backend.app.retrieval.store import RetrievalGatewayStore
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient, McpToolCallClient
@@ -66,6 +68,18 @@ def get_retrieval_gateway_store(
     return SqlAlchemyRetrievalGatewayStore(
         session,
         milvus_client=build_milvus_retrieval_client(AppSettings().milvus),
+    )
+
+
+def get_retrieval_eval_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> RetrievalEvalStore:
+    return SqlAlchemyRetrievalEvalStore(
+        session,
+        retrieval_store=SqlAlchemyRetrievalGatewayStore(
+            session,
+            milvus_client=build_milvus_retrieval_client(AppSettings().milvus),
+        ),
     )
 
 
