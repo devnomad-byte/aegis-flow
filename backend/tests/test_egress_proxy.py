@@ -8,6 +8,7 @@ from backend.app.security.egress_proxy import (
     EgressProxyPolicyViolation,
     build_egress_proxy_plan,
 )
+from backend.app.security.egress_proxy_verifier import parse_proxy_audit_events
 
 
 def test_egress_proxy_plan_requires_allowed_target_port() -> None:
@@ -95,3 +96,19 @@ def test_egress_proxy_plan_accepts_aegis_docker_network_only() -> None:
         )
 
     assert exc_info.value.reason_code == "invalid_docker_network"
+
+
+def test_egress_proxy_verifier_parses_sanitized_audit_events() -> None:
+    events = parse_proxy_audit_events(
+        "\n".join(
+            [
+                '{"reason":"allowed","target_host":"api.example.com","target_port":443}',
+                "not-json",
+                '{"reason":"host_not_allowlisted","target_host":"blocked.example.com","target_port":8443}',
+            ]
+        )
+    )
+
+    assert [event.reason for event in events] == ["allowed", "host_not_allowlisted"]
+    assert [event.target_url for event in events] == ["", ""]
+    assert "token" not in str(events).lower()
