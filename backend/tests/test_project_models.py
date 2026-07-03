@@ -38,6 +38,8 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "tool_gateway_approval_tasks",
         "model_gateway_policies",
         "model_gateway_invocations",
+        "prompt_templates",
+        "prompt_template_versions",
     }
 
     assert expected_tables.issubset(Base.metadata.tables)
@@ -74,6 +76,8 @@ def test_project_scoped_tables_have_project_id() -> None:
         "tool_gateway_approval_tasks",
         "model_gateway_policies",
         "model_gateway_invocations",
+        "prompt_templates",
+        "prompt_template_versions",
     }
 
     for table_name in project_scoped_tables:
@@ -117,6 +121,8 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         ("tool_gateway_approval_tasks", ("project_id", "tool_call_id")),
         ("model_gateway_policies", ("project_id", "policy_ref")),
         ("model_gateway_invocations", ("project_id", "invocation_ref")),
+        ("prompt_templates", ("project_id", "template_ref")),
+        ("prompt_template_versions", ("project_id", "template_id", "version")),
     }
 
     actual: set[tuple[str, tuple[str, ...]]] = set()

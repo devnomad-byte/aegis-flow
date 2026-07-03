@@ -6,7 +6,11 @@ from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
 from backend.app.model_gateway.openai_compatible import OpenAICompatibleModelGatewayClient
 from backend.app.model_gateway.runner import LlmNodeRunner, LlmNodeRunRequest
-from backend.app.model_gateway.schemas import ModelGatewayPolicyCreate
+from backend.app.model_gateway.schemas import (
+    ModelGatewayPolicyCreate,
+    PromptTemplateCreate,
+    PromptTemplateVersionCreate,
+)
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
 from backend.app.workflows.dsl import (
     EdgeDefinition,
@@ -62,6 +66,37 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
                 updated_by=actor_id,
             )
         )
+        prompt_template = await store.create_prompt_template(
+            PromptTemplateCreate(
+                project_id=project_id,
+                template_ref="final-acceptance-json",
+                name="Final Acceptance JSON",
+                description="Real provider JSON output validation prompt.",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        await store.create_prompt_template_version(
+            PromptTemplateVersionCreate(
+                project_id=project_id,
+                template_id=prompt_template.id,
+                version="v1",
+                system_prompt=(
+                    "You are a strict integration-test assistant. "
+                    "Return only minified JSON matching the requested schema."
+                ),
+                user_prompt='Return exactly this JSON object: {"result":"aegisflow-llm-node-ok"}',
+                variables=[],
+                output_schema={
+                    "type": "object",
+                    "required": ["result"],
+                    "properties": {"result": {"const": "aegisflow-llm-node-ok"}},
+                    "additionalProperties": False,
+                },
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
         workflow = WorkflowDefinition(
             workflow=WorkflowMetadata(
                 id="real_llm_node",
@@ -77,10 +112,10 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
                     type="llm",
                     data=LlmNodeData(
                         model_policy_ref="default",
-                        system_prompt="You are a terse integration-test assistant.",
-                        user_prompt="Reply with exactly: aegisflow-llm-node-ok",
-                        prompt_version="final-acceptance/v1",
+                        prompt_template_ref="final-acceptance-json",
+                        prompt_version="v1",
                         max_tokens=24,
+                        output_schema_ref="final-acceptance-json-output",
                     ),
                 ),
                 NodeDefinition(id="end_1", name="End", type="end"),
@@ -96,6 +131,7 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
             model_client=OpenAICompatibleModelGatewayClient(
                 settings.model_gateway.openai_compatible,
             ),
+            prompt_store=store,
         )
 
         result = await runner.run(
@@ -113,6 +149,12 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
             project_id=project_id,
             run_id="run-real-llm",
         )
+        filtered_invocations = await store.list_invocations(
+            project_id=project_id,
+            run_id="run-real-llm",
+            node_id="llm_1",
+            trace_id="trace-real-llm",
+        )
 
     await engine.dispose()
 
@@ -121,4 +163,8 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
     assert invocations[0].status == "success"
     assert invocations[0].node_id == "llm_1"
     assert invocations[0].trace_id == "trace-real-llm"
+    assert invocations[0].prompt_version == "v1"
+    assert invocations[0].output_schema_ref == "final-acceptance-json-output"
+    assert invocations[0].schema_validation_status == "passed"
     assert invocations[0].request_hash.startswith("sha256:")
+    assert filtered_invocations == invocations

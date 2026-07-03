@@ -903,6 +903,96 @@ select {
   color: var(--color-text-muted);
 }
 
+.model-trace-panel {
+  background: rgba(16, 22, 21, 0.94);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-lg);
+}
+
+.model-trace-grid {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.model-trace-row {
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.model-trace-success {
+  border-color: rgba(46, 243, 197, 0.48);
+}
+
+.model-trace-failed,
+.model-trace-schema_validation_failed {
+  border-color: rgba(255, 77, 94, 0.62);
+}
+
+.model-trace-budget_exceeded {
+  border-color: rgba(255, 176, 32, 0.62);
+}
+
+.model-trace-row-main {
+  align-items: center;
+  display: flex;
+  gap: var(--space-md);
+  justify-content: space-between;
+}
+
+.model-trace-row-main strong {
+  display: block;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.model-trace-metrics {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.model-trace-hash {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.model-trace-hash code {
+  background: rgba(11, 15, 14, 0.92);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: 8px;
+}
+
+.model-trace-status-success,
+.model-trace-status-passed {
+  background: rgba(46, 243, 197, 0.14);
+  color: var(--color-accent);
+}
+
+.model-trace-status-failed,
+.model-trace-status-schema_validation_failed {
+  background: rgba(255, 77, 94, 0.16);
+  color: var(--color-danger);
+}
+
+.model-trace-status-budget_exceeded {
+  background: rgba(255, 176, 32, 0.16);
+  color: var(--color-warning);
+}
+
 @media (max-width: 1180px) {
   .aegis-shell {
     grid-template-areas:
@@ -966,6 +1056,10 @@ select {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .model-trace-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .global-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1009,6 +1103,7 @@ select {
   .workflow-stats,
   .global-metric-grid,
   .node-detail-grid,
+  .model-trace-metrics,
   .policy-row {
     grid-template-columns: minmax(0, 1fr);
   }

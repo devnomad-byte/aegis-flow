@@ -73,7 +73,8 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
       position: { x: 905, y: 70 },
       data: {
         model_policy_ref: "default",
-        prompt_version: "incident-summary/v1",
+        prompt_template_ref: "incident-summary",
+        prompt_version: "v1",
         temperature: 0,
         max_tokens: 128,
         output_schema_ref: "incident-report/v1",

@@ -321,6 +321,11 @@ function LlmControlsPanel({
         value={data.model_policy_ref ?? "default"}
       />
       <TextControl
+        label="Prompt Template Ref"
+        onChange={(value) => onChange({ prompt_template_ref: value })}
+        value={data.prompt_template_ref ?? ""}
+      />
+      <TextControl
         label="Prompt Version"
         onChange={(value) => onChange({ prompt_version: value })}
         value={data.prompt_version ?? ""}

@@ -19,6 +19,13 @@ from backend.app.model_gateway.schemas import (
     ModelGatewayPolicyListResponse,
     ModelGatewayPolicyRead,
     ModelGatewayPolicyUpsertRequest,
+    PromptTemplateCreate,
+    PromptTemplateCreateRequest,
+    PromptTemplateRead,
+    PromptTemplateVersionCreate,
+    PromptTemplateVersionCreateRequest,
+    PromptTemplateVersionListResponse,
+    PromptTemplateVersionRead,
 )
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
 
@@ -98,6 +105,132 @@ async def upsert_model_gateway_policy(
         },
     )
     return policy
+
+
+@router.post("/prompt-templates", response_model=PromptTemplateRead)
+async def create_prompt_template(
+    project_id: UUID,
+    request: PromptTemplateCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:write",
+    )
+    template = await model_gateway_store.create_prompt_template(
+        PromptTemplateCreate(
+            project_id=project_id,
+            created_by=current_account.account_id,
+            updated_by=current_account.account_id,
+            **request.model_dump(),
+        )
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.template.create",
+        target_type="prompt_template",
+        target_id=str(template.id),
+        metadata={
+            "template_ref": template.template_ref,
+            "status": template.status,
+        },
+    )
+    return template
+
+
+@router.post(
+    "/prompt-templates/{template_ref}/versions",
+    response_model=PromptTemplateVersionRead,
+)
+async def create_prompt_template_version(
+    project_id: UUID,
+    template_ref: str,
+    request: PromptTemplateVersionCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateVersionRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:write",
+    )
+    template = await model_gateway_store.get_prompt_template(
+        project_id=project_id,
+        template_ref=template_ref,
+    )
+    if template is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prompt template not found",
+        )
+    version = await model_gateway_store.create_prompt_template_version(
+        PromptTemplateVersionCreate(
+            project_id=project_id,
+            template_id=template.id,
+            created_by=current_account.account_id,
+            updated_by=current_account.account_id,
+            **request.model_dump(),
+        )
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.version.create",
+        target_type="prompt_template_version",
+        target_id=str(version.id),
+        metadata={
+            "template_ref": template_ref,
+            "version": version.version,
+            "status": version.status,
+            "variables": version.variables,
+        },
+    )
+    return version
+
+
+@router.get(
+    "/prompt-templates/{template_ref}/versions",
+    response_model=PromptTemplateVersionListResponse,
+)
+async def list_prompt_template_versions(
+    project_id: UUID,
+    template_ref: str,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateVersionListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:view",
+    )
+    versions = await model_gateway_store.list_prompt_template_versions(
+        project_id=project_id,
+        template_ref=template_ref,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.version.list",
+        target_type="prompt_template_version",
+        target_id=template_ref,
+        metadata={
+            "template_ref": template_ref,
+            "version_count": len(versions),
+        },
+    )
+    return PromptTemplateVersionListResponse(versions=versions, count=len(versions))
 
 
 @router.get("/invocations", response_model=ModelGatewayInvocationListResponse)

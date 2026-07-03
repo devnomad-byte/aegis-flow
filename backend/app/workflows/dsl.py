@@ -63,12 +63,22 @@ class LlmNodeData(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
     model_policy_ref: str = Field(default="default", min_length=1, max_length=120)
-    system_prompt: str = Field(min_length=1, max_length=20000)
-    user_prompt: str = Field(min_length=1, max_length=20000)
+    prompt_template_ref: str = Field(default="", max_length=120)
+    system_prompt: str = Field(default="", max_length=20000)
+    user_prompt: str = Field(default="", max_length=20000)
     prompt_version: str = Field(default="v1", min_length=1, max_length=160)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=32768)
     output_schema_ref: str = Field(default="", max_length=160)
+    output_schema: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_prompt_source(self) -> "LlmNodeData":
+        if self.prompt_template_ref:
+            return self
+        if not self.system_prompt or not self.user_prompt:
+            raise ValueError("llm node requires prompt_template_ref or inline prompts")
+        return self
 
 
 class ConditionNodeData(BaseModel):

@@ -1,5 +1,10 @@
 export type ModelGatewayPolicyStatus = "active" | "disabled" | "archived";
-export type ModelGatewayInvocationStatus = "success" | "failed" | "budget_exceeded";
+export type ModelGatewayInvocationStatus =
+  | "success"
+  | "failed"
+  | "budget_exceeded"
+  | "schema_validation_failed";
+export type SchemaValidationStatus = "not_applicable" | "passed" | "failed";
 
 export type ModelGatewayPolicy = {
   id: string;
@@ -54,6 +59,9 @@ export type ModelGatewayInvocation = {
   usage: Record<string, unknown>;
   error_type: string;
   error_message: string;
+  output_schema_ref: string;
+  schema_validation_status: SchemaValidationStatus;
+  schema_validation_error: string;
   latency_ms: number;
   created_by: string;
   updated_by: string;

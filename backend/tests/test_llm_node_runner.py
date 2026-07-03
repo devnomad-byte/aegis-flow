@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,11 +12,13 @@ from backend.app.model_gateway.runner import (
     LlmNodeBudgetExceeded,
     LlmNodeRunner,
     LlmNodeRunRequest,
+    LlmNodeStructuredOutputInvalid,
 )
 from backend.app.model_gateway.schemas import (
     ModelGatewayInvocationCreate,
     ModelGatewayInvocationRead,
     ModelGatewayPolicyRead,
+    PromptTemplateVersionRead,
 )
 from backend.app.workflows.dsl import (
     EdgeDefinition,
@@ -57,6 +60,31 @@ class RecordingInvocationStore:
             updated_at=now,
             **request.model_dump(),
         )
+
+
+class RecordingPromptStore:
+    def __init__(self, prompt_version: PromptTemplateVersionRead | None) -> None:
+        self.prompt_version = prompt_version
+        self.requests: list[dict[str, object]] = []
+
+    async def get_prompt_template_version(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        version: str,
+    ) -> PromptTemplateVersionRead | None:
+        self.requests.append(
+            {"project_id": project_id, "template_ref": template_ref, "version": version}
+        )
+        if (
+            self.prompt_version
+            and self.prompt_version.project_id == project_id
+            and self.prompt_version.template_ref == template_ref
+            and self.prompt_version.version == version
+        ):
+            return self.prompt_version
+        return None
 
 
 class RecordingModelClient:
@@ -138,9 +166,10 @@ def make_workflow(project_id: UUID) -> WorkflowDefinition:
                 type="llm",
                 data=LlmNodeData(
                     model_policy_ref="default",
+                    prompt_template_ref="incident-summary",
                     system_prompt="You summarize incidents for project {{project}}.",
                     user_prompt="Incident: {{incident}}",
-                    prompt_version="incident-summary/v1",
+                    prompt_version="v1",
                     max_tokens=64,
                 ),
             ),
@@ -150,6 +179,33 @@ def make_workflow(project_id: UUID) -> WorkflowDefinition:
             EdgeDefinition(source="start_1", target="llm_1"),
             EdgeDefinition(source="llm_1", target="end_1"),
         ],
+    )
+
+
+def make_prompt_version(
+    project_id: UUID,
+    actor_id: UUID,
+    *,
+    system_prompt: str = "Library system {{project}}.",
+    user_prompt: str = "Library incident {{incident}}",
+    output_schema: dict[str, object] | None = None,
+) -> PromptTemplateVersionRead:
+    now = datetime.now(UTC)
+    return PromptTemplateVersionRead(
+        id=uuid4(),
+        project_id=project_id,
+        template_id=uuid4(),
+        template_ref="incident-summary",
+        version="v1",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        variables=["project", "incident"],
+        output_schema=output_schema or {},
+        status="active",
+        created_by=actor_id,
+        updated_by=actor_id,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -164,6 +220,7 @@ async def test_llm_node_runner_calls_gateway_and_records_sanitized_usage() -> No
         policy_store=RecordingPolicyStore(policy),
         invocation_store=invocation_store,
         model_client=model_client,
+        prompt_store=RecordingPromptStore(make_prompt_version(project_id, actor_id)),
     )
 
     result = await runner.run(
@@ -181,9 +238,14 @@ async def test_llm_node_runner_calls_gateway_and_records_sanitized_usage() -> No
     assert result.content == "incident summarized"
     assert result.usage["total_tokens"] == 23
     assert model_client.calls[0]["max_tokens"] == 64
+    messages = cast(list[OpenAICompatibleChatMessage], model_client.calls[0]["messages"])
+    assert messages[0].content == "Library system ops."
+    assert messages[1].content.startswith("Library incident")
     assert invocation_store.records[0].request_hash.startswith("sha256:")
     assert invocation_store.records[0].status == "success"
     assert invocation_store.records[0].usage["total_tokens"] == 23
+    assert invocation_store.records[0].prompt_version == "v1"
+    assert invocation_store.records[0].schema_validation_status == "not_applicable"
     assert "secret" not in invocation_store.records[0].model_dump_json().lower()
 
 
@@ -198,6 +260,7 @@ async def test_llm_node_runner_blocks_before_provider_when_budget_is_exceeded() 
         policy_store=RecordingPolicyStore(policy),
         invocation_store=invocation_store,
         model_client=model_client,
+        prompt_store=RecordingPromptStore(make_prompt_version(project_id, actor_id)),
     )
 
     with pytest.raises(LlmNodeBudgetExceeded):
@@ -227,6 +290,7 @@ async def test_llm_node_runner_redacts_provider_errors_in_invocation_ledger() ->
         policy_store=RecordingPolicyStore(policy),
         invocation_store=invocation_store,
         model_client=FailingModelClient(),
+        prompt_store=RecordingPromptStore(make_prompt_version(project_id, actor_id)),
     )
 
     with pytest.raises(ModelGatewayError, match=r"\[redacted\]"):
@@ -244,3 +308,55 @@ async def test_llm_node_runner_redacts_provider_errors_in_invocation_ledger() ->
 
     assert invocation_store.records[0].status == "failed"
     assert "real-secret" not in invocation_store.records[0].error_message
+
+
+@pytest.mark.asyncio
+async def test_llm_node_runner_records_structured_output_validation_failure() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy = make_policy(project_id, actor_id)
+    invocation_store = RecordingInvocationStore()
+    model_client = RecordingModelClient(
+        OpenAICompatibleChatCompletion(
+            provider="openai-compatible",
+            model="gpt-5.5",
+            content='{"summary": 42}',
+            finish_reason="stop",
+            usage={"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
+            latency_ms=51,
+        )
+    )
+    prompt_version = make_prompt_version(
+        project_id,
+        actor_id,
+        output_schema={
+            "type": "object",
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    runner = LlmNodeRunner(
+        policy_store=RecordingPolicyStore(policy),
+        invocation_store=invocation_store,
+        model_client=model_client,
+        prompt_store=RecordingPromptStore(prompt_version),
+    )
+
+    with pytest.raises(LlmNodeStructuredOutputInvalid):
+        await runner.run(
+            LlmNodeRunRequest(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow=make_workflow(project_id),
+                node_id="llm_1",
+                run_id="run-schema",
+                trace_id="trace-schema",
+                inputs={"project": "ops", "incident": "provider returned malformed JSON"},
+            )
+        )
+
+    assert invocation_store.records[0].status == "schema_validation_failed"
+    assert invocation_store.records[0].schema_validation_status == "failed"
+    assert "summary" in invocation_store.records[0].schema_validation_error
+    assert "provider returned malformed JSON" not in invocation_store.records[0].model_dump_json()

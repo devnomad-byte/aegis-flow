@@ -181,6 +181,9 @@ async def test_model_gateway_invocation_list_filters_project_run_node_and_trace(
     }
     assert payload["invocations"][0]["latency_ms"] == 42
     assert payload["invocations"][0]["request_hash"] == "sha256:abc123"
+    assert payload["invocations"][0]["output_schema_ref"] == "incident-summary-output"
+    assert payload["invocations"][0]["schema_validation_status"] == "passed"
+    assert payload["invocations"][0]["schema_validation_error"] == ""
     assert "raw-provider-token" not in str(payload)
     assert "[redacted]" in payload["invocations"][0]["output_summary"]
     assert "password" not in str(payload).lower()
@@ -299,6 +302,9 @@ async def seed_invocations(
                     request_hash="sha256:abc123",
                     output_summary="safe summary Authorization: Bearer raw-provider-token",
                     usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                    output_schema_ref="incident-summary-output",
+                    schema_validation_status="passed",
+                    schema_validation_error="",
                     latency_ms=42,
                     created_by=actor_id,
                     updated_by=actor_id,

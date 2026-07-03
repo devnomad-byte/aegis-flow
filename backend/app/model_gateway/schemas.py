@@ -6,7 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 JsonObject = dict[str, Any]
 ModelGatewayPolicyStatus = Literal["active", "disabled", "archived"]
-ModelGatewayInvocationStatus = Literal["success", "failed", "budget_exceeded"]
+ModelGatewayInvocationStatus = Literal[
+    "success",
+    "failed",
+    "budget_exceeded",
+    "schema_validation_failed",
+]
+PromptTemplateStatus = Literal["active", "disabled", "archived"]
+SchemaValidationStatus = Literal["not_applicable", "passed", "failed"]
 
 
 class ModelGatewayPolicyCreate(BaseModel):
@@ -73,6 +80,9 @@ class ModelGatewayInvocationCreate(BaseModel):
     usage: JsonObject = Field(default_factory=dict)
     error_type: str = Field(default="", max_length=120)
     error_message: str = Field(default="", max_length=2000)
+    output_schema_ref: str = Field(default="", max_length=160)
+    schema_validation_status: SchemaValidationStatus = "not_applicable"
+    schema_validation_error: str = Field(default="", max_length=2000)
     latency_ms: int = Field(default=0, ge=0)
     created_by: UUID
     updated_by: UUID
@@ -90,4 +100,75 @@ class ModelGatewayInvocationListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     invocations: list[ModelGatewayInvocationRead]
+    count: int
+
+
+class PromptTemplateCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    template_ref: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+    status: PromptTemplateStatus = "active"
+    created_by: UUID
+    updated_by: UUID
+
+
+class PromptTemplateRead(PromptTemplateCreate):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptTemplateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    template_ref: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+    status: PromptTemplateStatus = "active"
+
+
+class PromptTemplateVersionCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    template_id: UUID
+    version: str = Field(min_length=1, max_length=160)
+    system_prompt: str = Field(min_length=1, max_length=20000)
+    user_prompt: str = Field(min_length=1, max_length=20000)
+    variables: list[str] = Field(default_factory=list)
+    output_schema: JsonObject = Field(default_factory=dict)
+    status: PromptTemplateStatus = "active"
+    created_by: UUID
+    updated_by: UUID
+
+
+class PromptTemplateVersionRead(PromptTemplateVersionCreate):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    template_ref: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptTemplateVersionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: str = Field(min_length=1, max_length=160)
+    system_prompt: str = Field(min_length=1, max_length=20000)
+    user_prompt: str = Field(min_length=1, max_length=20000)
+    variables: list[str] = Field(default_factory=list)
+    output_schema: JsonObject = Field(default_factory=dict)
+    status: PromptTemplateStatus = "active"
+
+
+class PromptTemplateVersionListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    versions: list[PromptTemplateVersionRead]
     count: int

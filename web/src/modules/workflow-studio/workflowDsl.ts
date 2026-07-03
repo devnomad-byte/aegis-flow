@@ -112,6 +112,9 @@ export function getLlmNodeData(node: NodeDefinition): LlmNodeData {
 
   return {
     model_policy_ref: asOptionalString(node.data?.model_policy_ref) ?? "default",
+    prompt_template_ref: asOptionalString(node.data?.prompt_template_ref) ?? "",
+    system_prompt: asOptionalString(node.data?.system_prompt) ?? "",
+    user_prompt: asOptionalString(node.data?.user_prompt) ?? "",
     prompt_version: asOptionalString(node.data?.prompt_version) ?? "",
     temperature: asNumber(node.data?.temperature),
     max_tokens: asNumber(node.data?.max_tokens),

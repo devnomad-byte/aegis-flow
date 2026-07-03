@@ -93,10 +93,45 @@ describe("modelGatewayApi", () => {
 
   it("lists invocations with run, node, and trace filters", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ invocations: [], count: 0 }), { status: 200 }),
+      new Response(
+        JSON.stringify({
+          invocations: [
+            {
+              id: "invocation-1",
+              project_id: "ops-command",
+              actor_id: "acct-1",
+              policy_id: "policy-1",
+              policy_ref: "default",
+              invocation_ref: "model_call_run_1",
+              provider: "openai-compatible",
+              model_name: "gpt-5.5",
+              prompt_version: "v1",
+              run_id: "run-1",
+              node_id: "llm_1",
+              trace_id: "trace-1",
+              status: "success",
+              request_hash: "sha256:abc123",
+              output_summary: "safe summary",
+              usage: { total_tokens: 14 },
+              error_type: "",
+              error_message: "",
+              output_schema_ref: "incident-summary-output",
+              schema_validation_status: "passed",
+              schema_validation_error: "",
+              latency_ms: 42,
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-04T00:00:00Z",
+              updated_at: "2026-07-04T00:00:00Z",
+            },
+          ],
+          count: 1,
+        }),
+        { status: 200 },
+      ),
     );
 
-    await listModelGatewayInvocations("ops-command", {
+    const response = await listModelGatewayInvocations("ops-command", {
       run_id: "run-1",
       node_id: "llm_1",
       trace_id: "trace-1",
@@ -105,6 +140,8 @@ describe("modelGatewayApi", () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/model-gateway/invocations?run_id=run-1&node_id=llm_1&trace_id=trace-1",
     );
+    expect(response.invocations[0].schema_validation_status).toBe("passed");
+    expect(response.invocations[0].output_schema_ref).toBe("incident-summary-output");
   });
 
   it("throws a useful error for failed model gateway requests", async () => {

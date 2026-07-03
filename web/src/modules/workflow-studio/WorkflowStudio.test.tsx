@@ -48,8 +48,10 @@ describe("WorkflowStudio", () => {
     expect(screen.getByText("LLM Controls")).toBeInTheDocument();
     await user.clear(screen.getByLabelText("Model Policy Ref"));
     await user.type(screen.getByLabelText("Model Policy Ref"), "prod-fast");
+    await user.clear(screen.getByLabelText("Prompt Template Ref"));
+    await user.type(screen.getByLabelText("Prompt Template Ref"), "incident-summary");
     await user.clear(screen.getByLabelText("Prompt Version"));
-    await user.type(screen.getByLabelText("Prompt Version"), "incident-summary/v2");
+    await user.type(screen.getByLabelText("Prompt Version"), "v2");
     await user.clear(screen.getByLabelText("Max Tokens"));
     await user.type(screen.getByLabelText("Max Tokens"), "256");
     await user.clear(screen.getByLabelText("Output Schema Ref"));
@@ -59,7 +61,8 @@ describe("WorkflowStudio", () => {
 
     const exportedYaml = screen.getByLabelText(/导出的 Workflow YAML|瀵煎嚭鐨.*Workflow YAML/) as HTMLTextAreaElement;
     expect(exportedYaml.value).toContain("model_policy_ref: prod-fast");
-    expect(exportedYaml.value).toContain("prompt_version: incident-summary/v2");
+    expect(exportedYaml.value).toContain("prompt_template_ref: incident-summary");
+    expect(exportedYaml.value).toContain("prompt_version: v2");
     expect(exportedYaml.value).toContain("max_tokens: 256");
     expect(exportedYaml.value).toContain("output_schema_ref: incident-report/v1");
     expect(screen.getByText(/tokens 32/)).toBeInTheDocument();

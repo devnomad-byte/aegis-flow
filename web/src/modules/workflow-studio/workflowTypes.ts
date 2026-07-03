@@ -49,10 +49,14 @@ export type NodeDefinition = {
 
 export type LlmNodeData = {
   model_policy_ref?: string;
+  prompt_template_ref?: string;
+  system_prompt?: string;
+  user_prompt?: string;
   prompt_version?: string;
   temperature?: number;
   max_tokens?: number;
   output_schema_ref?: string;
+  output_schema?: Record<string, unknown>;
   structured_output_placeholder?: string;
 };
 

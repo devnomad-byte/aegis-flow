@@ -40,6 +40,18 @@ describe("App", () => {
     expect(screen.getByText("POLICY EDITOR")).toBeInTheDocument();
   });
 
+  it("renders run observatory for project run detail routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ invocations: [], count: 0 }), { status: 200 }),
+    );
+
+    render(<App initialPath="/projects/ops-command/runs" />);
+
+    expect(await screen.findByText("Run Trace Detail")).toBeInTheDocument();
+    expect(screen.getByText("run-real-llm")).toBeInTheDocument();
+    expect(await screen.findByText("No model invocations for this run scope")).toBeInTheDocument();
+  });
+
   it("shows forbidden instead of global data for regular project members", async () => {
     render(<App account={DEMO_ACCOUNTS.projectMember} initialPath="/global" />);
 

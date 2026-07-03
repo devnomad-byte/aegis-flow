@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema import validate as validate_json_schema
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.model_gateway.openai_compatible import (
@@ -17,6 +19,7 @@ from backend.app.model_gateway.schemas import (
     ModelGatewayInvocationCreate,
     ModelGatewayInvocationRead,
     ModelGatewayPolicyRead,
+    PromptTemplateVersionRead,
 )
 from backend.app.workflows.dsl import LlmNodeData, WorkflowDefinition
 
@@ -29,6 +32,14 @@ class LlmNodePolicyNotFound(ModelGatewayError):
 
 class LlmNodeBudgetExceeded(ModelGatewayError):
     """Raised when an LLM node call would exceed its configured token budget."""
+
+
+class LlmNodePromptNotFound(ModelGatewayError):
+    """Raised when an LLM node references a missing prompt template version."""
+
+
+class LlmNodeStructuredOutputInvalid(ModelGatewayError):
+    """Raised when an LLM node response fails JSON Schema validation."""
 
 
 class ModelPolicyStore(Protocol):
@@ -45,6 +56,16 @@ class ModelInvocationStore(Protocol):
         self,
         request: ModelGatewayInvocationCreate,
     ) -> ModelGatewayInvocationRead: ...
+
+
+class PromptTemplateVersionStore(Protocol):
+    async def get_prompt_template_version(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        version: str,
+    ) -> PromptTemplateVersionRead | None: ...
 
 
 class ChatCompletionClient(Protocol):
@@ -87,6 +108,7 @@ class LlmNodeRunner:
     policy_store: ModelPolicyStore
     invocation_store: ModelInvocationStore
     model_client: ChatCompletionClient
+    prompt_store: PromptTemplateVersionStore | None = None
 
     async def run(self, request: LlmNodeRunRequest) -> LlmNodeRunResult:
         node_data = _load_llm_node_data(request.workflow, request.node_id, request.project_id)
@@ -101,13 +123,18 @@ class LlmNodeRunner:
         if policy.provider != "openai-compatible":
             raise ModelGatewayError(f"unsupported model provider: {policy.provider}")
 
-        system_prompt = _render_template(node_data.system_prompt, request.inputs)
-        user_prompt = _render_template(node_data.user_prompt, request.inputs)
+        prompt_source = await self._load_prompt_source(request, node_data)
+        system_prompt = _render_template(prompt_source.system_prompt, request.inputs)
+        user_prompt = _render_template(prompt_source.user_prompt, request.inputs)
+        output_schema = prompt_source.output_schema or node_data.output_schema
         max_tokens = node_data.max_tokens or policy.max_tokens
         temperature = (
             node_data.temperature if node_data.temperature is not None else policy.temperature
         )
-        prompt_version = node_data.prompt_version or policy.prompt_version
+        prompt_version = (
+            prompt_source.prompt_version or node_data.prompt_version or policy.prompt_version
+        )
+        output_schema_ref = node_data.output_schema_ref or prompt_source.output_schema_ref
         request_hash = _hash_model_request(
             policy_ref=policy.policy_ref,
             node_id=request.node_id,
@@ -134,6 +161,9 @@ class LlmNodeRunner:
                 usage={"estimated_total_tokens": estimated_total_tokens},
                 error_type="budget_exceeded",
                 error_message=message,
+                output_schema_ref=output_schema_ref,
+                schema_validation_status="not_applicable",
+                schema_validation_error="",
                 latency_ms=0,
             )
             raise LlmNodeBudgetExceeded(message)
@@ -161,9 +191,39 @@ class LlmNodeRunner:
                 usage={},
                 error_type=exc.__class__.__name__,
                 error_message=sanitized_error,
+                output_schema_ref=output_schema_ref,
+                schema_validation_status="not_applicable",
+                schema_validation_error="",
                 latency_ms=0,
             )
             raise ModelGatewayError(sanitized_error) from exc
+
+        schema_validation_status = "not_applicable"
+        schema_validation_error = ""
+        if output_schema:
+            try:
+                _validate_structured_output(response.content, output_schema)
+                schema_validation_status = "passed"
+            except LlmNodeStructuredOutputInvalid as exc:
+                schema_validation_status = "failed"
+                schema_validation_error = redact_sensitive_text(str(exc))
+                await self._record_invocation(
+                    request=request,
+                    policy=policy,
+                    invocation_ref=invocation_ref,
+                    prompt_version=prompt_version,
+                    request_hash=request_hash,
+                    status="schema_validation_failed",
+                    output_summary=_summarize_output(response.content),
+                    usage=response.usage,
+                    error_type=exc.__class__.__name__,
+                    error_message=schema_validation_error,
+                    output_schema_ref=output_schema_ref,
+                    schema_validation_status=schema_validation_status,
+                    schema_validation_error=schema_validation_error,
+                    latency_ms=response.latency_ms,
+                )
+                raise
 
         invocation = await self._record_invocation(
             request=request,
@@ -176,6 +236,9 @@ class LlmNodeRunner:
             usage=response.usage,
             error_type="",
             error_message="",
+            output_schema_ref=output_schema_ref,
+            schema_validation_status=schema_validation_status,
+            schema_validation_error=schema_validation_error,
             latency_ms=response.latency_ms,
         )
         return LlmNodeRunResult(
@@ -201,6 +264,9 @@ class LlmNodeRunner:
         usage: dict[str, object],
         error_type: str,
         error_message: str,
+        output_schema_ref: str,
+        schema_validation_status: str,
+        schema_validation_error: str,
         latency_ms: int,
     ) -> ModelGatewayInvocationRead:
         return await self.invocation_store.record_invocation(
@@ -222,11 +288,61 @@ class LlmNodeRunner:
                 usage=usage,
                 error_type=error_type,
                 error_message=redact_sensitive_text(error_message),
+                output_schema_ref=output_schema_ref,
+                schema_validation_status=schema_validation_status,
+                schema_validation_error=redact_sensitive_text(schema_validation_error),
                 latency_ms=latency_ms,
                 created_by=request.actor_id,
                 updated_by=request.actor_id,
             )
         )
+
+    async def _load_prompt_source(
+        self,
+        request: LlmNodeRunRequest,
+        node_data: LlmNodeData,
+    ) -> "_PromptSource":
+        if not node_data.prompt_template_ref:
+            return _PromptSource(
+                system_prompt=node_data.system_prompt,
+                user_prompt=node_data.user_prompt,
+                prompt_version=node_data.prompt_version,
+                output_schema=node_data.output_schema,
+                output_schema_ref=node_data.output_schema_ref,
+            )
+
+        if self.prompt_store is None:
+            raise LlmNodePromptNotFound(
+                f"prompt store is not configured for: {node_data.prompt_template_ref}",
+            )
+
+        prompt_version = await self.prompt_store.get_prompt_template_version(
+            project_id=request.project_id,
+            template_ref=node_data.prompt_template_ref,
+            version=node_data.prompt_version,
+        )
+        if prompt_version is None:
+            prompt_ref = f"{node_data.prompt_template_ref}/{node_data.prompt_version}"
+            raise LlmNodePromptNotFound(
+                f"prompt version not found: {prompt_ref}",
+            )
+
+        return _PromptSource(
+            system_prompt=prompt_version.system_prompt,
+            user_prompt=prompt_version.user_prompt,
+            prompt_version=prompt_version.version,
+            output_schema=prompt_version.output_schema,
+            output_schema_ref=node_data.output_schema_ref or prompt_version.template_ref,
+        )
+
+
+@dataclass(frozen=True)
+class _PromptSource:
+    system_prompt: str
+    user_prompt: str
+    prompt_version: str
+    output_schema: dict[str, object]
+    output_schema_ref: str
 
 
 def _load_llm_node_data(
@@ -284,6 +400,20 @@ def _estimate_tokens(system_prompt: str, user_prompt: str) -> int:
 
 def _summarize_output(content: str) -> str:
     return redact_sensitive_text(content).strip()[:2000]
+
+
+def _validate_structured_output(content: str, schema: dict[str, object]) -> None:
+    try:
+        parsed_output = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise LlmNodeStructuredOutputInvalid("structured output is not valid JSON") from exc
+
+    try:
+        validate_json_schema(instance=parsed_output, schema=schema)
+    except JsonSchemaValidationError as exc:
+        path = ".".join(str(part) for part in exc.absolute_path)
+        prefix = f"{path}: " if path else ""
+        raise LlmNodeStructuredOutputInvalid(f"{prefix}{exc.message}") from exc
 
 
 def _build_invocation_ref(run_id: str, node_id: str) -> str:
