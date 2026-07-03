@@ -1,10 +1,17 @@
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
+LOCAL_ENV_FILES = (".env.local", ".env")
+
 
 class DatabaseSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="DB_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     host: str = "localhost"
     port: int = 5432
@@ -25,7 +32,12 @@ class DatabaseSettings(BaseSettings):
 
 
 class RedisSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="REDIS_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="REDIS_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     host: str = "localhost"
     port: int = 6379
@@ -34,7 +46,12 @@ class RedisSettings(BaseSettings):
 
 
 class S3Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="S3_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="S3_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     enabled: bool = True
     endpoint: str = "http://localhost:9000"
@@ -45,7 +62,12 @@ class S3Settings(BaseSettings):
 
 
 class MilvusSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MILVUS_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MILVUS_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     uri: str = "http://localhost:19530"
     username: str = "root"
@@ -53,13 +75,74 @@ class MilvusSettings(BaseSettings):
 
 
 class SecuritySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SECURITY_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SECURITY_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     access_token_expire_minutes: int = 60
 
 
+class OpenAICompatibleSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+    base_url: str = Field(
+        default="https://api.openai.com",
+        validation_alias=AliasChoices("OPENAI_COMPATIBLE_BASE_URL", "ANTHROPIC_BASE_URL"),
+    )
+    auth_token: SecretStr = Field(
+        default=SecretStr(""),
+        repr=False,
+        validation_alias=AliasChoices("OPENAI_COMPATIBLE_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"),
+    )
+    timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices(
+            "OPENAI_COMPATIBLE_TIMEOUT_SECONDS",
+            "ANTHROPIC_TIMEOUT_SECONDS",
+        ),
+    )
+
+    @property
+    def has_auth_token(self) -> bool:
+        return bool(self.auth_token.get_secret_value().strip())
+
+    @property
+    def chat_completions_url(self) -> str:
+        normalized_base_url = self.base_url.rstrip("/")
+        if normalized_base_url.endswith("/v1"):
+            return f"{normalized_base_url}/chat/completions"
+        return f"{normalized_base_url}/v1/chat/completions"
+
+
+class ModelGatewaySettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="MODEL_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    default_provider: str = "openai-compatible"
+    default_model: str = "gpt-5.5"
+    openai_compatible: OpenAICompatibleSettings = Field(default_factory=OpenAICompatibleSettings)
+
+
 class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "AegisFlow API"
     app_version: str = "0.1.0"
@@ -70,3 +153,4 @@ class AppSettings(BaseSettings):
     s3: S3Settings = Field(default_factory=S3Settings)
     milvus: MilvusSettings = Field(default_factory=MilvusSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    model_gateway: ModelGatewaySettings = Field(default_factory=ModelGatewaySettings)
