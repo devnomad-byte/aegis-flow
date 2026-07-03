@@ -27,6 +27,32 @@ class SqlAlchemyToolInvocationStore:
         await self._session.refresh(invocation)
         return ToolInvocationRead.model_validate(invocation)
 
+    async def list_invocations(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        node_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ToolInvocationRead]:
+        conditions = [ToolGatewayInvocation.project_id == project_id]
+        if run_id is not None:
+            conditions.append(ToolGatewayInvocation.run_id == run_id)
+        if node_id is not None:
+            conditions.append(ToolGatewayInvocation.node_id == node_id)
+        if trace_id is not None:
+            conditions.append(ToolGatewayInvocation.trace_id == trace_id)
+
+        statement = (
+            select(ToolGatewayInvocation)
+            .where(*conditions)
+            .order_by(ToolGatewayInvocation.created_at, ToolGatewayInvocation.id)
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [ToolInvocationRead.model_validate(row) for row in result.scalars()]
+
     async def create_approval_task(
         self,
         request: ToolApprovalTaskCreate,

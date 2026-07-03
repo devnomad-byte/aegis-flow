@@ -143,6 +143,25 @@ class FakeInvocationStore(ToolInvocationStore):
         self.invocations.append(invocation)
         return invocation
 
+    async def list_invocations(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        node_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ToolInvocationRead]:
+        rows = [
+            invocation
+            for invocation in self.invocations
+            if invocation.project_id == project_id
+            and (run_id is None or invocation.run_id == run_id)
+            and (node_id is None or invocation.node_id == node_id)
+            and (trace_id is None or invocation.trace_id == trace_id)
+        ]
+        return rows[:limit]
+
     async def create_approval_task(
         self,
         request: ToolApprovalTaskCreate,

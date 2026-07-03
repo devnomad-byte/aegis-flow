@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
@@ -18,17 +17,11 @@ from backend.app.security.egress_proxy import (
     EgressProxyPolicyViolation,
     build_egress_proxy_plan,
 )
+from backend.app.security.redaction import redact_sensitive_text
 
 JsonObject = dict[str, Any]
 
 _DEFAULT_INPUT_SCHEMA: JsonObject = {"type": "object", "properties": {}}
-_SECRET_PATTERNS = [
-    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+"),
-    re.compile(r"(?i)(\bbearer\s+)[^\s,;]+"),
-    re.compile(r"(?i)((?:token|password|secret|api[_-]?key)\s*=\s*)[^&\s,;]+"),
-    re.compile(r"(?i)((?:token|password|secret|api[_-]?key)\s*:\s*)[^&\s,;]+"),
-    re.compile(r"(https?://)([^/\s:@]+):([^/\s@]+)@"),
-]
 
 
 class McpToolListError(RuntimeError):
@@ -165,13 +158,7 @@ def infer_tool_risk_level(annotations: JsonObject) -> str:
 
 
 def sanitize_mcp_error_message(message: str) -> str:
-    sanitized = message
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.startswith("(https?://)"):
-            sanitized = pattern.sub(r"\1[redacted]@", sanitized)
-        else:
-            sanitized = pattern.sub(r"\1[redacted]", sanitized)
-    return sanitized
+    return redact_sensitive_text(message)
 
 
 def tool_schema_hash(tool: McpTool) -> str:

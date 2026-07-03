@@ -103,6 +103,38 @@ class ToolInvocationResponse(BaseModel):
     approval_task: "ToolApprovalTaskRead | None" = None
 
 
+class ToolInvocationTraceRead(BaseModel):
+    id: UUID
+    project_id: UUID
+    tool_ref: str
+    tool_name: str
+    server_ref: str
+    tool_group_refs: list[str]
+    workflow_ref: str
+    agent_ref: str
+    role_refs: list[str]
+    run_id: str
+    node_id: str
+    trace_id: str
+    tool_call_id: str
+    effective_risk_level: RiskLevel
+    approval_required: bool
+    policy_decision: ToolInvocationPolicyDecision
+    status: ToolInvocationStatus
+    input_summary: str
+    output_summary: str
+    error_type: str
+    error_message: str
+    duration_ms: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolInvocationListResponse(BaseModel):
+    invocations: list[ToolInvocationTraceRead]
+    count: int
+
+
 class ToolApprovalTaskCreate(BaseModel):
     project_id: UUID
     invocation_id: UUID

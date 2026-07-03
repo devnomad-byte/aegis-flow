@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from jsonschema import ValidationError, validate
 
 from backend.app.api.dependencies import (
@@ -25,11 +25,13 @@ from backend.app.tool_gateway.schemas import (
     ToolApprovalTaskRead,
     ToolGatewayResult,
     ToolInvocationCreate,
+    ToolInvocationListResponse,
     ToolInvocationPolicyDecision,
     ToolInvocationRead,
     ToolInvocationRequest,
     ToolInvocationResponse,
     ToolInvocationStatus,
+    ToolInvocationTraceRead,
 )
 from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.mcp_client import sanitize_mcp_error_message
@@ -48,6 +50,51 @@ RegistryStore = Depends(get_tool_registry_store)
 InvocationStore = Depends(get_tool_invocation_store)
 AuditStore = Depends(get_audit_event_store)
 McpToolCallClientDependency = Depends(get_mcp_tool_call_client)
+
+
+@router.get("/invocations", response_model=ToolInvocationListResponse)
+async def list_tool_gateway_invocations(
+    project_id: UUID,
+    run_id: str | None = Query(default=None, min_length=1, max_length=160),
+    node_id: str | None = Query(default=None, min_length=1, max_length=160),
+    trace_id: str | None = Query(default=None, min_length=1, max_length=160),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    invocation_store: ToolInvocationStore = InvocationStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ToolInvocationListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    invocations = await invocation_store.list_invocations(
+        project_id=project_id,
+        run_id=run_id,
+        node_id=node_id,
+        trace_id=trace_id,
+        limit=limit,
+    )
+    sanitized_invocations = [_sanitize_invocation(invocation) for invocation in invocations]
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_gateway.invocation.list",
+        target_type="tool_gateway_invocation",
+        target_id=str(project_id),
+        metadata={
+            "invocation_count": len(sanitized_invocations),
+            "run_id": run_id or "",
+            "node_id": node_id or "",
+            "trace_id": trace_id or "",
+        },
+    )
+    return ToolInvocationListResponse(
+        invocations=sanitized_invocations,
+        count=len(sanitized_invocations),
+    )
 
 
 @router.post("/invoke", response_model=ToolInvocationResponse)
@@ -948,3 +995,32 @@ def _summarize_payload(payload: Any) -> str:
 
 def _sanitize_error_message(message: str) -> str:
     return sanitize_mcp_error_message(message)
+
+
+def _sanitize_invocation(invocation: ToolInvocationRead) -> ToolInvocationTraceRead:
+    return ToolInvocationTraceRead(
+        id=invocation.id,
+        project_id=invocation.project_id,
+        tool_ref=invocation.tool_ref,
+        tool_name=invocation.tool_name,
+        server_ref=invocation.server_ref,
+        tool_group_refs=invocation.tool_group_refs,
+        workflow_ref=invocation.workflow_ref,
+        agent_ref=invocation.agent_ref,
+        role_refs=invocation.role_refs,
+        run_id=invocation.run_id,
+        node_id=invocation.node_id,
+        trace_id=invocation.trace_id,
+        tool_call_id=invocation.tool_call_id,
+        effective_risk_level=invocation.effective_risk_level,
+        approval_required=invocation.approval_required,
+        policy_decision=invocation.policy_decision,
+        status=invocation.status,
+        input_summary=_sanitize_error_message(invocation.input_summary),
+        output_summary=_sanitize_error_message(invocation.output_summary),
+        error_type=invocation.error_type,
+        error_message=_sanitize_error_message(invocation.error_message),
+        duration_ms=invocation.duration_ms,
+        created_at=invocation.created_at,
+        updated_at=invocation.updated_at,
+    )

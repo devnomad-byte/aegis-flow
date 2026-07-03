@@ -1,4 +1,3 @@
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -7,21 +6,18 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.settings import OpenAICompatibleSettings
+from backend.app.security.redaction import redact_sensitive_text as _redact_sensitive_text
 
 JsonObject = dict[str, Any]
 ChatRole = Literal["system", "user", "assistant", "tool"]
 
-_SECRET_PATTERNS = [
-    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+"),
-    re.compile(r"(?i)(\bbearer\s+)[^\s,;]+"),
-    re.compile(r"(?i)((?:token|password|secret|api[_-]?key|auth[_-]?token)\s*=\s*)[^&\s,;]+"),
-    re.compile(r"(?i)((?:token|password|secret|api[_-]?key|auth[_-]?token)\s*:\s*)[^&\s,;]+"),
-    re.compile(r"(https?://)([^/\s:@]+):([^/\s@]+)@"),
-]
-
 
 class ModelGatewayError(RuntimeError):
     """Raised when a model provider request fails."""
+
+
+def redact_sensitive_text(message: str) -> str:
+    return _redact_sensitive_text(message)
 
 
 class OpenAICompatibleModelGatewaySettings(OpenAICompatibleSettings):
@@ -137,13 +133,3 @@ def parse_chat_completion_response(
         usage=dict(usage),
         latency_ms=latency_ms,
     )
-
-
-def redact_sensitive_text(message: str) -> str:
-    sanitized = message
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.startswith("(https?://)"):
-            sanitized = pattern.sub(r"\1[redacted]@", sanitized)
-        else:
-            sanitized = pattern.sub(r"\1[redacted]", sanitized)
-    return sanitized

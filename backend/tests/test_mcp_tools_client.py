@@ -90,6 +90,17 @@ def test_sanitize_mcp_error_message_masks_tokens_passwords_and_url_credentials()
     assert message.count("[redacted]") >= 4
 
 
+def test_sanitize_mcp_error_message_masks_json_secret_values() -> None:
+    message = sanitize_mcp_error_message(
+        '{"password":"hunter2","api_key":"key-123","nested":{"auth_token":"tok-456"}}'
+    )
+
+    assert "hunter2" not in message
+    assert "key-123" not in message
+    assert "tok-456" not in message
+    assert message.count("[redacted]") == 3
+
+
 def test_infer_tool_risk_level_treats_unknown_and_open_world_tools_as_medium() -> None:
     assert infer_tool_risk_level({"readOnlyHint": True, "openWorldHint": False}) == "low"
     assert infer_tool_risk_level({"openWorldHint": True}) == "medium"

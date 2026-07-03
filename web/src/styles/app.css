@@ -851,6 +851,11 @@ select {
   color: var(--color-danger);
 }
 
+.preview-alert-success {
+  border-color: rgba(46, 243, 197, 0.58);
+  color: var(--color-accent);
+}
+
 .preview-list {
   display: grid;
   gap: var(--space-xs);
@@ -1315,6 +1320,114 @@ select {
   color: var(--color-warning);
 }
 
+.run-observatory-layout {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
+}
+
+.run-replay-panel,
+.run-evidence-panel {
+  grid-column: 1 / -1;
+}
+
+.run-graph-strip {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.run-graph-node {
+  background: rgba(24, 33, 31, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: var(--space-xs);
+  min-height: 154px;
+  min-width: 0;
+  padding: var(--space-md);
+  position: relative;
+}
+
+.run-graph-node-model {
+  border-color: rgba(72, 210, 255, 0.46);
+}
+
+.run-graph-node-tool {
+  border-color: rgba(46, 243, 197, 0.46);
+}
+
+.run-graph-index {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.run-graph-node strong,
+.run-graph-node code {
+  overflow-wrap: anywhere;
+}
+
+.run-graph-node code {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.run-timeline-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.run-timeline-row {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: 56px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.run-timeline-marker {
+  align-items: center;
+  background: rgba(11, 15, 14, 0.92);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  justify-content: center;
+  min-height: 56px;
+}
+
+.run-timeline-marker span {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.run-timeline-body {
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.run-evidence-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.raw-trace-form {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.raw-trace-form textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
 @media (max-width: 1180px) {
   .aegis-shell {
     grid-template-areas:
@@ -1395,6 +1508,10 @@ select {
 
   .model-trace-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-observatory-layout {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .global-metric-grid {
@@ -1481,7 +1598,8 @@ select {
 
   .project-command-kpis,
   .project-activity-row,
-  .project-approval-row {
+  .project-approval-row,
+  .run-timeline-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

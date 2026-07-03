@@ -370,7 +370,7 @@ def test_audit_export_request_and_raw_trace_access_are_recorded() -> None:
     raw_response = client.post(
         f"/api/v1/projects/{project.id}/audit/raw-trace-access-requests",
         json={
-            "reason": "incident RCA",
+            "reason": 'incident RCA {"password":"hunter2","api_key":"key-123"}',
             "run_id": "run-123",
             "trace_id": "trace-123",
             "target_type": "tool_gateway_invocation",
@@ -390,3 +390,9 @@ def test_audit_export_request_and_raw_trace_access_are_recorded() -> None:
     )
     assert export_event.metadata["reason"] == "quarterly security review"
     assert export_event.metadata["event_count"] == 1
+    raw_trace_event = next(
+        event for event in audit_store.recorded if event.action == "audit.raw_trace.access_request"
+    )
+    assert "hunter2" not in str(raw_trace_event.metadata)
+    assert "key-123" not in str(raw_trace_event.metadata)
+    assert "[redacted]" in str(raw_trace_event.metadata)

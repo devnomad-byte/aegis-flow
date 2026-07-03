@@ -16,6 +16,17 @@ class ToolInvocationStore(Protocol):
     async def record_invocation(self, request: ToolInvocationCreate) -> ToolInvocationRead:
         raise NotImplementedError
 
+    async def list_invocations(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        node_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ToolInvocationRead]:
+        raise NotImplementedError
+
     async def create_approval_task(
         self,
         request: ToolApprovalTaskCreate,

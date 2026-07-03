@@ -19,6 +19,7 @@ from backend.app.audit.schemas import (
 from backend.app.audit.store import AuditEventFilters, AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.security.redaction import redact_sensitive_text
 
 router = APIRouter(tags=["audit"])
 CurrentAccount = Depends(get_current_account)
@@ -118,7 +119,7 @@ async def request_raw_trace_access(
         risk_level="high",
         metadata={
             "request_id": str(request_id),
-            "reason": request.reason,
+            "reason": redact_sensitive_text(request.reason),
             "run_id": request.run_id,
             "trace_id": request.trace_id,
         },

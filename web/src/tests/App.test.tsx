@@ -140,7 +140,8 @@ describe("App", () => {
 
     expect(await screen.findByText("Run Trace Detail")).toBeInTheDocument();
     expect(screen.getByText("run-real-llm")).toBeInTheDocument();
-    expect(await screen.findByText("No model invocations for this run scope")).toBeInTheDocument();
+    expect(screen.getByText("Graph Replay")).toBeInTheDocument();
+    expect(await screen.findByText("No trace events for this run scope")).toBeInTheDocument();
   });
 
   it("shows forbidden instead of global data for regular project members", async () => {
