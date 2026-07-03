@@ -6,8 +6,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.tool_registry.schemas import RiskLevel
 
-ToolInvocationStatus = Literal["success", "failed", "denied"]
-ToolInvocationPolicyDecision = Literal["allowed", "denied"]
+ToolInvocationStatus = Literal[
+    "success",
+    "failed",
+    "denied",
+    "pending_approval",
+    "expired",
+    "cancelled",
+]
+ToolInvocationPolicyDecision = Literal["allowed", "denied", "approval_required"]
+ToolApprovalStatus = Literal["pending", "approved", "rejected", "revoked", "expired", "resumed"]
+ToolApprovalDecisionRead = Literal["approved", "rejected", "revoked"]
 
 
 class ToolInvocationRequest(BaseModel):
@@ -91,3 +100,48 @@ class ToolInvocationResponse(BaseModel):
     trace_id: str
     tool_call_id: str
     result: ToolGatewayResult | None = None
+    approval_task: "ToolApprovalTaskRead | None" = None
+
+
+class ToolApprovalTaskCreate(BaseModel):
+    project_id: UUID
+    invocation_id: UUID
+    requested_by: UUID
+    tool_ref: str
+    tool_name: str
+    server_ref: str
+    tool_group_refs: list[str]
+    workflow_ref: str
+    agent_ref: str
+    role_refs: list[str]
+    run_id: str
+    node_id: str
+    trace_id: str
+    tool_call_id: str
+    effective_risk_level: RiskLevel
+    status: ToolApprovalStatus = "pending"
+    decision: str = ""
+    decision_reason: str = ""
+    request_payload: dict[str, Any]
+    authorized_tool_snapshot: dict[str, Any]
+    expires_at: datetime
+    created_by: UUID
+    updated_by: UUID
+
+
+class ToolApprovalTaskRead(ToolApprovalTaskCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    decided_by: UUID | None = None
+    decided_at: datetime | None = None
+    resumed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ToolApprovalDecisionRead
+    reason: str = Field(min_length=1, max_length=500)

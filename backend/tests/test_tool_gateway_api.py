@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from backend.app.api.dependencies import (
@@ -15,6 +15,9 @@ from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
 from backend.app.tool_gateway.mcp_client import McpToolCallError, McpToolCallResult
 from backend.app.tool_gateway.schemas import (
+    ToolApprovalDecisionRead,
+    ToolApprovalTaskCreate,
+    ToolApprovalTaskRead,
     ToolInvocationCreate,
     ToolInvocationRead,
 )
@@ -127,6 +130,7 @@ class FakeToolRegistryStore:
 class FakeInvocationStore(ToolInvocationStore):
     def __init__(self) -> None:
         self.invocations: list[ToolInvocationRead] = []
+        self.approval_tasks: list[ToolApprovalTaskRead] = []
 
     async def record_invocation(self, request: ToolInvocationCreate) -> ToolInvocationRead:
         now = datetime.now(UTC)
@@ -138,6 +142,127 @@ class FakeInvocationStore(ToolInvocationStore):
         )
         self.invocations.append(invocation)
         return invocation
+
+    async def create_approval_task(
+        self,
+        request: ToolApprovalTaskCreate,
+    ) -> ToolApprovalTaskRead:
+        now = datetime.now(UTC)
+        approval_task = ToolApprovalTaskRead(
+            id=uuid4(),
+            decided_by=None,
+            decided_at=None,
+            resumed_at=None,
+            created_at=now,
+            updated_at=now,
+            **request.model_dump(),
+        )
+        self.approval_tasks.append(approval_task)
+        return approval_task
+
+    async def get_approval_task(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+    ) -> ToolApprovalTaskRead | None:
+        for task in self.approval_tasks:
+            if task.project_id == project_id and task.id == approval_task_id:
+                return task
+        return None
+
+    async def decide_approval_task(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+        actor_id: UUID,
+        decision: ToolApprovalDecisionRead,
+        reason: str,
+    ) -> ToolApprovalTaskRead:
+        for index, task in enumerate(self.approval_tasks):
+            if task.project_id == project_id and task.id == approval_task_id:
+                now = datetime.now(UTC)
+                status_by_decision = {
+                    "approved": "approved",
+                    "rejected": "rejected",
+                    "revoked": "revoked",
+                }
+                updated = task.model_copy(
+                    update={
+                        "status": status_by_decision[decision],
+                        "decision": decision,
+                        "decision_reason": reason,
+                        "decided_by": actor_id,
+                        "decided_at": now,
+                        "updated_by": actor_id,
+                        "updated_at": now,
+                    }
+                )
+                self.approval_tasks[index] = updated
+                return updated
+        raise AssertionError("approval task not found")
+
+    async def update_invocation_status(
+        self,
+        *,
+        project_id: UUID,
+        invocation_id: UUID,
+        actor_id: UUID,
+        status: str,
+        policy_decision: str,
+        output_summary: str,
+        error_type: str = "",
+        error_message: str = "",
+        duration_ms: int | None = None,
+        credential_ref: str = "",
+        secret_lease_id: UUID | None = None,
+        secret_lease_ref: str = "",
+    ) -> ToolInvocationRead:
+        for index, invocation in enumerate(self.invocations):
+            if invocation.project_id == project_id and invocation.id == invocation_id:
+                updated = invocation.model_copy(
+                    update={
+                        "status": status,
+                        "policy_decision": policy_decision,
+                        "output_summary": output_summary,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "duration_ms": invocation.duration_ms
+                        if duration_ms is None
+                        else duration_ms,
+                        "credential_ref": credential_ref or invocation.credential_ref,
+                        "secret_lease_id": secret_lease_id or invocation.secret_lease_id,
+                        "secret_lease_ref": secret_lease_ref or invocation.secret_lease_ref,
+                        "updated_by": actor_id,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+                self.invocations[index] = updated
+                return updated
+        raise AssertionError("invocation not found")
+
+    async def mark_approval_task_resumed(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+        actor_id: UUID,
+    ) -> ToolApprovalTaskRead:
+        for index, task in enumerate(self.approval_tasks):
+            if task.project_id == project_id and task.id == approval_task_id:
+                now = datetime.now(UTC)
+                updated = task.model_copy(
+                    update={
+                        "status": "resumed",
+                        "resumed_at": now,
+                        "updated_by": actor_id,
+                        "updated_at": now,
+                    }
+                )
+                self.approval_tasks[index] = updated
+                return updated
+        raise AssertionError("approval task not found")
 
 
 class FakeMcpToolCallClient:
@@ -270,6 +395,28 @@ def authorized_tool(project_id: UUID) -> AuthorizedToolRead:
     )
 
 
+def high_risk_authorized_tool(project_id: UUID) -> AuthorizedToolRead:
+    tool = authorized_tool(project_id)
+    return tool.model_copy(
+        update={
+            "tool_ref": "mcp-k8s-test.kubectl_delete_pod",
+            "tool_name": "kubectl_delete_pod",
+            "display_name": "删除 Pod",
+            "effective_risk_level": "high",
+            "approval_required": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {"type": "string"},
+                    "pod": {"type": "string"},
+                },
+                "required": ["namespace", "pod"],
+                "additionalProperties": False,
+            },
+        }
+    )
+
+
 def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() -> None:
     account = make_account()
     project = make_project(permissions=["tool-registry:view"])
@@ -329,6 +476,319 @@ def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() 
     assert invocation_store.invocations[0].secret_lease_ref == payload["secret_lease_ref"]
     assert audit_store.events[-1]["action"] == "tool_gateway.invoke"
     assert audit_store.events[-1]["result"] == "success"
+
+
+def test_tool_gateway_blocks_high_risk_tool_and_creates_approval_task() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = high_risk_authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    invocation_store = FakeInvocationStore()
+    audit_store = InMemoryAuditEventStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=audit_store,
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+            "run_id": "run-approval",
+            "node_id": "agent_approval",
+            "trace_id": "trace-approval",
+            "tool_call_id": "call-approval",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "pending_approval"
+    assert payload["policy_decision"] == "approval_required"
+    assert payload["approval_task"]["status"] == "pending"
+    assert payload["approval_task"]["tool_ref"] == tool.tool_ref
+    assert payload["approval_task"]["request_payload"]["arguments"] == {
+        "namespace": "default",
+        "pod": "web-1",
+    }
+    assert call_client.calls == []
+    assert registry_store.secret_leases == []
+    assert invocation_store.invocations[0].status == "pending_approval"
+    assert invocation_store.approval_tasks[0].invocation_id == invocation_store.invocations[0].id
+    assert [event["action"] for event in audit_store.events] == [
+        "tool_gateway.invoke",
+        "tool_gateway.approval.request",
+    ]
+
+
+def test_tool_gateway_resume_approved_high_risk_tool_invocation() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view", "tool-gateway:approve"])
+    tool = high_risk_authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    registry_store.mcp_credentials[(project.id, tool.tool_ref)] = ToolMcpServerCredentialRead(
+        mcp_server_id=uuid4(),
+        server_ref=tool.server_ref,
+        base_url="https://mcp.internal.example/k8s",
+        transport="streamable_http",
+        credential_ref_id=None,
+        credential_ref="",
+    )
+    invocation_store = FakeInvocationStore()
+    audit_store = InMemoryAuditEventStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=audit_store,
+        call_client=call_client,
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+            "run_id": "run-approval",
+            "node_id": "agent_approval",
+            "trace_id": "trace-approval",
+            "tool_call_id": "call-approval",
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+
+    decision_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "approved", "reason": "maintenance window approved"},
+    )
+    resume_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert decision_response.status_code == 200
+    assert decision_response.json()["status"] == "approved"
+    assert resume_response.status_code == 200
+    payload = resume_response.json()
+    assert payload["invocation_id"] == invoke_response.json()["invocation_id"]
+    assert payload["status"] == "success"
+    assert payload["policy_decision"] == "allowed"
+    assert payload["result"]["structured_content"] == {"pods": ["web-1"]}
+    assert len(call_client.calls) == 1
+    assert call_client.calls[0]["tool_name"] == "kubectl_delete_pod"
+    assert invocation_store.approval_tasks[0].status == "resumed"
+    assert audit_store.events[-1]["action"] == "tool_gateway.resume"
+    assert audit_store.events[-1]["result"] == "success"
+
+
+def test_tool_gateway_rejects_resume_for_rejected_approval_without_calling_mcp() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view", "tool-gateway:approve"])
+    tool = high_risk_authorized_tool(project.id)
+    invocation_store = FakeInvocationStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=FakeToolRegistryStore(authorized_tools=[tool]),
+        invocation_store=invocation_store,
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+    client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "rejected", "reason": "unsafe during peak traffic"},
+    )
+
+    resume_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert resume_response.status_code == 409
+    assert call_client.calls == []
+    assert invocation_store.invocations[0].status == "denied"
+
+
+def test_tool_gateway_rejects_resume_for_revoked_approval_without_calling_mcp() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view", "tool-gateway:approve"])
+    tool = high_risk_authorized_tool(project.id)
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=FakeToolRegistryStore(authorized_tools=[tool]),
+        invocation_store=FakeInvocationStore(),
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+    client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "revoked", "reason": "operator cancelled"},
+    )
+
+    resume_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert resume_response.status_code == 409
+    assert call_client.calls == []
+
+
+def test_tool_gateway_marks_expired_approval_when_resume_happens_too_late() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view", "tool-gateway:approve"])
+    tool = high_risk_authorized_tool(project.id)
+    invocation_store = FakeInvocationStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=FakeToolRegistryStore(authorized_tools=[tool]),
+        invocation_store=invocation_store,
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+    client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "approved", "reason": "approved"},
+    )
+    invocation_store.approval_tasks[0] = invocation_store.approval_tasks[0].model_copy(
+        update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+
+    resume_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert resume_response.status_code == 409
+    assert call_client.calls == []
+    assert invocation_store.invocations[0].status == "expired"
+
+
+def test_tool_gateway_rejects_duplicate_resume_without_second_mcp_call() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view", "tool-gateway:approve"])
+    tool = high_risk_authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    registry_store.mcp_credentials[(project.id, tool.tool_ref)] = ToolMcpServerCredentialRead(
+        mcp_server_id=uuid4(),
+        server_ref=tool.server_ref,
+        base_url="https://mcp.internal.example/k8s",
+        transport="streamable_http",
+        credential_ref_id=None,
+        credential_ref="",
+    )
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=FakeInvocationStore(),
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+    client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "approved", "reason": "approved"},
+    )
+
+    first_resume = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+    second_resume = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert first_resume.status_code == 200
+    assert second_resume.status_code == 409
+    assert len(call_client.calls) == 1
+
+
+def test_tool_gateway_requires_approval_permission_to_decide() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = high_risk_authorized_tool(project.id)
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=FakeToolRegistryStore(authorized_tools=[tool]),
+        invocation_store=FakeInvocationStore(),
+        audit_store=InMemoryAuditEventStore(),
+        call_client=FakeMcpToolCallClient(),
+    )
+
+    invoke_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default", "pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+    approval_task_id = invoke_response.json()["approval_task"]["id"]
+
+    decision_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/decide",
+        json={"decision": "approved", "reason": "looks ok"},
+    )
+
+    assert decision_response.status_code == 403
 
 
 def test_tool_gateway_rejects_unauthorized_tool_without_calling_mcp() -> None:
