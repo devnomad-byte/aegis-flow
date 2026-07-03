@@ -61,7 +61,7 @@ class HttpMcpToolCallClient:
         if lease_ref:
             headers["x-aegis-secret-lease"] = lease_ref
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            async with self._build_http_client() as client:
                 response = await client.post(base_url, headers=headers, json=payload)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")
@@ -74,6 +74,9 @@ class HttpMcpToolCallClient:
             raise McpToolCallError(sanitize_mcp_error_message(str(exc))) from exc
         except ValueError as exc:
             raise McpToolCallError("Invalid MCP tools/call JSON response") from exc
+
+    def _build_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False)
 
 
 def parse_tool_call_response(payload: dict[str, Any]) -> McpToolCallResult:

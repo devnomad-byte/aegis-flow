@@ -9,6 +9,7 @@ from backend.app.global_command.sqlalchemy_store import SqlAlchemyGlobalCommandC
 from backend.app.global_command.store import GlobalCommandCenterStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.iam.sqlalchemy_project_access import SqlAlchemyProjectAccessProvider
 from backend.app.knowledge.object_store import build_knowledge_object_store
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from backend.app.knowledge.store import KnowledgeIngestionStore
@@ -36,11 +37,10 @@ def get_current_account() -> AccountPrincipal:
     )
 
 
-def get_project_access_provider() -> ProjectAccessProvider:
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Project access provider is not configured",
-    )
+async def get_project_access_provider(
+    session: AsyncSession = AsyncSessionDependency,
+) -> ProjectAccessProvider:
+    return await SqlAlchemyProjectAccessProvider.load(session)
 
 
 def get_workflow_draft_store(

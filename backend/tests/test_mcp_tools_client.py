@@ -1,4 +1,5 @@
 from backend.app.tool_registry.mcp_client import (
+    HttpMcpToolsClient,
     McpToolListError,
     infer_tool_risk_level,
     parse_tools_list_response,
@@ -92,3 +93,13 @@ def test_infer_tool_risk_level_treats_unknown_and_open_world_tools_as_medium() -
     assert infer_tool_risk_level({"openWorldHint": True}) == "medium"
     assert infer_tool_risk_level({}) == "medium"
     assert infer_tool_risk_level({"destructiveHint": True, "readOnlyHint": True}) == "high"
+
+
+async def test_http_mcp_tools_client_ignores_system_proxy_environment() -> None:
+    client = HttpMcpToolsClient()
+
+    http_client = client._build_http_client()
+    try:
+        assert http_client.trust_env is False
+    finally:
+        await http_client.aclose()
