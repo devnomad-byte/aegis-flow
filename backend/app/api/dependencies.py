@@ -3,9 +3,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.audit.sqlalchemy_store import SqlAlchemyAuditEventStore
 from backend.app.audit.store import AuditEventStore
+from backend.app.core.settings import AppSettings
 from backend.app.db.session import get_async_session
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.knowledge.object_store import build_knowledge_object_store
+from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
+from backend.app.knowledge.store import KnowledgeIngestionStore
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient, McpToolCallClient
 from backend.app.tool_gateway.sqlalchemy_store import SqlAlchemyToolInvocationStore
 from backend.app.tool_gateway.store import ToolInvocationStore
@@ -42,6 +46,15 @@ def get_audit_event_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> AuditEventStore:
     return SqlAlchemyAuditEventStore(session)
+
+
+def get_knowledge_ingestion_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> KnowledgeIngestionStore:
+    return SqlAlchemyKnowledgeIngestionStore(
+        session,
+        object_store=build_knowledge_object_store(AppSettings().s3),
+    )
 
 
 def get_tool_registry_store(
