@@ -42,6 +42,7 @@ async def test_sqlalchemy_model_gateway_store_persists_project_policy_and_invoca
         )
 
         loaded_policy = await store.get_policy(project_id=project_id, policy_ref="default")
+        policies = await store.list_policies(project_id)
         invocation = await store.record_invocation(
             ModelGatewayInvocationCreate(
                 project_id=project_id,
@@ -68,14 +69,22 @@ async def test_sqlalchemy_model_gateway_store_persists_project_policy_and_invoca
             project_id=project_id,
             run_id="run-llm",
         )
+        filtered_invocations = await store.list_invocations(
+            project_id=project_id,
+            run_id="run-llm",
+            node_id="llm_1",
+            trace_id="trace-llm",
+        )
 
     await engine.dispose()
 
     assert loaded_policy is not None
     assert loaded_policy.id == policy.id
+    assert policies == [policy]
     assert invocation.request_hash == "sha256:abc123"
     assert invocation.usage["total_tokens"] == 16
     assert invocations == [invocation]
+    assert filtered_invocations == [invocation]
     assert "Incident: real customer text" not in invocation.model_dump_json()
 
 

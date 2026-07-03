@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
 import { DEMO_ACCOUNTS } from "../shell/session";
@@ -26,6 +26,18 @@ describe("App", () => {
     expect(screen.getByText("Workflow Canvas")).toBeInTheDocument();
     expect(screen.getByText("导入预览")).toBeInTheDocument();
     expect(screen.getByText("Harness Loop Timeline")).toBeInTheDocument();
+  });
+
+  it("renders project model gateway settings for the project settings route", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ policies: [], count: 0 }), { status: 200 }),
+    );
+
+    render(<App initialPath="/projects/ops-command/settings/model-gateway" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model Gateway" })).toBeInTheDocument();
+    expect(screen.getByText("POLICY EDITOR")).toBeInTheDocument();
   });
 
   it("shows forbidden instead of global data for regular project members", async () => {

@@ -6,30 +6,37 @@ import {
   LayoutDashboard,
   MessageSquareText,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
+import { useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { ProjectModelGatewaySettings } from "../modules/model-gateway/ProjectModelGatewaySettings";
 import { WorkflowStudio } from "../modules/workflow-studio/WorkflowStudio";
 import type { AegisRuntime } from "../app/runtime";
 import type { ProjectContext } from "./projectContext";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 
 const navItems = [
-  { label: "Project Command", icon: LayoutDashboard },
-  { label: "Workflow Studio", icon: GitBranch },
-  { label: "Agent Console", icon: Bot },
-  { label: "Tool Registry", icon: Boxes },
-  { label: "Run Observatory", icon: Activity },
-  { label: "Debug Chat", icon: MessageSquareText },
-  { label: "Policy Center", icon: ShieldCheck },
+  { label: "Project Command", icon: LayoutDashboard, route: "workflows" },
+  { label: "Workflow Studio", icon: GitBranch, route: "workflows" },
+  { label: "Agent Console", icon: Bot, route: "workflows" },
+  { label: "Tool Registry", icon: Boxes, route: "workflows" },
+  { label: "Run Observatory", icon: Activity, route: "workflows" },
+  { label: "Debug Chat", icon: MessageSquareText, route: "workflows" },
+  { label: "Policy Center", icon: ShieldCheck, route: "workflows" },
+  { label: "Model Gateway", icon: SlidersHorizontal, route: "model-gateway-settings" },
 ];
 
 type ProjectShellProps = {
   project: ProjectContext;
   runtime: AegisRuntime;
+  view?: "workflows" | "model-gateway-settings";
 };
 
-export function ProjectShell({ project, runtime }: ProjectShellProps) {
+export function ProjectShell({ project, runtime, view = "workflows" }: ProjectShellProps) {
+  const router = useRouter();
+
   useEffect(() => {
     runtime.projectScopeStore.getState().setProject(project);
   }, [project, runtime.projectScopeStore]);
@@ -44,10 +51,27 @@ export function ProjectShell({ project, runtime }: ProjectShellProps) {
         <nav className="shell-nav-list">
           {navItems.map((item) => {
             const Icon = item.icon;
+            const isActive =
+              (view === "workflows" && item.label === "Workflow Studio") ||
+              (view === "model-gateway-settings" && item.route === "model-gateway-settings");
             return (
               <button
-                className={item.label === "Workflow Studio" ? "shell-nav-item shell-nav-item-active" : "shell-nav-item"}
+                className={isActive ? "shell-nav-item shell-nav-item-active" : "shell-nav-item"}
                 key={item.label}
+                onClick={() => {
+                  if (item.route === "model-gateway-settings") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/settings/model-gateway",
+                    });
+                    return;
+                  }
+
+                  void router.navigate({
+                    params: { projectId: project.projectId },
+                    to: "/projects/$projectId/workflows",
+                  });
+                }}
                 type="button"
               >
                 <Icon aria-hidden="true" size={16} />
@@ -75,7 +99,11 @@ export function ProjectShell({ project, runtime }: ProjectShellProps) {
         <ProjectSwitcher currentProject={project} runtime={runtime} />
       </header>
 
-      <WorkflowStudio project={project} />
+      {view === "model-gateway-settings" ? (
+        <ProjectModelGatewaySettings project={project} />
+      ) : (
+        <WorkflowStudio project={project} />
+      )}
     </div>
   );
 }

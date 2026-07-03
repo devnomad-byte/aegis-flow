@@ -51,6 +51,15 @@ class SqlAlchemyModelGatewayStore:
             return None
         return ModelGatewayPolicyRead.model_validate(policy)
 
+    async def list_policies(self, project_id: UUID) -> list[ModelGatewayPolicyRead]:
+        statement = (
+            select(ModelGatewayPolicy)
+            .where(ModelGatewayPolicy.project_id == project_id)
+            .order_by(ModelGatewayPolicy.policy_ref, ModelGatewayPolicy.id)
+        )
+        result = await self._session.execute(statement)
+        return [ModelGatewayPolicyRead.model_validate(policy) for policy in result.scalars().all()]
+
     async def record_invocation(
         self,
         request: ModelGatewayInvocationCreate,
@@ -60,6 +69,35 @@ class SqlAlchemyModelGatewayStore:
         await self._session.commit()
         await self._session.refresh(invocation)
         return ModelGatewayInvocationRead.model_validate(invocation)
+
+    async def list_invocations(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        node_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ModelGatewayInvocationRead]:
+        conditions = [ModelGatewayInvocation.project_id == project_id]
+        if run_id:
+            conditions.append(ModelGatewayInvocation.run_id == run_id)
+        if node_id:
+            conditions.append(ModelGatewayInvocation.node_id == node_id)
+        if trace_id:
+            conditions.append(ModelGatewayInvocation.trace_id == trace_id)
+
+        statement = (
+            select(ModelGatewayInvocation)
+            .where(*conditions)
+            .order_by(ModelGatewayInvocation.created_at.desc(), ModelGatewayInvocation.id)
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [
+            ModelGatewayInvocationRead.model_validate(invocation)
+            for invocation in result.scalars().all()
+        ]
 
     async def list_invocations_for_run(
         self,

@@ -48,7 +48,19 @@ const projectRoute = createRoute({
   component: ProjectRoute,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, forbiddenRoute, globalRoute, projectRoute]);
+const projectModelGatewaySettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/settings/model-gateway",
+  component: ProjectModelGatewaySettingsRoute,
+});
+
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  forbiddenRoute,
+  globalRoute,
+  projectRoute,
+  projectModelGatewaySettingsRoute,
+]);
 
 export function createAegisRouter({ runtime, initialPath }: CreateAegisRouterInput) {
   return createRouter({
@@ -85,4 +97,16 @@ function ProjectRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} />;
+}
+
+function ProjectModelGatewaySettingsRoute() {
+  const context = projectModelGatewaySettingsRoute.useRouteContext();
+  const params = projectModelGatewaySettingsRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="model-gateway-settings" />;
 }

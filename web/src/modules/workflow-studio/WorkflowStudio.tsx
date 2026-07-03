@@ -14,7 +14,9 @@ import { Download, FileSearch, Import, ShieldAlert } from "lucide-react";
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
   buildImportPreviewSummary,
+  getLlmNodeData,
   renameWorkflowNode,
+  updateWorkflowNodeData,
   workflowToFlow,
 } from "./workflowDsl";
 import { exportWorkflowYaml, previewWorkflowImportFromYaml } from "./workflowYaml";
@@ -37,15 +39,36 @@ type TimelineEvent = {
   state: "ok" | "pending" | "blocked";
 };
 
+type LlmTraceEvent = {
+  nodeId: string;
+  status: "success" | "failed" | "budget_exceeded";
+  model: string;
+  requestHash: string;
+  latencyMs: number;
+  totalTokens: number;
+};
+
 const nodeTypes = {
   workflowNode: WorkflowNode,
 };
 
 const initialPreview = previewWorkflowImportFromYaml(SAMPLE_WORKFLOW_YAML, SAMPLE_CATALOG);
+const sampleLlmTraceEvents: LlmTraceEvent[] = [
+  {
+    nodeId: "llm_1",
+    status: "success",
+    model: "gpt-5.5",
+    requestHash: "sha256:sample-llm",
+    latencyMs: 42,
+    totalTokens: 32,
+  },
+];
 
 export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(SAMPLE_WORKFLOW);
-  const [selectedNodeId, setSelectedNodeId] = useState<string>(SAMPLE_WORKFLOW.nodes[1].id);
+  const [selectedNodeId, setSelectedNodeId] = useState<string>(
+    SAMPLE_WORKFLOW.nodes.find((node) => node.type === "llm")?.id ?? SAMPLE_WORKFLOW.nodes[1].id,
+  );
   const [yamlText, setYamlText] = useState(SAMPLE_WORKFLOW_YAML);
   const [preview, setPreview] = useState<WorkflowImportPreview | null>(initialPreview);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -67,6 +90,9 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     [selectedNodeId, workflow.nodes],
   );
   const selectedFlowNode = flow.nodes.find((node) => node.id === selectedNode.id);
+  const selectedLlmTraceEvents = sampleLlmTraceEvents.filter(
+    (event) => event.nodeId === selectedNode.id,
+  );
 
   const handlePreviewImport = useCallback(() => {
     try {
@@ -121,6 +147,15 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const handleNodeNameChange = useCallback(
     (name: string) => {
       setWorkflow((currentWorkflow) => renameWorkflowNode(currentWorkflow, selectedNode.id, name));
+    },
+    [selectedNode.id],
+  );
+
+  const handleNodeDataChange = useCallback(
+    (dataPatch: Record<string, unknown>) => {
+      setWorkflow((currentWorkflow) =>
+        updateWorkflowNodeData(currentWorkflow, selectedNode.id, dataPatch),
+      );
     },
     [selectedNode.id],
   );
@@ -212,6 +247,10 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
           ) : null}
         </section>
 
+        {selectedNode.type === "llm" ? (
+          <LlmControlsPanel node={selectedNode} onChange={handleNodeDataChange} />
+        ) : null}
+
         <section className="inspector-section">
           <label className="field-label" htmlFor="workflow-yaml">
             Workflow YAML
@@ -240,6 +279,18 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
       <section className="aegis-timeline" aria-label="Harness Loop Timeline">
         <div className="telemetry">Harness Loop Timeline</div>
         <div className="timeline-grid">
+          {selectedLlmTraceEvents.map((event) => (
+            <div
+              className={`timeline-row timeline-${event.status === "success" ? "ok" : "blocked"}`}
+              key={`${event.nodeId}-${event.requestHash}`}
+            >
+              <span className="telemetry">{event.model}</span>
+              <span>
+                {event.status} / tokens {event.totalTokens} / {event.latencyMs}ms /{" "}
+                {event.requestHash}
+              </span>
+            </div>
+          ))}
           {timelineEvents.map((event, index) => (
             <div className={`timeline-row timeline-${event.state}`} key={`${event.time}-${event.label}-${index}`}>
               <span className="telemetry">{event.time}</span>
@@ -249,6 +300,118 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
         </div>
       </section>
     </>
+  );
+}
+
+function LlmControlsPanel({
+  node,
+  onChange,
+}: {
+  node: WorkflowDefinition["nodes"][number];
+  onChange: (dataPatch: Record<string, unknown>) => void;
+}) {
+  const data = getLlmNodeData(node);
+
+  return (
+    <section className="inspector-section">
+      <div className="telemetry">LLM Controls</div>
+      <TextControl
+        label="Model Policy Ref"
+        onChange={(value) => onChange({ model_policy_ref: value })}
+        value={data.model_policy_ref ?? "default"}
+      />
+      <TextControl
+        label="Prompt Version"
+        onChange={(value) => onChange({ prompt_version: value })}
+        value={data.prompt_version ?? ""}
+      />
+      <NumberControl
+        label="Temperature"
+        max={2}
+        min={0}
+        onChange={(value) => onChange({ temperature: value })}
+        step={0.1}
+        value={data.temperature ?? 0}
+      />
+      <NumberControl
+        label="Max Tokens"
+        min={1}
+        onChange={(value) => onChange({ max_tokens: value })}
+        value={data.max_tokens ?? 256}
+      />
+      <TextControl
+        label="Output Schema Ref"
+        onChange={(value) => onChange({ output_schema_ref: value })}
+        value={data.output_schema_ref ?? ""}
+      />
+      <label className="field-label" htmlFor="structured-output-placeholder">
+        Structured Output Placeholder
+        <textarea
+          className="yaml-field yaml-field-compact"
+          id="structured-output-placeholder"
+          onChange={(event) => onChange({ structured_output_placeholder: event.target.value })}
+          value={data.structured_output_placeholder ?? ""}
+        />
+      </label>
+    </section>
+  );
+}
+
+function TextControl({
+  label,
+  onChange,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  const id = `llm-${label.toLowerCase().replaceAll(" ", "-")}`;
+
+  return (
+    <label className="field-label" htmlFor={id}>
+      {label}
+      <input
+        className="text-field"
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      />
+    </label>
+  );
+}
+
+function NumberControl({
+  label,
+  max,
+  min,
+  onChange,
+  step,
+  value,
+}: {
+  label: string;
+  max?: number;
+  min: number;
+  onChange: (value: number) => void;
+  step?: number;
+  value: number;
+}) {
+  const id = `llm-${label.toLowerCase().replaceAll(" ", "-")}`;
+
+  return (
+    <label className="field-label" htmlFor={id}>
+      {label}
+      <input
+        className="text-field"
+        id={id}
+        max={max}
+        min={min}
+        onChange={(event) => onChange(Number(event.target.value))}
+        step={step}
+        type="number"
+        value={value}
+      />
+    </label>
   );
 }
 

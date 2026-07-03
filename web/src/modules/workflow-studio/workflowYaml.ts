@@ -17,6 +17,7 @@ const NODE_TYPES: NodeType[] = [
   "start",
   "end",
   "agent",
+  "llm",
   "mcp_tool",
   "shell",
   "http",

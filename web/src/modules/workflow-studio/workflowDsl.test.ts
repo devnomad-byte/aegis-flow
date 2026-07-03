@@ -5,6 +5,7 @@ import {
   buildImportPreviewSummary,
   flowToWorkflow,
   renameWorkflowNode,
+  updateWorkflowNodeData,
   workflowToFlow,
 } from "./workflowDsl";
 import { previewWorkflowImportFromYaml } from "./workflowYaml";
@@ -19,6 +20,7 @@ describe("workflow DSL adapters", () => {
       "agent_1",
       "tool_1",
       "shell_1",
+      "llm_1",
       "end_1",
     ]);
     expect(flow.nodes[1].data.name).toBe("根因分析 Agent");
@@ -52,6 +54,20 @@ describe("workflow DSL adapters", () => {
 
     expect(workflow.nodes.find((node) => node.id === "agent_1")?.id).toBe("agent_1");
     expect(workflow.nodes.find((node) => node.id === "agent_1")?.name).toBe("SRE 分析助手");
+  });
+
+  it("updates LLM node data without changing other nodes", () => {
+    const workflow = updateWorkflowNodeData(SAMPLE_WORKFLOW, "llm_1", {
+      model_policy_ref: "prod-fast",
+      prompt_version: "incident-summary/v2",
+      max_tokens: 256,
+    });
+
+    const llmNode = workflow.nodes.find((node) => node.id === "llm_1");
+    expect(llmNode?.data?.model_policy_ref).toBe("prod-fast");
+    expect(llmNode?.data?.prompt_version).toBe("incident-summary/v2");
+    expect(llmNode?.data?.max_tokens).toBe(256);
+    expect(workflow.nodes.find((node) => node.id === "agent_1")?.id).toBe("agent_1");
   });
 
   it("builds an import preview summary from YAML and project resources", () => {

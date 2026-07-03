@@ -1,6 +1,7 @@
 import type {
   EdgeDefinition,
   ImportPreviewSummary,
+  LlmNodeData,
   MissingResourceReference,
   NodeDefinition,
   ProjectResourceCatalog,
@@ -80,6 +81,43 @@ export function renameWorkflowNode(
   return {
     ...workflow,
     nodes: workflow.nodes.map((node) => (node.id === nodeId ? { ...node, name } : node)),
+  };
+}
+
+export function updateWorkflowNodeData(
+  workflow: WorkflowDefinition,
+  nodeId: string,
+  dataPatch: Record<string, unknown>,
+): WorkflowDefinition {
+  return {
+    ...workflow,
+    nodes: workflow.nodes.map((node) =>
+      node.id === nodeId
+        ? {
+            ...node,
+            data: {
+              ...(node.data ?? {}),
+              ...dataPatch,
+            },
+          }
+        : node,
+    ),
+  };
+}
+
+export function getLlmNodeData(node: NodeDefinition): LlmNodeData {
+  if (node.type !== "llm") {
+    return {};
+  }
+
+  return {
+    model_policy_ref: asOptionalString(node.data?.model_policy_ref) ?? "default",
+    prompt_version: asOptionalString(node.data?.prompt_version) ?? "",
+    temperature: asNumber(node.data?.temperature),
+    max_tokens: asNumber(node.data?.max_tokens),
+    output_schema_ref: asOptionalString(node.data?.output_schema_ref) ?? "",
+    structured_output_placeholder:
+      asOptionalString(node.data?.structured_output_placeholder) ?? "",
   };
 }
 
@@ -209,7 +247,13 @@ function getMissingReferencesForNode(node: NodeDefinition, analysis?: WorkflowIm
 }
 
 function requiresProjectResource(node: NodeDefinition) {
-  return node.type === "agent" || node.type === "mcp_tool" || node.type === "shell" || node.type === "http";
+  return (
+    node.type === "agent" ||
+    node.type === "llm" ||
+    node.type === "mcp_tool" ||
+    node.type === "shell" ||
+    node.type === "http"
+  );
 }
 
 function collectNodeReferences(node: NodeDefinition) {
@@ -244,6 +288,14 @@ function collectNodeReferences(node: NodeDefinition) {
   }
 
   return references;
+}
+
+function asNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function asOptionalString(value: unknown) {
+  return typeof value === "string" ? value : null;
 }
 
 function addMissing(

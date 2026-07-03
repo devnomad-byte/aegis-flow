@@ -12,7 +12,7 @@ from pytest import MonkeyPatch
 def test_openai_compatible_settings_read_local_ai_provider_environment(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gpt.ibigsea.com")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://ai-provider.example.com")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-for-test")
     monkeypatch.setenv("MODEL_DEFAULT_MODEL", "gpt-5.5")
 
@@ -20,7 +20,7 @@ def test_openai_compatible_settings_read_local_ai_provider_environment(
 
     assert settings.model_gateway.default_provider == "openai-compatible"
     assert settings.model_gateway.default_model == "gpt-5.5"
-    assert settings.model_gateway.openai_compatible.base_url == "https://gpt.ibigsea.com"
+    assert settings.model_gateway.openai_compatible.base_url == "https://ai-provider.example.com"
     assert isinstance(settings.model_gateway.openai_compatible.auth_token, SecretStr)
 
     rendered = repr(settings.model_gateway)
@@ -53,11 +53,11 @@ def test_openai_compatible_settings_build_chat_completions_url() -> None:
 
 def test_openai_compatible_settings_appends_v1_for_provider_root_url() -> None:
     settings = OpenAICompatibleModelGatewaySettings(
-        base_url="https://gpt.ibigsea.com",
+        base_url="https://ai-provider.example.com",
         auth_token=SecretStr("token-for-test"),
     )
 
-    assert settings.chat_completions_url == "https://gpt.ibigsea.com/v1/chat/completions"
+    assert settings.chat_completions_url == "https://ai-provider.example.com/v1/chat/completions"
 
 
 def test_redact_sensitive_text_removes_provider_tokens() -> None:

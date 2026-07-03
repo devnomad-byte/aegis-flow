@@ -33,6 +33,26 @@ class ModelGatewayPolicyRead(ModelGatewayPolicyCreate):
     updated_at: datetime
 
 
+class ModelGatewayPolicyUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_ref: str = Field(min_length=1, max_length=120)
+    provider: str = Field(min_length=1, max_length=80)
+    model_name: str = Field(min_length=1, max_length=160)
+    prompt_version: str = Field(default="", max_length=160)
+    temperature: float = Field(default=0.0, ge=0, le=2)
+    max_tokens: int = Field(default=256, ge=1, le=32768)
+    max_total_tokens_per_call: int = Field(default=4096, ge=1, le=1_000_000)
+    status: ModelGatewayPolicyStatus = "active"
+
+
+class ModelGatewayPolicyListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    policies: list[ModelGatewayPolicyRead]
+    count: int
+
+
 class ModelGatewayInvocationCreate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -64,3 +84,10 @@ class ModelGatewayInvocationRead(ModelGatewayInvocationCreate):
     id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class ModelGatewayInvocationListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    invocations: list[ModelGatewayInvocationRead]
+    count: int

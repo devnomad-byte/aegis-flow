@@ -4,6 +4,7 @@ export type NodeType =
   | "start"
   | "end"
   | "agent"
+  | "llm"
   | "mcp_tool"
   | "shell"
   | "http"
@@ -44,6 +45,15 @@ export type NodeDefinition = {
   risk_level?: RiskLevel;
   position?: NodePosition;
   data?: Record<string, unknown>;
+};
+
+export type LlmNodeData = {
+  model_policy_ref?: string;
+  prompt_version?: string;
+  temperature?: number;
+  max_tokens?: number;
+  output_schema_ref?: string;
+  structured_output_placeholder?: string;
 };
 
 export type EdgeDefinition = {
