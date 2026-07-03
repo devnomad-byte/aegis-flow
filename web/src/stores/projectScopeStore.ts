@@ -1,15 +1,17 @@
-import { createStore } from "zustand/vanilla";
+import { createStore, type StoreApi } from "zustand/vanilla";
 
 import { defaultProjectContext, type ProjectContext } from "../shell/projectContext";
 
-type ProjectScopeState = {
+export type ProjectScopeState = {
   project: ProjectContext;
   setProject: (project: ProjectContext) => void;
 };
 
-export function createProjectScopeStore() {
+export type ProjectScopeStore = StoreApi<ProjectScopeState>;
+
+export function createProjectScopeStore(initialProject: ProjectContext = defaultProjectContext) {
   return createStore<ProjectScopeState>((set) => ({
-    project: defaultProjectContext,
+    project: initialProject,
     setProject: (project) => set({ project }),
   }));
 }

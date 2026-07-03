@@ -11,6 +11,9 @@ describe("projectScopeStore", () => {
       projectName: "客服工单项目",
       environment: "test",
       role: "Workflow Builder",
+      status: "active",
+      permissions: ["project:view", "workflow:view"],
+      riskCount: 1,
     });
 
     expect(store.getState().project.projectId).toBe("customer-care");

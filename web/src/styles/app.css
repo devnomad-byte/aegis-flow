@@ -44,6 +44,37 @@ select {
   padding: var(--space-xl);
 }
 
+.shell-title {
+  font-size: 24px;
+  line-height: 1.2;
+  margin: 10px 0 0;
+}
+
+.shell-nav-list {
+  display: grid;
+  gap: var(--space-sm);
+  margin-top: 34px;
+}
+
+.shell-nav-item {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.shell-nav-item-active {
+  background: var(--color-accent-soft);
+  border-color: var(--color-border-strong);
+}
+
 .aegis-scope {
   grid-area: scope;
   border-bottom: 1px solid var(--color-border);
@@ -54,6 +85,40 @@ select {
   justify-content: space-between;
   min-height: 72px;
   padding: 0 var(--space-xl);
+}
+
+.scope-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
+
+.project-switcher {
+  min-width: 260px;
+}
+
+.project-switcher-label {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.project-switcher-select {
+  background: rgba(11, 15, 14, 0.92);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.project-switcher-error {
+  color: var(--color-danger);
+  font-size: 12px;
+  margin-top: var(--space-xs);
 }
 
 .aegis-main {
@@ -91,6 +156,107 @@ select {
 .workbench-stage {
   min-height: 420px;
   padding: var(--space-xl) 0 0;
+}
+
+.global-shell {
+  grid-template-areas:
+    "nav scope scope"
+    "nav main main"
+    "nav main main";
+}
+
+.global-main {
+  display: grid;
+  gap: var(--space-lg);
+  grid-template-rows: max-content max-content;
+}
+
+.global-hero {
+  align-items: center;
+  background:
+    linear-gradient(90deg, rgba(46, 243, 197, 0.12), transparent 48%),
+    rgba(16, 22, 21, 0.92);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  display: flex;
+  justify-content: space-between;
+  min-height: 180px;
+  padding: var(--space-xl);
+}
+
+.global-hero h2 {
+  font-size: 32px;
+  line-height: 1.15;
+  margin: 10px 0 0;
+}
+
+.global-hero p {
+  color: var(--color-text-muted);
+  margin: var(--space-sm) 0 0;
+}
+
+.global-metric-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.global-metric {
+  background: rgba(24, 33, 31, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-sm);
+  min-height: 104px;
+  padding: var(--space-md);
+}
+
+.global-metric strong {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.global-metric-info {
+  border-color: rgba(96, 165, 250, 0.48);
+}
+
+.global-metric-ok {
+  border-color: rgba(126, 231, 135, 0.48);
+}
+
+.global-metric-warning {
+  border-color: rgba(255, 176, 32, 0.52);
+}
+
+.forbidden-screen {
+  align-items: center;
+  background: var(--color-primary);
+  display: grid;
+  min-height: 100vh;
+  padding: var(--space-xl);
+}
+
+.forbidden-panel {
+  align-items: center;
+  border: 1px solid rgba(255, 77, 94, 0.48);
+  border-radius: var(--radius-lg);
+  display: flex;
+  gap: var(--space-lg);
+  margin: 0 auto;
+  max-width: 560px;
+  padding: var(--space-xl);
+}
+
+.forbidden-panel h1 {
+  font-size: 28px;
+  line-height: 1.15;
+  margin: 8px 0;
+}
+
+.forbidden-panel p {
+  color: var(--color-text-muted);
+  margin: 0;
 }
 
 .stat-grid {
@@ -302,6 +468,21 @@ select {
   color: var(--color-danger);
 }
 
+.status-project-active {
+  background: rgba(46, 243, 197, 0.14);
+  color: var(--color-accent);
+}
+
+.status-project-frozen {
+  background: rgba(255, 176, 32, 0.16);
+  color: var(--color-warning);
+}
+
+.status-project-archived {
+  background: rgba(111, 129, 122, 0.18);
+  color: var(--color-text-muted);
+}
+
 .workflow-resource-neutral {
   background: rgba(111, 129, 122, 0.18);
   color: var(--color-text-muted);
@@ -469,6 +650,13 @@ select {
     padding: var(--space-lg);
   }
 
+  .global-shell {
+    grid-template-areas:
+      "scope"
+      "nav"
+      "main";
+  }
+
   .aegis-main,
   .aegis-inspector,
   .aegis-timeline,
@@ -495,6 +683,14 @@ select {
 
   .workflow-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .global-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-switcher {
+    width: 100%;
   }
 
   .workflow-canvas {
@@ -530,8 +726,14 @@ select {
   }
 
   .workflow-stats,
+  .global-metric-grid,
   .node-detail-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .global-hero {
+    align-items: flex-start;
+    display: grid;
   }
 
   .workflow-canvas {

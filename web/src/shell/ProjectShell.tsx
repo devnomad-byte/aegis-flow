@@ -7,9 +7,12 @@ import {
   MessageSquareText,
   ShieldCheck,
 } from "lucide-react";
+import { useEffect } from "react";
 
 import { WorkflowStudio } from "../modules/workflow-studio/WorkflowStudio";
-import { defaultProjectContext } from "./projectContext";
+import type { AegisRuntime } from "../app/runtime";
+import type { ProjectContext } from "./projectContext";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 
 const navItems = [
   { label: "Project Command", icon: LayoutDashboard },
@@ -21,35 +24,31 @@ const navItems = [
   { label: "Policy Center", icon: ShieldCheck },
 ];
 
-export function AppShell() {
-  const project = defaultProjectContext;
+type ProjectShellProps = {
+  project: ProjectContext;
+  runtime: AegisRuntime;
+};
+
+export function ProjectShell({ project, runtime }: ProjectShellProps) {
+  useEffect(() => {
+    runtime.projectScopeStore.getState().setProject(project);
+  }, [project, runtime.projectScopeStore]);
 
   return (
     <div className="aegis-shell">
       <aside className="aegis-nav" aria-label="Project navigation">
         <div>
           <div className="telemetry">AGENT HARNESS PLATFORM</div>
-          <h1 style={{ margin: "10px 0 0", fontSize: 24, lineHeight: 1.2 }}>御流 AegisFlow</h1>
+          <h1 className="shell-title">御流 AegisFlow</h1>
         </div>
-        <nav style={{ display: "grid", gap: 8, marginTop: 34 }}>
+        <nav className="shell-nav-list">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
               <button
+                className={item.label === "Workflow Studio" ? "shell-nav-item shell-nav-item-active" : "shell-nav-item"}
                 key={item.label}
                 type="button"
-                style={{
-                  alignItems: "center",
-                  background: item.label === "Workflow Studio" ? "var(--color-accent-soft)" : "transparent",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: "var(--radius-md)",
-                  color: "var(--color-text)",
-                  display: "flex",
-                  gap: 10,
-                  minHeight: 42,
-                  padding: "0 12px",
-                  textAlign: "left",
-                }}
               >
                 <Icon aria-hidden="true" size={16} />
                 {item.label}
@@ -64,9 +63,16 @@ export function AppShell() {
           <div className="telemetry">PROJECT SCOPE</div>
           <strong>{project.projectName}</strong>
         </div>
-        <div className="telemetry">
-          {project.projectId} / {project.environment.toUpperCase()} / {project.role}
+        <div className="scope-meta">
+          <div className="telemetry">
+            {project.projectId} / {project.environment.toUpperCase()} / {project.role}
+          </div>
+          <span className={`status-pill status-project-${project.status}`}>
+            {project.status}
+          </span>
+          <span className="status-pill status-warning">risk {project.riskCount}</span>
         </div>
+        <ProjectSwitcher currentProject={project} runtime={runtime} />
       </header>
 
       <WorkflowStudio project={project} />

@@ -1,19 +1,11 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
-import { useState } from "react";
 
-export function AppProviders({ children }: PropsWithChildren) {
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: {
-            staleTime: 15_000,
-            retry: 1,
-          },
-        },
-      }),
-  );
+import type { AegisRuntime } from "../runtime";
 
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+export function AppProviders({
+  children,
+  runtime,
+}: PropsWithChildren<{ runtime: AegisRuntime }>) {
+  return <QueryClientProvider client={runtime.queryClient}>{children}</QueryClientProvider>;
 }

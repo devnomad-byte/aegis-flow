@@ -15,3 +15,5 @@ class ResizeObserverMock {
 }
 
 globalThis.ResizeObserver = ResizeObserverMock;
+
+window.scrollTo = () => undefined;
