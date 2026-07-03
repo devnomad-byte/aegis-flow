@@ -1,6 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TypeVar, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +18,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryCredentialRef,
     ToolRegistryEnvironment,
     ToolRegistryMcpServer,
+    ToolRegistrySecretLease,
     ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
     ToolRegistryToolGroup,
@@ -35,6 +36,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    SecretLeaseCreateRequest,
+    SecretLeaseRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
     ToolDefinitionRead,
@@ -61,6 +64,7 @@ ModelT = TypeVar(
     ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
     ToolRegistryCredentialRef,
+    ToolRegistrySecretLease,
 )
 
 
@@ -266,6 +270,88 @@ class SqlAlchemyToolRegistryStore:
         await self._session.commit()
         await self._session.refresh(intent)
         return CredentialAccessIntentRead.model_validate(intent)
+
+    async def create_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+        request: SecretLeaseCreateRequest,
+    ) -> SecretLeaseRead:
+        credential = await self._get_active_credential_ref_by_id(project_id, credential_ref_id)
+        if credential is None:
+            raise ToolRegistryResourceNotFoundError("credential ref not found")
+
+        now = datetime.now(UTC)
+        lease = ToolRegistrySecretLease(
+            project_id=project_id,
+            credential_ref_id=credential.id,
+            credential_ref=credential.credential_ref,
+            provider=credential.provider,
+            external_path=credential.external_path,
+            lease_ref=f"lease_{uuid4().hex}",
+            provider_lease_id="",
+            requester_type=request.requester_type,
+            requester_ref=request.requester_ref,
+            purpose=request.purpose,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            ttl_seconds=request.ttl_seconds,
+            expires_at=now + timedelta(seconds=request.ttl_seconds),
+            revoked_at=None,
+            status="active",
+            denial_reason="",
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        intent = ToolRegistryCredentialAccessIntent(
+            project_id=project_id,
+            credential_ref_id=credential.id,
+            credential_ref=credential.credential_ref,
+            actor_id=actor_id,
+            requester_type=request.requester_type,
+            requester_ref=request.requester_ref,
+            purpose=request.purpose,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            decision="recorded",
+            denial_reason="",
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add_all([lease, intent])
+        await self._session.commit()
+        await self._session.refresh(lease)
+        return SecretLeaseRead.model_validate(lease)
+
+    async def list_project_secret_leases(self, project_id: UUID) -> list[SecretLeaseRead]:
+        result = await self._session.scalars(
+            select(ToolRegistrySecretLease)
+            .where(ToolRegistrySecretLease.project_id == project_id)
+            .order_by(ToolRegistrySecretLease.created_at.desc())
+        )
+        return [SecretLeaseRead.model_validate(resource) for resource in result.all()]
+
+    async def revoke_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        lease_id: UUID,
+        actor_id: UUID,
+    ) -> SecretLeaseRead:
+        lease = await self._get_project_secret_lease(project_id, lease_id)
+        if lease is None:
+            raise ToolRegistryResourceNotFoundError("secret lease not found")
+        if lease.status != "revoked":
+            lease.status = "revoked"
+            lease.revoked_at = datetime.now(UTC)
+        lease.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(lease)
+        return SecretLeaseRead.model_validate(lease)
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
         result = await self._session.scalars(
@@ -624,6 +710,37 @@ class SqlAlchemyToolRegistryStore:
                 select(ToolRegistryCredentialRef).where(
                     ToolRegistryCredentialRef.project_id == project_id,
                     ToolRegistryCredentialRef.id == credential_ref_id,
+                )
+            ),
+        )
+
+    async def _get_active_credential_ref_by_id(
+        self,
+        project_id: UUID,
+        credential_ref_id: UUID,
+    ) -> ToolRegistryCredentialRef | None:
+        return cast(
+            ToolRegistryCredentialRef | None,
+            await self._session.scalar(
+                select(ToolRegistryCredentialRef).where(
+                    ToolRegistryCredentialRef.project_id == project_id,
+                    ToolRegistryCredentialRef.id == credential_ref_id,
+                    ToolRegistryCredentialRef.status == "active",
+                )
+            ),
+        )
+
+    async def _get_project_secret_lease(
+        self,
+        project_id: UUID,
+        lease_id: UUID,
+    ) -> ToolRegistrySecretLease | None:
+        return cast(
+            ToolRegistrySecretLease | None,
+            await self._session.scalar(
+                select(ToolRegistrySecretLease).where(
+                    ToolRegistrySecretLease.project_id == project_id,
+                    ToolRegistrySecretLease.id == lease_id,
                 )
             ),
         )

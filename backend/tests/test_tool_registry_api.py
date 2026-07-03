@@ -21,6 +21,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    SecretLeaseCreateRequest,
+    SecretLeaseRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
     ToolDefinitionRead,
@@ -61,6 +63,7 @@ class InMemoryToolRegistryStore:
         self.catalogs: dict[UUID, ProjectResourceCatalog] = {}
         self.credential_refs: dict[UUID, list[CredentialRefRead]] = {}
         self.credential_access_intents: list[CredentialAccessIntentRead] = []
+        self.secret_leases: dict[UUID, list[SecretLeaseRead]] = {}
         self.tool_definitions: dict[UUID, list[ToolDefinitionRead]] = {}
         self.tool_groups: dict[UUID, list[ToolGroupRead]] = {}
         self.tool_group_items: dict[UUID, list[ToolGroupItemRead]] = {}
@@ -234,6 +237,69 @@ class InMemoryToolRegistryStore:
                 self.credential_access_intents.append(intent)
                 return intent
         raise ToolRegistryResourceNotFoundError("credential ref not found")
+
+    async def create_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+        request: SecretLeaseCreateRequest,
+    ) -> SecretLeaseRead:
+        for credential in self.credential_refs.get(project_id, []):
+            if credential.id == credential_ref_id and credential.status == "active":
+                now = datetime.now(UTC)
+                lease = SecretLeaseRead(
+                    id=uuid4(),
+                    project_id=project_id,
+                    credential_ref_id=credential.id,
+                    credential_ref=credential.credential_ref,
+                    provider=credential.provider,
+                    external_path=credential.external_path,
+                    lease_ref=f"lease-{uuid4().hex}",
+                    provider_lease_id="",
+                    requester_type=request.requester_type,
+                    requester_ref=request.requester_ref,
+                    purpose=request.purpose,
+                    run_id=request.run_id,
+                    node_id=request.node_id,
+                    trace_id=request.trace_id,
+                    ttl_seconds=request.ttl_seconds,
+                    expires_at=now,
+                    revoked_at=None,
+                    status="active",
+                    denial_reason="",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.secret_leases.setdefault(project_id, []).append(lease)
+                return lease
+        raise ToolRegistryResourceNotFoundError("credential ref not found")
+
+    async def list_project_secret_leases(self, project_id: UUID) -> list[SecretLeaseRead]:
+        return self.secret_leases.get(project_id, [])
+
+    async def revoke_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        lease_id: UUID,
+        actor_id: UUID,
+    ) -> SecretLeaseRead:
+        for index, lease in enumerate(self.secret_leases.get(project_id, [])):
+            if lease.id == lease_id:
+                revoked = lease.model_copy(
+                    update={
+                        "status": "revoked",
+                        "revoked_at": datetime.now(UTC),
+                        "updated_by": actor_id,
+                    }
+                )
+                self.secret_leases[project_id][index] = revoked
+                return revoked
+        raise ToolRegistryResourceNotFoundError("secret lease not found")
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:
         return self.tool_definitions.get(project_id, [])
@@ -955,6 +1021,103 @@ def test_tool_registry_resources_bind_credential_refs_without_exposing_secrets()
     assert shell_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
     assert "token-value" not in mcp_response.text
     assert "token-value" not in shell_response.text
+
+
+def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    credential = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs",
+        json={
+            "credential_ref": "vault://ops/k8s/readonly",
+            "name": "K8s 只读凭据",
+            "provider": "external_vault",
+            "external_path": "ops/k8s/readonly",
+            "secret_kind": "bearer_token",
+            "environment_key": "test",
+            "usage_scope": "mcp",
+        },
+    )
+
+    lease_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs/"
+        f"{credential.json()['id']}/leases",
+        json={
+            "requester_type": "tool_gateway",
+            "requester_ref": "mcp-k8s-test.kubectl_get_pods",
+            "purpose": "invoke authorized MCP tool",
+            "run_id": "run-123",
+            "node_id": "agent_1",
+            "trace_id": "trace-123",
+            "ttl_seconds": 900,
+        },
+    )
+    list_response = client.get(f"/api/v1/projects/{project.id}/tool-registry/secret-leases")
+    revoke_response = client.delete(
+        f"/api/v1/projects/{project.id}/tool-registry/secret-leases/{lease_response.json()['id']}"
+    )
+
+    assert lease_response.status_code == 201
+    assert lease_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
+    assert lease_response.json()["provider"] == "external_vault"
+    assert lease_response.json()["ttl_seconds"] == 900
+    assert lease_response.json()["status"] == "active"
+    assert lease_response.json()["lease_ref"].startswith("lease-")
+    assert "secret_value" not in lease_response.text
+    assert "token" not in lease_response.text.lower()
+    assert "password" not in lease_response.text.lower()
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["lease_ref"] == lease_response.json()["lease_ref"]
+    assert revoke_response.status_code == 200
+    assert revoke_response.json()["status"] == "revoked"
+    assert revoke_response.json()["revoked_at"] is not None
+    assert [event["action"] for event in audit_store.events][-3:] == [
+        "tool_registry.secret_lease.create",
+        "tool_registry.secret_lease.list",
+        "tool_registry.secret_lease.revoke",
+    ]
+
+
+def test_tool_registry_secret_lease_is_project_scoped() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    other_project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project, other_project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+    other_credential = client.post(
+        f"/api/v1/projects/{other_project.id}/tool-registry/credential-refs",
+        json={
+            "credential_ref": "vault://other/prod/admin",
+            "name": "Other Admin",
+            "provider": "external_vault",
+            "external_path": "other/prod/admin",
+            "secret_kind": "bearer_token",
+            "environment_key": "prod",
+            "usage_scope": "mcp",
+        },
+    )
+
+    denied = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/credential-refs/"
+        f"{other_credential.json()['id']}/leases",
+        json={
+            "requester_type": "tool_gateway",
+            "purpose": "cross project attempt",
+            "ttl_seconds": 300,
+        },
+    )
+
+    assert denied.status_code == 404
 
 
 def test_tool_registry_sync_failure_returns_sanitized_error_and_audit_failure() -> None:

@@ -12,6 +12,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    SecretLeaseCreateRequest,
+    SecretLeaseRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
     ToolDefinitionRead,
@@ -115,6 +117,28 @@ class ToolRegistryStore(Protocol):
         node_id: str = "",
         trace_id: str = "",
     ) -> CredentialAccessIntentRead:
+        raise NotImplementedError
+
+    async def create_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+        request: SecretLeaseCreateRequest,
+    ) -> SecretLeaseRead:
+        raise NotImplementedError
+
+    async def list_project_secret_leases(self, project_id: UUID) -> list[SecretLeaseRead]:
+        raise NotImplementedError
+
+    async def revoke_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        lease_id: UUID,
+        actor_id: UUID,
+    ) -> SecretLeaseRead:
         raise NotImplementedError
 
     async def list_project_tool_definitions(self, project_id: UUID) -> list[ToolDefinitionRead]:

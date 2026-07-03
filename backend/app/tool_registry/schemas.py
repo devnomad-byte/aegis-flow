@@ -32,6 +32,7 @@ DataClassification = Literal["internal", "confidential", "restricted", "secret"]
 CredentialStatus = Literal["active", "archived", "disabled"]
 CredentialRequesterType = Literal["tool_gateway", "execution_gateway", "api", "system"]
 CredentialAccessDecision = Literal["recorded", "denied"]
+SecretLeaseStatus = Literal["active", "revoked", "expired", "denied"]
 
 
 class ToolRegistryCatalogResponse(BaseModel):
@@ -226,6 +227,46 @@ class CredentialAccessIntentRead(BaseModel):
     node_id: str
     trace_id: str
     decision: CredentialAccessDecision
+    denial_reason: str
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class SecretLeaseCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requester_type: CredentialRequesterType
+    requester_ref: str = Field(default="", max_length=160)
+    purpose: str = Field(min_length=1, max_length=500)
+    run_id: str = Field(default="", max_length=160)
+    node_id: str = Field(default="", max_length=160)
+    trace_id: str = Field(default="", max_length=160)
+    ttl_seconds: int = Field(default=900, ge=60, le=3600)
+
+
+class SecretLeaseRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    credential_ref_id: UUID
+    credential_ref: str
+    provider: CredentialProvider
+    external_path: str
+    lease_ref: str
+    provider_lease_id: str
+    requester_type: CredentialRequesterType
+    requester_ref: str
+    purpose: str
+    run_id: str
+    node_id: str
+    trace_id: str
+    ttl_seconds: int
+    expires_at: datetime
+    revoked_at: datetime | None
+    status: SecretLeaseStatus
     denial_reason: str
     created_by: UUID
     updated_by: UUID

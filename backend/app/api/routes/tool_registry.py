@@ -23,6 +23,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    SecretLeaseCreateRequest,
+    SecretLeaseRead,
     ShellTemplateCreateRequest,
     ShellTemplateRead,
     ToolDefinitionRead,
@@ -182,6 +184,115 @@ async def archive_credential_ref(
         metadata={"reference": resource.credential_ref},
     )
     return resource
+
+
+@router.post(
+    "/credential-refs/{credential_ref_id}/leases",
+    response_model=SecretLeaseRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_secret_lease(
+    project_id: UUID,
+    credential_ref_id: UUID,
+    request: SecretLeaseCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> SecretLeaseRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        lease = await registry_store.create_secret_lease(
+            project_id=project_id,
+            credential_ref_id=credential_ref_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Credential reference not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.secret_lease.create",
+        target_type="tool_registry_secret_lease",
+        target_id=str(lease.id),
+        risk_level="high",
+        metadata=_secret_lease_metadata(lease),
+    )
+    return lease
+
+
+@router.get("/secret-leases", response_model=list[SecretLeaseRead])
+async def list_secret_leases(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[SecretLeaseRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    leases = await registry_store.list_project_secret_leases(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.secret_lease.list",
+        target_type="tool_registry_secret_lease",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={"secret_lease_count": len(leases)},
+    )
+    return leases
+
+
+@router.delete("/secret-leases/{lease_id}", response_model=SecretLeaseRead)
+async def revoke_secret_lease(
+    project_id: UUID,
+    lease_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> SecretLeaseRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        lease = await registry_store.revoke_secret_lease(
+            project_id=project_id,
+            lease_id=lease_id,
+            actor_id=current_account.account_id,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Secret lease not found",
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.secret_lease.revoke",
+        target_type="tool_registry_secret_lease",
+        target_id=str(lease.id),
+        risk_level="high",
+        metadata=_secret_lease_metadata(lease),
+    )
+    return lease
 
 
 @router.post(
@@ -676,6 +787,21 @@ def _catalog_response(catalog: ProjectResourceCatalog) -> ToolRegistryCatalogRes
         shell_templates=sorted(catalog.shell_templates),
         environments=sorted(catalog.environments),
     )
+
+
+def _secret_lease_metadata(lease: SecretLeaseRead) -> dict[str, object]:
+    return {
+        "credential_ref": lease.credential_ref,
+        "lease_ref": lease.lease_ref,
+        "requester_type": lease.requester_type,
+        "requester_ref": lease.requester_ref,
+        "run_id": lease.run_id,
+        "node_id": lease.node_id,
+        "trace_id": lease.trace_id,
+        "ttl_seconds": lease.ttl_seconds,
+        "expires_at": lease.expires_at.isoformat(),
+        "status": lease.status,
+    }
 
 
 def _highest_risk_level(risk_levels: list[str]) -> str:

@@ -162,6 +162,41 @@ class ToolRegistryCredentialAccessIntent(Base, TimestampMixin):
     updated_at: Mapped[datetime]
 
 
+class ToolRegistrySecretLease(Base, TimestampMixin):
+    __tablename__ = "tool_registry_secret_leases"
+    __table_args__ = (
+        UniqueConstraint("project_id", "lease_ref", name="uq_tool_secret_lease_project_ref"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    credential_ref_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_registry_credential_refs.id"),
+        nullable=False,
+        index=True,
+    )
+    credential_ref: Mapped[str] = mapped_column(String(240), nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    external_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    lease_ref: Mapped[str] = mapped_column(String(260), nullable=False)
+    provider_lease_id: Mapped[str] = mapped_column(String(260), nullable=False, default="")
+    requester_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    requester_ref: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    node_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    trace_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    ttl_seconds: Mapped[int] = mapped_column(nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    denial_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
 class ToolRegistryToolDefinition(Base, TimestampMixin):
     __tablename__ = "tool_registry_tool_definitions"
     __table_args__ = (
