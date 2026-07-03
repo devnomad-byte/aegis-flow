@@ -3,6 +3,7 @@ from backend.app.workflows.dsl import (
     AgentNodeData,
     ConditionNodeData,
     EdgeDefinition,
+    LlmNodeData,
     McpToolNodeData,
     NodeDefinition,
     ShellNodeData,
@@ -61,20 +62,45 @@ def shell_node() -> NodeDefinition:
     )
 
 
+def llm_node() -> NodeDefinition:
+    return NodeDefinition(
+        id="llm_1",
+        name="Summarize incident",
+        type="llm",
+        data=LlmNodeData(
+            model_policy_ref="default",
+            system_prompt="You summarize incidents for the current project.",
+            user_prompt="Incident: {{incident}}",
+            prompt_version="incident-summary/v1",
+            max_tokens=128,
+        ),
+    )
+
+
 def test_minimal_workflow_is_valid_and_generates_trace_plan() -> None:
     workflow = make_workflow(
-        nodes=[start_node(), agent_node(), end_node()],
+        nodes=[start_node(), llm_node(), agent_node(), end_node()],
         edges=[
-            EdgeDefinition(source="start_1", target="agent_1"),
+            EdgeDefinition(source="start_1", target="llm_1"),
+            EdgeDefinition(source="llm_1", target="agent_1"),
             EdgeDefinition(source="agent_1", target="end_1"),
         ],
     )
 
     spans = workflow.build_trace_span_plan()
 
-    assert [span.node_id for span in spans] == ["start_1", "agent_1", "agent_1", "end_1"]
+    assert [span.node_id for span in spans] == [
+        "start_1",
+        "llm_1",
+        "llm_1",
+        "agent_1",
+        "agent_1",
+        "end_1",
+    ]
     assert [span.span_type for span in spans] == [
         "workflow.node",
+        "workflow.node",
+        "llm.model_call",
         "workflow.node",
         "agent.subgraph",
         "workflow.node",
@@ -84,7 +110,10 @@ def test_minimal_workflow_is_valid_and_generates_trace_plan() -> None:
 def test_rejects_duplicate_node_ids() -> None:
     with pytest.raises(ValidationError, match="duplicate node id"):
         make_workflow(
-            nodes=[start_node(), NodeDefinition(id="start_1", name="重复", type="llm")],
+            nodes=[
+                start_node(),
+                NodeDefinition(id="start_1", name="Duplicate start", type="start"),
+            ],
             edges=[],
         )
 
@@ -100,15 +129,20 @@ def test_rejects_edges_referencing_unknown_nodes() -> None:
 def test_rejects_edges_into_start_or_out_of_end() -> None:
     with pytest.raises(ValidationError, match="cannot target start node"):
         make_workflow(
-            nodes=[start_node(), NodeDefinition(id="llm_1", name="分析", type="llm"), end_node()],
+            nodes=[start_node(), llm_node(), end_node()],
             edges=[EdgeDefinition(source="llm_1", target="start_1")],
         )
 
     with pytest.raises(ValidationError, match="cannot start from end node"):
         make_workflow(
-            nodes=[start_node(), NodeDefinition(id="llm_1", name="分析", type="llm"), end_node()],
+            nodes=[start_node(), llm_node(), end_node()],
             edges=[EdgeDefinition(source="end_1", target="llm_1")],
         )
+
+
+def test_llm_node_requires_explicit_model_policy_and_prompts() -> None:
+    with pytest.raises(ValidationError, match="llm node requires LlmNodeData"):
+        NodeDefinition(id="llm_1", name="Summarize incident", type="llm")
 
 
 def test_condition_edges_must_use_declared_case_handles() -> None:

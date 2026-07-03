@@ -58,6 +58,18 @@ class AgentNodeData(BaseModel):
     budget: AgentBudget = Field(default_factory=AgentBudget)
 
 
+class LlmNodeData(BaseModel):
+    model_config = STRICT_MODEL_CONFIG
+
+    model_policy_ref: str = Field(default="default", min_length=1, max_length=120)
+    system_prompt: str = Field(min_length=1, max_length=20000)
+    user_prompt: str = Field(min_length=1, max_length=20000)
+    prompt_version: str = Field(default="v1", min_length=1, max_length=160)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1, le=32768)
+    output_schema_ref: str = Field(default="", max_length=160)
+
+
 class ConditionNodeData(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
@@ -102,6 +114,7 @@ class HumanApprovalNodeData(BaseModel):
 
 NodeData = Annotated[
     AgentNodeData
+    | LlmNodeData
     | ConditionNodeData
     | McpToolNodeData
     | HttpNodeData
@@ -137,6 +150,7 @@ class NodeDefinition(BaseModel):
 
         expected_data_type = {
             "agent": AgentNodeData,
+            "llm": LlmNodeData,
             "condition": ConditionNodeData,
             "mcp_tool": McpToolNodeData,
             "http": HttpNodeData,
@@ -303,6 +317,14 @@ class WorkflowDefinition(BaseModel):
                         node_id=node.id,
                         node_type=node.type,
                         span_type="agent.subgraph",
+                    )
+                )
+            if node.type == "llm":
+                spans.append(
+                    TraceSpanPlan(
+                        node_id=node.id,
+                        node_type=node.type,
+                        span_type="llm.model_call",
                     )
                 )
         return spans
