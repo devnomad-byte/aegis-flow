@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
+    get_mcp_egress_policy,
     get_mcp_tools_client,
     get_project_access_provider,
     get_tool_registry_store,
@@ -13,6 +14,7 @@ from backend.app.api.dependencies import (
 from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     AuthorizedToolsResolveRequest,
@@ -37,6 +39,7 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
+    ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
     ToolRegistryStore,
     ToolSyncFailedError,
@@ -49,6 +52,7 @@ ProjectAccess = Depends(get_project_access_provider)
 RegistryStore = Depends(get_tool_registry_store)
 AuditStore = Depends(get_audit_event_store)
 McpToolsClientDependency = Depends(get_mcp_tools_client)
+McpEgressPolicyDependency = Depends(get_mcp_egress_policy)
 
 
 @router.get("/catalog", response_model=ToolRegistryCatalogResponse)
@@ -345,6 +349,7 @@ async def create_mcp_server(
     project_access: ProjectAccessProvider = ProjectAccess,
     registry_store: ToolRegistryStore = RegistryStore,
     audit_store: AuditEventStore = AuditStore,
+    egress_policy: EgressPolicy = McpEgressPolicyDependency,
 ) -> McpServerRead:
     _require_project_permission(
         project_access,
@@ -358,12 +363,25 @@ async def create_mcp_server(
                 project_id=project_id,
                 actor_id=current_account.account_id,
                 request=request,
+                egress_policy=egress_policy,
             )
         )
     except ToolRegistryResourceNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credential reference not found or inactive",
+        ) from exc
+    except ToolRegistryEgressPolicyError as exc:
+        await _record_egress_denied_event(
+            audit_store,
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            server_ref=request.server_ref,
+            violation=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MCP server egress target is not allowed",
         ) from exc
     await _record_create_event(
         audit_store,
@@ -390,6 +408,7 @@ async def sync_mcp_server_tools(
     registry_store: ToolRegistryStore = RegistryStore,
     audit_store: AuditEventStore = AuditStore,
     tools_client: McpToolsClient = McpToolsClientDependency,
+    egress_policy: EgressPolicy = McpEgressPolicyDependency,
 ) -> ToolSyncRunRead:
     _require_project_permission(
         project_access,
@@ -403,6 +422,7 @@ async def sync_mcp_server_tools(
             mcp_server_id=server_id,
             actor_id=current_account.account_id,
             tools_client=tools_client,
+            egress_policy=egress_policy,
         )
     except ToolRegistryResourceNotFoundError as exc:
         raise HTTPException(
@@ -802,6 +822,31 @@ def _secret_lease_metadata(lease: SecretLeaseRead) -> dict[str, object]:
         "expires_at": lease.expires_at.isoformat(),
         "status": lease.status,
     }
+
+
+async def _record_egress_denied_event(
+    audit_store: AuditEventStore,
+    *,
+    project_id: UUID,
+    actor_id: UUID,
+    server_ref: str,
+    violation: ToolRegistryEgressPolicyError,
+) -> None:
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=actor_id,
+        action="tool_registry.mcp_server.egress_denied",
+        target_type="tool_registry_mcp_server",
+        target_id=server_ref,
+        result="failure",
+        risk_level="high",
+        metadata={
+            "server_ref": server_ref,
+            "reason_code": violation.violation.reason_code,
+            "hostname": violation.violation.hostname,
+            "scheme": violation.violation.scheme,
+        },
+    )
 
 
 def _highest_risk_level(risk_levels: list[str]) -> str:

@@ -6,6 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.security.egress_policy import (
+    EgressPolicy,
+    EgressPolicyViolation,
+    validate_egress_url,
+)
 from backend.app.tool_registry.mcp_client import (
     McpServerConnection,
     McpTool,
@@ -50,6 +55,7 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
+    ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
     ToolSyncFailedError,
 )
@@ -108,6 +114,7 @@ class SqlAlchemyToolRegistryStore:
             project_id=project_id,
             key=request.key,
             name=request.name,
+            egress_allowed_hosts=request.egress_allowed_hosts,
             description=request.description,
             created_by=actor_id,
             updated_by=actor_id,
@@ -120,10 +127,19 @@ class SqlAlchemyToolRegistryStore:
         project_id: UUID,
         actor_id: UUID,
         request: McpServerCreateRequest,
+        egress_policy: EgressPolicy | None = None,
     ) -> McpServerRead:
         await self._ensure_active_credential_ref(
             project_id=project_id,
             credential_ref=request.credential_ref,
+        )
+        environment = await self._get_active_environment(project_id, request.environment_key)
+        if environment is None:
+            raise ToolRegistryResourceNotFoundError("environment not found")
+        self._validate_mcp_egress_target(
+            str(request.base_url),
+            environment=environment,
+            egress_policy=egress_policy,
         )
         resource = ToolRegistryMcpServer(
             project_id=project_id,
@@ -536,11 +552,18 @@ class SqlAlchemyToolRegistryStore:
                 ToolRegistryMcpServer.base_url,
                 ToolRegistryMcpServer.transport,
                 ToolRegistryMcpServer.credential_ref,
+                ToolRegistryEnvironment.egress_allowed_hosts,
                 ToolRegistryCredentialRef.id.label("credential_ref_id"),
             )
             .join(
                 ToolRegistryToolDefinition,
                 ToolRegistryToolDefinition.mcp_server_id == ToolRegistryMcpServer.id,
+            )
+            .outerjoin(
+                ToolRegistryEnvironment,
+                (ToolRegistryEnvironment.project_id == ToolRegistryMcpServer.project_id)
+                & (ToolRegistryEnvironment.key == ToolRegistryMcpServer.environment_key)
+                & (ToolRegistryEnvironment.status == "active"),
             )
             .outerjoin(
                 ToolRegistryCredentialRef,
@@ -551,6 +574,7 @@ class SqlAlchemyToolRegistryStore:
             .where(
                 ToolRegistryMcpServer.project_id == project_id,
                 ToolRegistryMcpServer.status == "active",
+                ToolRegistryEnvironment.id.is_not(None),
                 ToolRegistryToolDefinition.project_id == project_id,
                 ToolRegistryToolDefinition.tool_ref == tool_ref,
                 ToolRegistryToolDefinition.status == "active",
@@ -566,6 +590,7 @@ class SqlAlchemyToolRegistryStore:
             transport=row.transport,
             credential_ref_id=row.credential_ref_id,
             credential_ref=row.credential_ref,
+            egress_allowed_hosts=row.egress_allowed_hosts or [],
         )
 
     async def sync_mcp_server_tools(
@@ -575,22 +600,32 @@ class SqlAlchemyToolRegistryStore:
         mcp_server_id: UUID,
         actor_id: UUID,
         tools_client: McpToolsClient,
+        egress_policy: EgressPolicy | None = None,
     ) -> ToolSyncRunRead:
         server = await self._get_project_mcp_server(project_id, mcp_server_id)
         if server is None:
             raise ToolRegistryResourceNotFoundError("mcp server not found")
+        environment = await self._get_active_environment(project_id, server.environment_key)
+        if environment is None:
+            raise ToolRegistryResourceNotFoundError("environment not found")
 
         started_at = datetime.now(UTC)
         sync_version = server.last_sync_version + 1
         try:
+            self._validate_mcp_egress_target(
+                server.base_url,
+                environment=environment,
+                egress_policy=egress_policy,
+            )
             tools_result = await tools_client.list_tools(
                 McpServerConnection(
                     server_ref=server.server_ref,
                     base_url=server.base_url,
                     transport=server.transport,
+                    egress_allowed_hosts=environment.egress_allowed_hosts,
                 )
             )
-        except McpToolListError as exc:
+        except (McpToolListError, ToolRegistryEgressPolicyError) as exc:
             failed_run = await self._record_failed_sync_run(
                 server=server,
                 project_id=project_id,
@@ -695,6 +730,38 @@ class SqlAlchemyToolRegistryStore:
                 )
             ),
         )
+
+    async def _get_active_environment(
+        self,
+        project_id: UUID,
+        environment_key: str,
+    ) -> ToolRegistryEnvironment | None:
+        return cast(
+            ToolRegistryEnvironment | None,
+            await self._session.scalar(
+                select(ToolRegistryEnvironment).where(
+                    ToolRegistryEnvironment.project_id == project_id,
+                    ToolRegistryEnvironment.key == environment_key,
+                    ToolRegistryEnvironment.status == "active",
+                )
+            ),
+        )
+
+    def _validate_mcp_egress_target(
+        self,
+        base_url: str,
+        *,
+        environment: ToolRegistryEnvironment,
+        egress_policy: EgressPolicy | None,
+    ) -> None:
+        try:
+            validate_egress_url(
+                base_url,
+                policy=egress_policy,
+                allowed_hosts=environment.egress_allowed_hosts,
+            )
+        except EgressPolicyViolation as exc:
+            raise ToolRegistryEgressPolicyError(exc) from exc
 
     async def _get_active_tool_group(
         self,

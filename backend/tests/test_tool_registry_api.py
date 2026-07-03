@@ -1,16 +1,23 @@
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from ipaddress import ip_address
 from uuid import UUID, uuid4
 
 from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
+    get_mcp_egress_policy,
     get_project_access_provider,
     get_tool_registry_store,
 )
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
+from backend.app.security.egress_policy import (
+    EgressPolicy,
+    EgressPolicyViolation,
+    validate_egress_url,
+)
 from backend.app.tool_registry.schemas import (
     AuthorizedToolRead,
     AuthorizedToolsResolveResponse,
@@ -32,7 +39,11 @@ from backend.app.tool_registry.schemas import (
     ToolGroupRead,
     ToolSyncRunRead,
 )
-from backend.app.tool_registry.store import ToolRegistryResourceNotFoundError, ToolSyncFailedError
+from backend.app.tool_registry.store import (
+    ToolRegistryEgressPolicyError,
+    ToolRegistryResourceNotFoundError,
+    ToolSyncFailedError,
+)
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
 from fastapi.testclient import TestClient
 
@@ -62,6 +73,7 @@ class InMemoryToolRegistryStore:
     def __init__(self) -> None:
         self.catalogs: dict[UUID, ProjectResourceCatalog] = {}
         self.credential_refs: dict[UUID, list[CredentialRefRead]] = {}
+        self.environment_allowed_hosts: dict[tuple[UUID, str], list[str]] = {}
         self.credential_access_intents: list[CredentialAccessIntentRead] = []
         self.secret_leases: dict[UUID, list[SecretLeaseRead]] = {}
         self.tool_definitions: dict[UUID, list[ToolDefinitionRead]] = {}
@@ -84,7 +96,16 @@ class InMemoryToolRegistryStore:
             project_id,
             ProjectResourceCatalog(),
         ).model_copy(update={"environments": frozenset({key})})
-        return EnvironmentRead(**_resource(project_id, actor_id, key=key, name=str(request.name)))
+        self.environment_allowed_hosts[(project_id, key)] = list(request.egress_allowed_hosts)
+        return EnvironmentRead(
+            **_resource(
+                project_id,
+                actor_id,
+                key=key,
+                name=str(request.name),
+                egress_allowed_hosts=list(request.egress_allowed_hosts),
+            )
+        )
 
     async def create_mcp_server(
         self,
@@ -92,8 +113,21 @@ class InMemoryToolRegistryStore:
         project_id: UUID,
         actor_id: UUID,
         request: McpServerCreateRequest,
+        egress_policy: EgressPolicy | None = None,
     ) -> McpServerRead:
         server_ref = str(request.server_ref)
+        egress_allowed_hosts = self.environment_allowed_hosts.get(
+            (project_id, str(request.environment_key)),
+            [],
+        )
+        try:
+            validate_egress_url(
+                str(request.base_url),
+                policy=egress_policy,
+                allowed_hosts=egress_allowed_hosts,
+            )
+        except EgressPolicyViolation as exc:
+            raise ToolRegistryEgressPolicyError(exc) from exc
         catalog = self.catalogs.get(project_id, ProjectResourceCatalog())
         self.catalogs[project_id] = catalog.model_copy(
             update={"mcp_servers": catalog.mcp_servers | frozenset({server_ref})}
@@ -441,6 +475,7 @@ class InMemoryToolRegistryStore:
         mcp_server_id: UUID,
         actor_id: UUID,
         tools_client: object,
+        egress_policy: EgressPolicy | None = None,
     ) -> ToolSyncRunRead:
         if self.fail_next_sync:
             raise ToolSyncFailedError(
@@ -618,12 +653,17 @@ def build_client(
     provider: ProjectAccessProvider,
     registry_store: InMemoryToolRegistryStore,
     audit_store: InMemoryAuditEventStore,
+    egress_policy: EgressPolicy | None = None,
 ) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_account] = lambda: account
     app.dependency_overrides[get_project_access_provider] = lambda: provider
     app.dependency_overrides[get_tool_registry_store] = lambda: registry_store
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
+    resolved_egress_policy = egress_policy or EgressPolicy(
+        resolver=lambda _host, _port: [ip_address("93.184.216.34")]
+    )
+    app.dependency_overrides[get_mcp_egress_policy] = lambda: resolved_egress_policy
     return TestClient(app)
 
 
@@ -719,6 +759,97 @@ def test_tool_registry_creates_project_resources_and_returns_catalog() -> None:
         "tool_registry.shell_template.create",
         "tool_registry.catalog.view",
     ]
+
+
+def test_tool_registry_environment_returns_egress_allowed_hosts() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/environments",
+        json={
+            "key": "prod",
+            "name": "Production",
+            "egress_allowed_hosts": [" MCP.Example.com ", "*.Trusted.Example"],
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["egress_allowed_hosts"] == [
+        "mcp.example.com",
+        "*.trusted.example",
+    ]
+
+
+def test_tool_registry_rejects_mcp_server_when_environment_allowlist_does_not_match() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    audit_store = InMemoryAuditEventStore()
+    registry_store = InMemoryToolRegistryStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    env_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/environments",
+        json={
+            "key": "prod",
+            "name": "Production",
+            "egress_allowed_hosts": ["mcp.example.com"],
+        },
+    )
+    assert env_response.status_code == 201
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers",
+        json={
+            "server_ref": "mcp-other",
+            "name": "Other MCP",
+            "base_url": "https://other.example.com/mcp?token=must-not-log",
+            "environment_key": "prod",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "MCP server egress target is not allowed"
+    assert "must-not-log" not in response.text
+    assert audit_store.events[-1]["action"] == "tool_registry.mcp_server.egress_denied"
+    assert audit_store.events[-1]["result"] == "failure"
+    metadata = audit_store.events[-1]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["reason_code"] == "host_not_allowlisted"
+    assert metadata["hostname"] == "other.example.com"
+    assert "must-not-log" not in str(metadata)
+
+
+def test_tool_registry_rejects_mcp_server_localhost_by_default() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/mcp-servers",
+        json={
+            "server_ref": "local-mcp",
+            "name": "Local MCP",
+            "base_url": "http://127.0.0.1:8765/mcp",
+            "environment_key": "test",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "MCP server egress target is not allowed"
 
 
 def test_tool_registry_creates_lists_and_archives_credential_refs_without_secret_values() -> None:

@@ -260,6 +260,7 @@ async def invoke_tool(
             tool_name=authorized_tool.tool_name,
             arguments=request.arguments,
             lease_ref=lease_ref,
+            egress_allowed_hosts=server.egress_allowed_hosts,
         )
     except McpToolCallError as exc:
         invocation = await _record_invocation(
@@ -617,6 +618,7 @@ async def resume_tool_approval(
             tool_name=authorized_tool.tool_name,
             arguments=original_request.arguments,
             lease_ref=lease_ref,
+            egress_allowed_hosts=server.egress_allowed_hosts,
         )
     except McpToolCallError as exc:
         invocation = await invocation_store.update_invocation_status(

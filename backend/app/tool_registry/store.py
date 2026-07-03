@@ -1,6 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from backend.app.security.egress_policy import EgressPolicy, EgressPolicyViolation
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     AuthorizedToolsResolveRequest,
@@ -35,6 +36,14 @@ class ToolRegistryResourceNotFoundError(LookupError):
     """Raised when a project-scoped registry resource cannot be found."""
 
 
+class ToolRegistryEgressPolicyError(ValueError):
+    """Raised when an MCP target violates project or environment egress policy."""
+
+    def __init__(self, violation: EgressPolicyViolation) -> None:
+        super().__init__(violation.public_message)
+        self.violation = violation
+
+
 class ToolSyncFailedError(RuntimeError):
     """Raised when an MCP tools/list sync fails after recording the failed run."""
 
@@ -63,6 +72,7 @@ class ToolRegistryStore(Protocol):
         project_id: UUID,
         actor_id: UUID,
         request: McpServerCreateRequest,
+        egress_policy: EgressPolicy | None = None,
     ) -> McpServerRead:
         raise NotImplementedError
 
@@ -196,5 +206,6 @@ class ToolRegistryStore(Protocol):
         mcp_server_id: UUID,
         actor_id: UUID,
         tools_client: McpToolsClient,
+        egress_policy: EgressPolicy | None = None,
     ) -> ToolSyncRunRead:
         raise NotImplementedError

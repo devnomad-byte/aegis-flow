@@ -1,5 +1,6 @@
 from backend.app.tool_registry.mcp_client import (
     HttpMcpToolsClient,
+    McpServerConnection,
     McpToolListError,
     infer_tool_risk_level,
     parse_tools_list_response,
@@ -101,5 +102,25 @@ async def test_http_mcp_tools_client_ignores_system_proxy_environment() -> None:
     http_client = client._build_http_client()
     try:
         assert http_client.trust_env is False
+        assert http_client.follow_redirects is False
     finally:
         await http_client.aclose()
+
+
+async def test_http_mcp_tools_client_rejects_blocked_egress_before_request() -> None:
+    client = HttpMcpToolsClient()
+
+    try:
+        await client.list_tools(
+            McpServerConnection(
+                server_ref="local",
+                base_url="http://127.0.0.1:9/mcp",
+                transport="streamable_http",
+            )
+        )
+    except McpToolListError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected McpToolListError")
+
+    assert "plain_http_not_allowed" in message

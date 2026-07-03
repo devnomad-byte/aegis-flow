@@ -18,6 +18,7 @@ from backend.app.retrieval.milvus_client import build_milvus_retrieval_client
 from backend.app.retrieval.sqlalchemy_eval_store import SqlAlchemyRetrievalEvalStore
 from backend.app.retrieval.sqlalchemy_store import SqlAlchemyRetrievalGatewayStore
 from backend.app.retrieval.store import RetrievalGatewayStore
+from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient, McpToolCallClient
 from backend.app.tool_gateway.sqlalchemy_store import SqlAlchemyToolInvocationStore
 from backend.app.tool_gateway.store import ToolInvocationStore
@@ -109,3 +110,7 @@ def get_mcp_tools_client() -> McpToolsClient:
 
 def get_mcp_tool_call_client() -> McpToolCallClient:
     return HttpMcpToolCallClient()
+
+
+def get_mcp_egress_policy() -> EgressPolicy:
+    return EgressPolicy()

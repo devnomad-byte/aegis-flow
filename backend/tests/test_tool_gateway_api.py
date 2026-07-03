@@ -283,6 +283,7 @@ class FakeMcpToolCallClient:
         tool_name: str,
         arguments: dict[str, object],
         lease_ref: str,
+        egress_allowed_hosts: list[str] | None = None,
     ) -> McpToolCallResult:
         if self.error is not None:
             raise self.error
@@ -293,6 +294,7 @@ class FakeMcpToolCallClient:
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "lease_ref": lease_ref,
+                "egress_allowed_hosts": egress_allowed_hosts or [],
             }
         )
         return self.result
@@ -430,6 +432,7 @@ def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() 
         transport="streamable_http",
         credential_ref_id=credential_ref_id,
         credential_ref="vault://ops/k8s/readonly",
+        egress_allowed_hosts=["mcp.internal.example"],
     )
     invocation_store = FakeInvocationStore()
     audit_store = InMemoryAuditEventStore()
@@ -471,6 +474,7 @@ def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() 
     assert call_client.calls[0]["tool_name"] == "kubectl_get_pods"
     assert call_client.calls[0]["arguments"] == {"namespace": "default"}
     assert call_client.calls[0]["lease_ref"] == payload["secret_lease_ref"]
+    assert call_client.calls[0]["egress_allowed_hosts"] == ["mcp.internal.example"]
     assert registry_store.resolve_requests[0].tool_group_refs == ["k8s.readonly"]
     assert registry_store.secret_leases[0].credential_ref_id == credential_ref_id
     assert invocation_store.invocations[0].secret_lease_ref == payload["secret_lease_ref"]
@@ -543,6 +547,7 @@ def test_tool_gateway_resume_approved_high_risk_tool_invocation() -> None:
         transport="streamable_http",
         credential_ref_id=None,
         credential_ref="",
+        egress_allowed_hosts=["mcp.internal.example"],
     )
     invocation_store = FakeInvocationStore()
     audit_store = InMemoryAuditEventStore()
@@ -591,6 +596,7 @@ def test_tool_gateway_resume_approved_high_risk_tool_invocation() -> None:
     assert payload["result"]["structured_content"] == {"pods": ["web-1"]}
     assert len(call_client.calls) == 1
     assert call_client.calls[0]["tool_name"] == "kubectl_delete_pod"
+    assert call_client.calls[0]["egress_allowed_hosts"] == ["mcp.internal.example"]
     assert invocation_store.approval_tasks[0].status == "resumed"
     assert audit_store.events[-1]["action"] == "tool_gateway.resume"
     assert audit_store.events[-1]["result"] == "success"

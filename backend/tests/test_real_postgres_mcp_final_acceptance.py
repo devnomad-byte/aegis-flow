@@ -9,7 +9,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from backend.app.api.dependencies import get_current_account
+from backend.app.api.dependencies import (
+    get_current_account,
+    get_mcp_egress_policy,
+    get_mcp_tool_call_client,
+    get_mcp_tools_client,
+)
 from backend.app.audit.models import AuditLog
 from backend.app.core.settings import AppSettings
 from backend.app.iam.access import AccountPrincipal
@@ -23,7 +28,10 @@ from backend.app.iam.models import (
     ProjectRolePermission,
 )
 from backend.app.main import create_app
+from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient
 from backend.app.tool_gateway.models import ToolGatewayApprovalTask, ToolGatewayInvocation
+from backend.app.tool_registry.mcp_client import HttpMcpToolsClient
 from backend.app.tool_registry.models import (
     ToolRegistryCredentialAccessIntent,
     ToolRegistryCredentialRef,
@@ -201,9 +209,20 @@ def test_real_postgres_and_real_http_mcp_tool_gateway_final_acceptance() -> None
     try:
         with running_http_mcp_server() as (mcp_url, mcp_state):
             app = create_app(settings)
+            local_mcp_policy = EgressPolicy(
+                allow_plain_http=True,
+                allow_loopback=True,
+            )
             app.dependency_overrides[get_current_account] = lambda: AccountPrincipal(
                 account_id=actor_id,
                 status="active",
+            )
+            app.dependency_overrides[get_mcp_egress_policy] = lambda: local_mcp_policy
+            app.dependency_overrides[get_mcp_tools_client] = lambda: HttpMcpToolsClient(
+                egress_policy=local_mcp_policy,
+            )
+            app.dependency_overrides[get_mcp_tool_call_client] = lambda: HttpMcpToolCallClient(
+                egress_policy=local_mcp_policy
             )
             with TestClient(app) as client:
                 project_response = client.get(f"/api/v1/projects/{project_id}")
@@ -212,7 +231,7 @@ def test_real_postgres_and_real_http_mcp_tool_gateway_final_acceptance() -> None
 
                 env_response = client.post(
                     f"/api/v1/projects/{project_id}/tool-registry/environments",
-                    json={"key": "test", "name": "Test"},
+                    json={"key": "test", "name": "Test", "egress_allowed_hosts": []},
                 )
                 assert env_response.status_code == 201
 

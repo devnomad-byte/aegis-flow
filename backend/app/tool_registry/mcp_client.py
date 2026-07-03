@@ -8,6 +8,12 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.app.security.egress_policy import (
+    EgressPolicy,
+    EgressPolicyViolation,
+    validate_egress_url,
+)
+
 JsonObject = dict[str, Any]
 
 _DEFAULT_INPUT_SCHEMA: JsonObject = {"type": "object", "properties": {}}
@@ -30,6 +36,7 @@ class McpServerConnection(BaseModel):
     server_ref: str
     base_url: str
     transport: str = "streamable_http"
+    egress_allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class McpTool(BaseModel):
@@ -55,10 +62,19 @@ class McpToolsClient(Protocol):
 @dataclass(frozen=True)
 class HttpMcpToolsClient:
     timeout_seconds: float = 10.0
+    egress_policy: EgressPolicy = EgressPolicy()
 
     async def list_tools(self, connection: McpServerConnection) -> McpToolsListResult:
         if connection.transport != "streamable_http":
             raise McpToolListError(f"Unsupported MCP transport: {connection.transport}")
+        try:
+            target = validate_egress_url(
+                connection.base_url,
+                policy=self.egress_policy,
+                allowed_hosts=connection.egress_allowed_hosts,
+            )
+        except EgressPolicyViolation as exc:
+            raise McpToolListError(exc.public_message) from exc
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid4()),
@@ -71,7 +87,7 @@ class HttpMcpToolsClient:
         }
         try:
             async with self._build_http_client() as client:
-                response = await client.post(connection.base_url, headers=headers, json=payload)
+                response = await client.post(target.normalized_url, headers=headers, json=payload)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")
             if "text/event-stream" in content_type:
@@ -85,7 +101,11 @@ class HttpMcpToolsClient:
             raise McpToolListError("Invalid MCP tools/list JSON response") from exc
 
     def _build_http_client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False)
+        return httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            trust_env=False,
+            follow_redirects=False,
+        )
 
 
 def parse_tools_list_response(payload: JsonObject) -> McpToolsListResult:

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from backend.app.security.egress_policy import normalize_allowed_hosts
+
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ResourceStatus = Literal["active", "disabled", "archived"]
 ToolDefinitionStatus = Literal["active", "stale", "disabled"]
@@ -46,6 +48,10 @@ class EnvironmentCreateRequest(BaseModel):
     key: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
+    egress_allowed_hosts: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: object) -> None:
+        self.egress_allowed_hosts = normalize_allowed_hosts(self.egress_allowed_hosts)
 
 
 class McpServerCreateRequest(BaseModel):
@@ -127,6 +133,7 @@ class RegistryResourceRead(BaseModel):
 
 class EnvironmentRead(RegistryResourceRead):
     key: str
+    egress_allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class McpServerRead(RegistryResourceRead):
@@ -150,6 +157,7 @@ class ToolMcpServerCredentialRead(BaseModel):
     transport: McpTransport
     credential_ref_id: UUID | None = None
     credential_ref: str = ""
+    egress_allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class ToolGroupRead(RegistryResourceRead):
