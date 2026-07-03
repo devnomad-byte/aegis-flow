@@ -168,7 +168,7 @@ select {
 .global-main {
   display: grid;
   gap: var(--space-lg);
-  grid-template-rows: max-content max-content;
+  grid-template-rows: max-content max-content max-content;
 }
 
 .global-hero {
@@ -227,6 +227,197 @@ select {
 
 .global-metric-warning {
   border-color: rgba(255, 176, 32, 0.52);
+}
+
+.global-source-pill {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.global-source-warning {
+  border-color: rgba(255, 176, 32, 0.58);
+  color: var(--color-warning);
+}
+
+.global-alert {
+  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(255, 176, 32, 0.46);
+  border-radius: var(--radius-md);
+  color: var(--color-warning);
+  padding: var(--space-md);
+}
+
+.global-dashboard-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
+}
+
+.global-panel {
+  background: rgba(16, 22, 21, 0.94);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-lg);
+}
+
+.global-project-health {
+  grid-row: span 2;
+}
+
+.global-panel-header {
+  align-items: flex-start;
+  display: flex;
+  gap: var(--space-md);
+  justify-content: space-between;
+}
+
+.global-panel-header h3 {
+  font-size: 18px;
+  line-height: 1.2;
+  margin: 6px 0 0;
+}
+
+.global-panel-count {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.global-project-table {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.global-project-row {
+  align-items: center;
+  border: 1px solid rgba(62, 90, 82, 0.52);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(180px, 1fr) 74px 78px 64px;
+  min-height: 56px;
+  padding: 0 var(--space-md);
+}
+
+.global-project-row strong,
+.global-kpi-row strong {
+  font-family: var(--font-mono);
+}
+
+.global-project-row span {
+  color: var(--color-text-muted);
+}
+
+.global-project-row-head {
+  border-color: transparent;
+  color: var(--color-text-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-height: 28px;
+  text-transform: uppercase;
+}
+
+.global-risk-high {
+  color: var(--color-warning) !important;
+}
+
+.global-risk-normal {
+  color: var(--color-signal) !important;
+}
+
+.global-health-list,
+.global-kpi-list,
+.global-trend-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.global-health-item,
+.global-kpi-row {
+  align-items: center;
+  border-bottom: 1px solid rgba(43, 59, 54, 0.7);
+  display: flex;
+  gap: var(--space-md);
+  justify-content: space-between;
+  min-height: 36px;
+}
+
+.global-health-item:last-child,
+.global-kpi-row:last-child {
+  border-bottom: 0;
+}
+
+.global-health-pill {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 8px;
+  text-transform: uppercase;
+}
+
+.global-health-healthy {
+  border-color: rgba(126, 231, 135, 0.52);
+  color: var(--color-signal);
+}
+
+.global-health-degraded {
+  border-color: rgba(255, 176, 32, 0.56);
+  color: var(--color-warning);
+}
+
+.global-health-critical {
+  border-color: rgba(255, 77, 94, 0.6);
+  color: var(--color-danger);
+}
+
+.global-health-unknown {
+  color: var(--color-text-muted);
+}
+
+.global-trend-row {
+  align-items: center;
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: 54px minmax(0, 1fr) 52px;
+  min-height: 28px;
+}
+
+.global-trend-row span,
+.global-empty-row {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.global-trend-row strong {
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.global-trend-track {
+  background: rgba(43, 59, 54, 0.64);
+  border-radius: var(--radius-xs);
+  height: 8px;
+  overflow: hidden;
+}
+
+.global-trend-track span {
+  background: var(--color-accent);
+  display: block;
+  height: 100%;
+}
+
+.global-empty-row {
+  min-height: 36px;
 }
 
 .forbidden-screen {

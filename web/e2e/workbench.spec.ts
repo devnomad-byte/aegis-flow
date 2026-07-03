@@ -6,6 +6,7 @@ test("renders the global command shell", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Global Command Center" })).toBeVisible();
   await expect(page.getByText("平台超级管理员")).toBeVisible();
   await expect(page.locator(".global-hero").getByText("跨项目治理", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("Global Command Center API is unavailable");
 });
 
 test("renders the project workbench shell", async ({ page }) => {

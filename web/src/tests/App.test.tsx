@@ -14,7 +14,7 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Global Command Center" })).toBeInTheDocument();
     expect(screen.getByText(/平台超级管理员/)).toBeInTheDocument();
-    expect(screen.getAllByText(/跨项目治理/).length).toBeGreaterThan(0);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Global Command Center API is unavailable");
   });
 
   it("renders the project shell and workflow studio for project routes", async () => {

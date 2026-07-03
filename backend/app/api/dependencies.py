@@ -5,6 +5,8 @@ from backend.app.audit.sqlalchemy_store import SqlAlchemyAuditEventStore
 from backend.app.audit.store import AuditEventStore
 from backend.app.core.settings import AppSettings
 from backend.app.db.session import get_async_session
+from backend.app.global_command.sqlalchemy_store import SqlAlchemyGlobalCommandCenterStore
+from backend.app.global_command.store import GlobalCommandCenterStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.knowledge.object_store import build_knowledge_object_store
@@ -51,6 +53,12 @@ def get_audit_event_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> AuditEventStore:
     return SqlAlchemyAuditEventStore(session)
+
+
+def get_global_command_center_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> GlobalCommandCenterStore:
+    return SqlAlchemyGlobalCommandCenterStore(session)
 
 
 def get_knowledge_ingestion_store(
