@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.security.egress_policy import (
     EgressPolicy,
     EgressPolicyViolation,
-    validate_egress_url,
+)
+from backend.app.security.egress_proxy import (
+    EgressProxyMode,
+    EgressProxyPolicy,
+    EgressProxyPolicyViolation,
+    build_egress_proxy_plan,
 )
 from backend.app.tool_registry.mcp_client import (
     McpServerConnection,
@@ -115,6 +120,11 @@ class SqlAlchemyToolRegistryStore:
             key=request.key,
             name=request.name,
             egress_allowed_hosts=request.egress_allowed_hosts,
+            egress_allowed_ports=request.egress_allowed_ports,
+            egress_proxy_mode=request.egress_proxy_mode,
+            egress_proxy_url=request.egress_proxy_url,
+            egress_proxy_network=request.egress_proxy_network,
+            egress_dns_pinning_required=request.egress_dns_pinning_required,
             description=request.description,
             created_by=actor_id,
             updated_by=actor_id,
@@ -553,6 +563,10 @@ class SqlAlchemyToolRegistryStore:
                 ToolRegistryMcpServer.transport,
                 ToolRegistryMcpServer.credential_ref,
                 ToolRegistryEnvironment.egress_allowed_hosts,
+                ToolRegistryEnvironment.egress_allowed_ports,
+                ToolRegistryEnvironment.egress_proxy_mode,
+                ToolRegistryEnvironment.egress_proxy_url,
+                ToolRegistryEnvironment.egress_dns_pinning_required,
                 ToolRegistryCredentialRef.id.label("credential_ref_id"),
             )
             .join(
@@ -591,6 +605,10 @@ class SqlAlchemyToolRegistryStore:
             credential_ref_id=row.credential_ref_id,
             credential_ref=row.credential_ref,
             egress_allowed_hosts=row.egress_allowed_hosts or [],
+            egress_allowed_ports=row.egress_allowed_ports or [],
+            egress_proxy_mode=row.egress_proxy_mode or "direct",
+            egress_proxy_url=row.egress_proxy_url or "",
+            egress_dns_pinning_required=bool(row.egress_dns_pinning_required),
         )
 
     async def sync_mcp_server_tools(
@@ -623,6 +641,10 @@ class SqlAlchemyToolRegistryStore:
                     base_url=server.base_url,
                     transport=server.transport,
                     egress_allowed_hosts=environment.egress_allowed_hosts,
+                    egress_allowed_ports=environment.egress_allowed_ports,
+                    egress_proxy_mode=environment.egress_proxy_mode,
+                    egress_proxy_url=environment.egress_proxy_url,
+                    egress_dns_pinning_required=environment.egress_dns_pinning_required,
                 )
             )
         except (McpToolListError, ToolRegistryEgressPolicyError) as exc:
@@ -755,11 +777,24 @@ class SqlAlchemyToolRegistryStore:
         egress_policy: EgressPolicy | None,
     ) -> None:
         try:
-            validate_egress_url(
+            build_egress_proxy_plan(
                 base_url,
-                policy=egress_policy,
-                allowed_hosts=environment.egress_allowed_hosts,
+                egress_policy=egress_policy,
+                proxy_policy=EgressProxyPolicy(
+                    mode=EgressProxyMode(environment.egress_proxy_mode),
+                    proxy_url=environment.egress_proxy_url,
+                    docker_network=environment.egress_proxy_network,
+                    allowed_hosts=environment.egress_allowed_hosts,
+                    allowed_ports=environment.egress_allowed_ports,
+                    dns_pinning_required=environment.egress_dns_pinning_required,
+                ),
             )
+        except EgressProxyPolicyViolation as exc:
+            raise ToolRegistryEgressPolicyError(exc) from exc
+        except ValueError as exc:
+            raise ToolRegistryEgressPolicyError(
+                EgressPolicyViolation("invalid_proxy_mode", "Egress proxy mode is invalid")
+            ) from exc
         except EgressPolicyViolation as exc:
             raise ToolRegistryEgressPolicyError(exc) from exc
 

@@ -126,8 +126,8 @@ def build_docker_run_command(
 def validate_policy(policy: DockerSandboxPolicy) -> None:
     if policy.privileged:
         raise DockerSandboxPolicyError("privileged containers are forbidden")
-    if policy.network_mode != "none":
-        raise DockerSandboxPolicyError("default docker runner must use network=none")
+    if policy.network_mode != "none" and not policy.network_mode.startswith("aegis-egress-"):
+        raise DockerSandboxPolicyError("shell runner network must be none or an Aegis egress proxy")
     if policy.user.split(":", maxsplit=1)[0] == "0":
         raise DockerSandboxPolicyError("root containers are forbidden")
     if policy.cap_drop != ["ALL"]:

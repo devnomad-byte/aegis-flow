@@ -843,8 +843,8 @@ async def _record_egress_denied_event(
         metadata={
             "server_ref": server_ref,
             "reason_code": violation.violation.reason_code,
-            "hostname": violation.violation.hostname,
-            "scheme": violation.violation.scheme,
+            "hostname": getattr(violation.violation, "hostname", ""),
+            "scheme": getattr(violation.violation, "scheme", ""),
         },
     )
 

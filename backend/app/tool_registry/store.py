@@ -2,6 +2,7 @@ from typing import Protocol
 from uuid import UUID
 
 from backend.app.security.egress_policy import EgressPolicy, EgressPolicyViolation
+from backend.app.security.egress_proxy import EgressProxyPolicyViolation
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     AuthorizedToolsResolveRequest,
@@ -39,7 +40,7 @@ class ToolRegistryResourceNotFoundError(LookupError):
 class ToolRegistryEgressPolicyError(ValueError):
     """Raised when an MCP target violates project or environment egress policy."""
 
-    def __init__(self, violation: EgressPolicyViolation) -> None:
+    def __init__(self, violation: EgressPolicyViolation | EgressProxyPolicyViolation) -> None:
         super().__init__(violation.public_message)
         self.violation = violation
 

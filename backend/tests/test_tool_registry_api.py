@@ -104,6 +104,11 @@ class InMemoryToolRegistryStore:
                 key=key,
                 name=str(request.name),
                 egress_allowed_hosts=list(request.egress_allowed_hosts),
+                egress_allowed_ports=list(request.egress_allowed_ports),
+                egress_proxy_mode=request.egress_proxy_mode,
+                egress_proxy_url=request.egress_proxy_url,
+                egress_proxy_network=request.egress_proxy_network,
+                egress_dns_pinning_required=request.egress_dns_pinning_required,
             )
         )
 

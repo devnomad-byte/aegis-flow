@@ -8,6 +8,7 @@ from backend.app.security.egress_policy import normalize_allowed_hosts
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ResourceStatus = Literal["active", "disabled", "archived"]
+EgressProxyMode = Literal["direct", "http_proxy", "docker_network"]
 ToolDefinitionStatus = Literal["active", "stale", "disabled"]
 SyncStatus = Literal["never", "success", "failed"]
 HealthStatus = Literal["unknown", "healthy", "unhealthy"]
@@ -49,9 +50,15 @@ class EnvironmentCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = ""
     egress_allowed_hosts: list[str] = Field(default_factory=list)
+    egress_allowed_ports: list[int] = Field(default_factory=list)
+    egress_proxy_mode: EgressProxyMode = "direct"
+    egress_proxy_url: str = Field(default="", max_length=512)
+    egress_proxy_network: str = Field(default="", max_length=120)
+    egress_dns_pinning_required: bool = False
 
     def model_post_init(self, __context: object) -> None:
         self.egress_allowed_hosts = normalize_allowed_hosts(self.egress_allowed_hosts)
+        self.egress_allowed_ports = sorted(set(self.egress_allowed_ports))
 
 
 class McpServerCreateRequest(BaseModel):
@@ -134,6 +141,11 @@ class RegistryResourceRead(BaseModel):
 class EnvironmentRead(RegistryResourceRead):
     key: str
     egress_allowed_hosts: list[str] = Field(default_factory=list)
+    egress_allowed_ports: list[int] = Field(default_factory=list)
+    egress_proxy_mode: EgressProxyMode
+    egress_proxy_url: str
+    egress_proxy_network: str
+    egress_dns_pinning_required: bool
 
 
 class McpServerRead(RegistryResourceRead):
@@ -158,6 +170,10 @@ class ToolMcpServerCredentialRead(BaseModel):
     credential_ref_id: UUID | None = None
     credential_ref: str = ""
     egress_allowed_hosts: list[str] = Field(default_factory=list)
+    egress_allowed_ports: list[int] = Field(default_factory=list)
+    egress_proxy_mode: EgressProxyMode = "direct"
+    egress_proxy_url: str = ""
+    egress_dns_pinning_required: bool = False
 
 
 class ToolGroupRead(RegistryResourceRead):

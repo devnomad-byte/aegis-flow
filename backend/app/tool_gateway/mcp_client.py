@@ -8,7 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.security.egress_policy import (
     EgressPolicy,
     EgressPolicyViolation,
-    validate_egress_url,
+)
+from backend.app.security.egress_proxy import (
+    EgressProxyMode,
+    EgressProxyPolicy,
+    EgressProxyPolicyViolation,
+    build_egress_proxy_plan,
 )
 from backend.app.tool_registry.mcp_client import sanitize_mcp_error_message
 
@@ -35,6 +40,10 @@ class McpToolCallClient(Protocol):
         arguments: dict[str, Any],
         lease_ref: str,
         egress_allowed_hosts: list[str] | None = None,
+        egress_allowed_ports: list[int] | None = None,
+        egress_proxy_mode: str = "direct",
+        egress_proxy_url: str = "",
+        egress_dns_pinning_required: bool = False,
     ) -> McpToolCallResult:
         raise NotImplementedError
 
@@ -43,6 +52,7 @@ class McpToolCallClient(Protocol):
 class HttpMcpToolCallClient:
     timeout_seconds: float = 30.0
     egress_policy: EgressPolicy = EgressPolicy()
+    proxy_url: str = ""
 
     async def call_tool(
         self,
@@ -53,17 +63,31 @@ class HttpMcpToolCallClient:
         arguments: dict[str, Any],
         lease_ref: str,
         egress_allowed_hosts: list[str] | None = None,
+        egress_allowed_ports: list[int] | None = None,
+        egress_proxy_mode: str = "direct",
+        egress_proxy_url: str = "",
+        egress_dns_pinning_required: bool = False,
     ) -> McpToolCallResult:
         if transport != "streamable_http":
             raise McpToolCallError(f"Unsupported MCP transport: {transport}")
         try:
-            target = validate_egress_url(
+            plan = build_egress_proxy_plan(
                 base_url,
-                policy=self.egress_policy,
-                allowed_hosts=egress_allowed_hosts or [],
+                egress_policy=self.egress_policy,
+                proxy_policy=EgressProxyPolicy(
+                    mode=EgressProxyMode(egress_proxy_mode),
+                    proxy_url=egress_proxy_url,
+                    allowed_hosts=egress_allowed_hosts or [],
+                    allowed_ports=egress_allowed_ports or [],
+                    dns_pinning_required=egress_dns_pinning_required,
+                ),
             )
+        except EgressProxyPolicyViolation as exc:
+            raise McpToolCallError(exc.public_message) from exc
         except EgressPolicyViolation as exc:
             raise McpToolCallError(exc.public_message) from exc
+        except ValueError as exc:
+            raise McpToolCallError("Egress proxy mode is invalid") from exc
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid4()),
@@ -77,8 +101,14 @@ class HttpMcpToolCallClient:
         if lease_ref:
             headers["x-aegis-secret-lease"] = lease_ref
         try:
-            async with self._build_http_client() as client:
-                response = await client.post(target.normalized_url, headers=headers, json=payload)
+            async with self._build_http_client(
+                proxy_url=plan.httpx_proxy_url or self.proxy_url,
+            ) as client:
+                response = await client.post(
+                    plan.target.normalized_url,
+                    headers=headers,
+                    json=payload,
+                )
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")
             if "text/event-stream" in content_type:
@@ -91,11 +121,12 @@ class HttpMcpToolCallClient:
         except ValueError as exc:
             raise McpToolCallError("Invalid MCP tools/call JSON response") from exc
 
-    def _build_http_client(self) -> httpx.AsyncClient:
+    def _build_http_client(self, *, proxy_url: str = "") -> httpx.AsyncClient:
         return httpx.AsyncClient(
             timeout=self.timeout_seconds,
             trust_env=False,
             follow_redirects=False,
+            proxy=proxy_url or None,
         )
 
 

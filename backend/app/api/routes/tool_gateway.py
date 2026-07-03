@@ -261,6 +261,10 @@ async def invoke_tool(
             arguments=request.arguments,
             lease_ref=lease_ref,
             egress_allowed_hosts=server.egress_allowed_hosts,
+            egress_allowed_ports=server.egress_allowed_ports,
+            egress_proxy_mode=server.egress_proxy_mode,
+            egress_proxy_url=server.egress_proxy_url,
+            egress_dns_pinning_required=server.egress_dns_pinning_required,
         )
     except McpToolCallError as exc:
         invocation = await _record_invocation(
@@ -619,6 +623,10 @@ async def resume_tool_approval(
             arguments=original_request.arguments,
             lease_ref=lease_ref,
             egress_allowed_hosts=server.egress_allowed_hosts,
+            egress_allowed_ports=server.egress_allowed_ports,
+            egress_proxy_mode=server.egress_proxy_mode,
+            egress_proxy_url=server.egress_proxy_url,
+            egress_dns_pinning_required=server.egress_dns_pinning_required,
         )
     except McpToolCallError as exc:
         invocation = await invocation_store.update_invocation_status(

@@ -18,6 +18,15 @@ class ToolRegistryEnvironment(Base, TimestampMixin):
     key: Mapped[str] = mapped_column(String(80), nullable=False)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     egress_allowed_hosts: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    egress_allowed_ports: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    egress_proxy_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="direct")
+    egress_proxy_url: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    egress_proxy_network: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    egress_dns_pinning_required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)

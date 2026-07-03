@@ -3,6 +3,7 @@ from backend.app.workflows.dsl import (
     AgentNodeData,
     ConditionNodeData,
     EdgeDefinition,
+    HttpNodeData,
     LlmNodeData,
     McpToolNodeData,
     NodeDefinition,
@@ -202,4 +203,38 @@ def test_permission_impact_collects_agent_tool_shell_environment_and_approval() 
     assert impact.shell_templates == ["k8s-log-collector@3"]
     assert impact.environments == ["test"]
     assert impact.risk_levels == ["medium", "high"]
+    assert impact.approval_required is True
+
+
+def test_http_node_requires_target_url_method_and_egress_profile() -> None:
+    http_node = NodeDefinition(
+        id="http_1",
+        name="Call incident API",
+        type="http",
+        data=HttpNodeData(
+            action_ref="incident.create",
+            method="POST",
+            url="https://api.example.com/incidents",
+            tool_group_ref="incident.write",
+            environment="prod",
+            egress_profile_ref="prod-egress",
+            approval_required=True,
+            headers_schema={"type": "object"},
+            body_schema={"type": "object"},
+        ),
+        risk_level="high",
+    )
+    workflow = make_workflow(
+        nodes=[start_node(), http_node, end_node()],
+        edges=[
+            EdgeDefinition(source="start_1", target="http_1"),
+            EdgeDefinition(source="http_1", target="end_1"),
+        ],
+    )
+
+    impact = workflow.permission_impact()
+
+    assert impact.tool_groups == ["incident.write"]
+    assert impact.environments == ["prod"]
+    assert impact.risk_levels == ["high"]
     assert impact.approval_required is True

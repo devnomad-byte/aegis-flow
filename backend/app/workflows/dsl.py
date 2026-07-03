@@ -17,6 +17,7 @@ NodeType = Literal[
 RiskLevel = Literal["low", "medium", "high", "critical"]
 WorkflowStatus = Literal["draft", "published", "archived"]
 WorkflowInputType = Literal["string", "number", "integer", "boolean", "object", "array"]
+HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRICT_MODEL_CONFIG = ConfigDict(frozen=True, extra="forbid")
@@ -91,8 +92,13 @@ class HttpNodeData(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
     action_ref: str
+    method: HttpMethod
+    url: str = Field(min_length=1, max_length=2048)
     tool_group_ref: str
     environment: str
+    egress_profile_ref: str = Field(default="", max_length=120)
+    headers_schema: dict[str, object] = Field(default_factory=dict)
+    body_schema: dict[str, object] = Field(default_factory=dict)
     approval_required: bool = False
 
 

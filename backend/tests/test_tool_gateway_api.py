@@ -284,6 +284,10 @@ class FakeMcpToolCallClient:
         arguments: dict[str, object],
         lease_ref: str,
         egress_allowed_hosts: list[str] | None = None,
+        egress_allowed_ports: list[int] | None = None,
+        egress_proxy_mode: str = "direct",
+        egress_proxy_url: str = "",
+        egress_dns_pinning_required: bool = False,
     ) -> McpToolCallResult:
         if self.error is not None:
             raise self.error
@@ -295,6 +299,10 @@ class FakeMcpToolCallClient:
                 "arguments": arguments,
                 "lease_ref": lease_ref,
                 "egress_allowed_hosts": egress_allowed_hosts or [],
+                "egress_allowed_ports": egress_allowed_ports or [],
+                "egress_proxy_mode": egress_proxy_mode,
+                "egress_proxy_url": egress_proxy_url,
+                "egress_dns_pinning_required": egress_dns_pinning_required,
             }
         )
         return self.result

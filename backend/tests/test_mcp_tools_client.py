@@ -1,3 +1,4 @@
+import httpx
 from backend.app.tool_registry.mcp_client import (
     HttpMcpToolsClient,
     McpServerConnection,
@@ -99,10 +100,22 @@ def test_infer_tool_risk_level_treats_unknown_and_open_world_tools_as_medium() -
 async def test_http_mcp_tools_client_ignores_system_proxy_environment() -> None:
     client = HttpMcpToolsClient()
 
-    http_client = client._build_http_client()
+    http_client = client._build_http_client(proxy_url="")
     try:
         assert http_client.trust_env is False
         assert http_client.follow_redirects is False
+    finally:
+        await http_client.aclose()
+
+
+async def test_http_mcp_tools_client_uses_explicit_platform_proxy_only() -> None:
+    client = HttpMcpToolsClient(proxy_url="http://egress-proxy.internal:8080")
+
+    http_client = client._build_http_client(proxy_url=client.proxy_url)
+    try:
+        assert http_client.trust_env is False
+        assert http_client.follow_redirects is False
+        assert _proxy_hosts(http_client) == ["egress-proxy.internal"]
     finally:
         await http_client.aclose()
 
@@ -124,3 +137,14 @@ async def test_http_mcp_tools_client_rejects_blocked_egress_before_request() -> 
         raise AssertionError("expected McpToolListError")
 
     assert "plain_http_not_allowed" in message
+
+
+def _proxy_hosts(http_client: httpx.AsyncClient) -> list[str]:
+    hosts: list[str] = []
+    mounts = http_client._mounts
+    for transport in mounts.values():
+        pool = getattr(transport, "_pool", None)
+        proxy_url = getattr(pool, "_proxy_url", None)
+        if proxy_url is not None:
+            hosts.append(proxy_url.host.decode("ascii"))
+    return hosts

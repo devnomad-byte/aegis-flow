@@ -42,11 +42,21 @@ def test_default_docker_command_includes_sandbox_baseline() -> None:
     assert "/var/run/docker.sock" not in command
 
 
+def test_shell_runner_can_use_aegis_egress_proxy_network() -> None:
+    policy = DockerSandboxPolicy(network_mode="aegis-egress-prod")
+
+    command = build_docker_run_command(make_invocation(), policy)
+
+    assert "--network=aegis-egress-prod" in command
+
+
 @pytest.mark.parametrize(
     "policy",
     [
         DockerSandboxPolicy(privileged=True),
         DockerSandboxPolicy(network_mode="host"),
+        DockerSandboxPolicy(network_mode="bridge"),
+        DockerSandboxPolicy(network_mode="prod"),
         DockerSandboxPolicy(user="0:0"),
         DockerSandboxPolicy(cap_add=["NET_ADMIN"]),
         DockerSandboxPolicy(security_opt=[]),
