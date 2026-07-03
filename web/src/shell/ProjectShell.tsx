@@ -11,6 +11,7 @@ import {
 import { useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { ProjectCommandCenter } from "../modules/project-command-center/ProjectCommandCenter";
 import { ProjectModelGatewaySettings } from "../modules/model-gateway/ProjectModelGatewaySettings";
 import { RunObservatory } from "../modules/run-observatory/RunObservatory";
 import { WorkflowStudio } from "../modules/workflow-studio/WorkflowStudio";
@@ -19,7 +20,7 @@ import type { ProjectContext } from "./projectContext";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 
 const navItems = [
-  { label: "Project Command", icon: LayoutDashboard, route: "workflows" },
+  { label: "Project Command", icon: LayoutDashboard, route: "command" },
   { label: "Workflow Studio", icon: GitBranch, route: "workflows" },
   { label: "Agent Console", icon: Bot, route: "workflows" },
   { label: "Tool Registry", icon: Boxes, route: "workflows" },
@@ -32,10 +33,10 @@ const navItems = [
 type ProjectShellProps = {
   project: ProjectContext;
   runtime: AegisRuntime;
-  view?: "workflows" | "model-gateway-settings" | "runs";
+  view?: "command" | "workflows" | "model-gateway-settings" | "runs";
 };
 
-export function ProjectShell({ project, runtime, view = "workflows" }: ProjectShellProps) {
+export function ProjectShell({ project, runtime, view = "command" }: ProjectShellProps) {
   const router = useRouter();
 
   useEffect(() => {
@@ -53,6 +54,7 @@ export function ProjectShell({ project, runtime, view = "workflows" }: ProjectSh
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive =
+              (view === "command" && item.route === "command") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
               (view === "runs" && item.route === "runs") ||
               (view === "model-gateway-settings" && item.route === "model-gateway-settings");
@@ -72,6 +74,13 @@ export function ProjectShell({ project, runtime, view = "workflows" }: ProjectSh
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId/runs",
+                    });
+                    return;
+                  }
+                  if (item.route === "command") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId",
                     });
                     return;
                   }
@@ -112,6 +121,8 @@ export function ProjectShell({ project, runtime, view = "workflows" }: ProjectSh
         <ProjectModelGatewaySettings project={project} />
       ) : view === "runs" ? (
         <RunObservatory project={project} />
+      ) : view === "command" ? (
+        <ProjectCommandCenter project={project} />
       ) : (
         <WorkflowStudio project={project} />
       )}

@@ -44,8 +44,14 @@ const globalRoute = createRoute({
 
 const projectRoute = createRoute({
   getParentRoute: () => rootRoute,
+  path: "/projects/$projectId",
+  component: ProjectCommandRoute,
+});
+
+const projectWorkflowsRoute = createRoute({
+  getParentRoute: () => rootRoute,
   path: "/projects/$projectId/workflows",
-  component: ProjectRoute,
+  component: ProjectWorkflowsRoute,
 });
 
 const projectModelGatewaySettingsRoute = createRoute({
@@ -65,6 +71,7 @@ const routeTree = rootRoute.addChildren([
   forbiddenRoute,
   globalRoute,
   projectRoute,
+  projectWorkflowsRoute,
   projectModelGatewaySettingsRoute,
   projectRunsRoute,
 ]);
@@ -94,7 +101,7 @@ function GlobalRoute() {
   return <GlobalShell account={account} />;
 }
 
-function ProjectRoute() {
+function ProjectCommandRoute() {
   const context = projectRoute.useRouteContext();
   const params = projectRoute.useParams();
   const project = findProjectForRoute(context.account, params.projectId);
@@ -104,6 +111,18 @@ function ProjectRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} />;
+}
+
+function ProjectWorkflowsRoute() {
+  const context = projectWorkflowsRoute.useRouteContext();
+  const params = projectWorkflowsRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="workflows" />;
 }
 
 function ProjectModelGatewaySettingsRoute() {

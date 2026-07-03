@@ -40,7 +40,7 @@ export function ProjectSwitcher({ currentProject, runtime }: ProjectSwitcherProp
             setError(null);
             void router.navigate({
               params: { projectId: nextProjectId },
-              to: "/projects/$projectId/workflows",
+              to: "/projects/$projectId",
             });
           }}
           value={currentProject.projectId}

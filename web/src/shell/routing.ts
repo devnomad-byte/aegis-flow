@@ -24,5 +24,5 @@ export function resolveLandingPath(account: AegisAccount) {
     return "/forbidden";
   }
 
-  return `/projects/${firstActiveProject.projectId}/workflows`;
+  return `/projects/${firstActiveProject.projectId}`;
 }

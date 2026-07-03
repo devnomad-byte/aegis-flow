@@ -34,7 +34,7 @@ describe("project switching", () => {
     if (!result.ok) {
       throw new Error("Expected project switch to succeed");
     }
-    expect(result.path).toBe("/projects/customer-care/workflows");
+    expect(result.path).toBe("/projects/customer-care");
     expect(projectScopeStore.getState().project.projectId).toBe("customer-care");
     expect(queryClient.getQueryData(["project", "ops-command", "workflow-drafts"])).toBeUndefined();
     expect(queryClient.getQueryData(["global", "risk-summary"])).toEqual({ blocked: 2 });

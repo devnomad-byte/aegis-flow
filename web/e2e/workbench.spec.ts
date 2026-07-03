@@ -36,6 +36,19 @@ test("switches project scope on mobile", async ({ page }) => {
 
   await page.getByLabel("切换项目").selectOption("customer-care");
 
-  await expect(page).toHaveURL(/\/projects\/customer-care\/workflows$/);
+  await expect(page).toHaveURL(/\/projects\/customer-care$/);
   await expect(page.locator(".aegis-scope strong").filter({ hasText: "客服工单项目" })).toBeVisible();
+});
+
+test("renders project command center on desktop and mobile", async ({ page }) => {
+  await page.goto("/projects/ops-command");
+
+  await expect(page.getByRole("heading", { name: "Project Command Center" })).toBeVisible();
+  await expect(page.getByText("Open Workflow Studio")).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/projects/ops-command");
+
+  await expect(page.getByRole("heading", { name: "Project Command Center" })).toBeVisible();
+  await expect(page.getByText("Open Workflow Studio")).toBeVisible();
 });

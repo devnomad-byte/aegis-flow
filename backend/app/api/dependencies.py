@@ -14,6 +14,8 @@ from backend.app.knowledge.object_store import build_knowledge_object_store
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from backend.app.knowledge.store import KnowledgeIngestionStore
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
+from backend.app.project_command.sqlalchemy_store import SqlAlchemyProjectCommandCenterStore
+from backend.app.project_command.store import ProjectCommandCenterStore
 from backend.app.retrieval.eval_store import RetrievalEvalStore
 from backend.app.retrieval.milvus_client import build_milvus_retrieval_client
 from backend.app.retrieval.sqlalchemy_eval_store import SqlAlchemyRetrievalEvalStore
@@ -61,6 +63,12 @@ def get_global_command_center_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> GlobalCommandCenterStore:
     return SqlAlchemyGlobalCommandCenterStore(session)
+
+
+def get_project_command_center_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> ProjectCommandCenterStore:
+    return SqlAlchemyProjectCommandCenterStore(session)
 
 
 def get_knowledge_ingestion_store(

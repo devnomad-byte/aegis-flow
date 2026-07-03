@@ -39,5 +39,5 @@ export function switchProjectScope({
   workspaceUiStateStore.getState().resetProjectScopedState();
   projectScopeStore.getState().setProject(nextProject);
 
-  return { ok: true, path: `/projects/${nextProject.projectId}/workflows` };
+  return { ok: true, path: `/projects/${nextProject.projectId}` };
 }

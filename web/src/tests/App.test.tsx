@@ -28,6 +28,38 @@ describe("App", () => {
     expect(screen.getByText("Harness Loop Timeline")).toBeInTheDocument();
   });
 
+  it("renders the project command center for the project root route", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          project: {
+            project_id: "ops-command",
+            project_name: "Ops Command",
+            project_slug: "ops-command",
+            status: "active",
+          },
+          kpis: {
+            workflow_drafts: 0,
+            mcp_servers: 0,
+            unhealthy_mcp_servers: 0,
+            pending_approvals: 0,
+            high_risk_invocations: 0,
+            recent_activity: 0,
+          },
+          mcp_health: [],
+          pending_approvals: [],
+          recent_activity: [],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    render(<App initialPath="/projects/ops-command" />);
+
+    expect(await screen.findByRole("heading", { name: "Project Command Center" })).toBeInTheDocument();
+    expect(await screen.findByText("No recent project activity")).toBeInTheDocument();
+  });
+
   it("renders project model gateway settings for the project settings route", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ policies: [], count: 0 }), { status: 200 }),
@@ -86,6 +118,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("客服工单项目")).toBeInTheDocument();
     });
+    expect(screen.getByRole("heading", { name: "Project Command Center" })).toBeInTheDocument();
     expect(projectScopeStore.getState().project.projectId).toBe("customer-care");
     expect(queryClient.getQueryData(["project", "ops-command", "workflow-drafts"])).toBeUndefined();
     expect(queryClient.getQueryData(["global", "risk-summary"])).toEqual({ blocked: 2 });

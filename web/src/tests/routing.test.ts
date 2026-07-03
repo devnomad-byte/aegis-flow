@@ -8,8 +8,8 @@ describe("routing guards", () => {
     expect(resolveLandingPath(DEMO_ACCOUNTS.superAdmin)).toBe("/global");
   });
 
-  it("lands regular users in their first active project workflow route", () => {
-    expect(resolveLandingPath(DEMO_ACCOUNTS.projectMember)).toBe("/projects/ops-command/workflows");
+  it("lands regular users in their first active project command center", () => {
+    expect(resolveLandingPath(DEMO_ACCOUNTS.projectMember)).toBe("/projects/ops-command");
   });
 
   it("allows only global roles into the global shell", () => {
