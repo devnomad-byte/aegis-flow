@@ -1,0 +1,522 @@
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
+from backend.app.api.dependencies import (
+    get_audit_event_store,
+    get_current_account,
+    get_mcp_tool_call_client,
+    get_project_access_provider,
+    get_tool_invocation_store,
+    get_tool_registry_store,
+)
+from backend.app.iam.access import AccountPrincipal
+from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
+from backend.app.main import create_app
+from backend.app.tool_gateway.mcp_client import McpToolCallError, McpToolCallResult
+from backend.app.tool_gateway.schemas import (
+    ToolInvocationCreate,
+    ToolInvocationRead,
+)
+from backend.app.tool_gateway.store import ToolInvocationStore
+from backend.app.tool_registry.schemas import (
+    AuthorizedToolRead,
+    AuthorizedToolsResolveRequest,
+    AuthorizedToolsResolveResponse,
+    SecretLeaseCreateRequest,
+    SecretLeaseRead,
+    ToolMcpServerCredentialRead,
+)
+from fastapi.testclient import TestClient
+
+
+class PermissionAwareProjectProvider(ProjectAccessProvider):
+    def __init__(self, projects: Iterable[ProjectSummary]) -> None:
+        self._projects = {project.id: project for project in projects}
+
+    def list_visible_projects(self, principal: AccountPrincipal) -> list[ProjectSummary]:
+        return list(self._projects.values())
+
+    def get_project_for_account(
+        self,
+        principal: AccountPrincipal,
+        project_id: UUID,
+        required_permission: str,
+    ) -> ProjectSummary | None:
+        project = self._projects.get(project_id)
+        if project is None:
+            return None
+        if required_permission not in project.permissions:
+            raise PermissionError(required_permission)
+        return project
+
+
+class FakeToolRegistryStore:
+    def __init__(self, *, authorized_tools: list[AuthorizedToolRead]) -> None:
+        self.authorized_tools = authorized_tools
+        self.resolve_requests: list[AuthorizedToolsResolveRequest] = []
+        self.secret_leases: list[SecretLeaseRead] = []
+        self.mcp_credentials: dict[tuple[UUID, str], ToolMcpServerCredentialRead] = {}
+
+    async def resolve_authorized_tools(
+        self,
+        *,
+        project_id: UUID,
+        request: AuthorizedToolsResolveRequest,
+    ) -> AuthorizedToolsResolveResponse:
+        self.resolve_requests.append(request)
+        return AuthorizedToolsResolveResponse(
+            project_id=project_id,
+            workflow_ref=request.workflow_ref,
+            agent_ref=request.agent_ref,
+            role_refs=request.role_refs,
+            tool_group_refs=sorted(set(request.tool_group_refs)),
+            tools=[
+                tool
+                for tool in self.authorized_tools
+                if tool.project_id == project_id and tool.group_ref in request.tool_group_refs
+            ],
+        )
+
+    async def get_mcp_server_credential_for_tool(
+        self,
+        *,
+        project_id: UUID,
+        tool_ref: str,
+    ) -> ToolMcpServerCredentialRead | None:
+        return self.mcp_credentials.get((project_id, tool_ref))
+
+    async def create_secret_lease(
+        self,
+        *,
+        project_id: UUID,
+        credential_ref_id: UUID,
+        actor_id: UUID,
+        request: SecretLeaseCreateRequest,
+    ) -> SecretLeaseRead:
+        now = datetime.now(UTC)
+        lease = SecretLeaseRead(
+            id=uuid4(),
+            project_id=project_id,
+            credential_ref_id=credential_ref_id,
+            credential_ref="vault://ops/k8s/readonly",
+            provider="external_vault",
+            external_path="ops/k8s/readonly",
+            lease_ref=f"lease_{uuid4().hex}",
+            provider_lease_id="",
+            requester_type=request.requester_type,
+            requester_ref=request.requester_ref,
+            purpose=request.purpose,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            ttl_seconds=request.ttl_seconds,
+            expires_at=now,
+            revoked_at=None,
+            status="active",
+            denial_reason="",
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.secret_leases.append(lease)
+        return lease
+
+
+class FakeInvocationStore(ToolInvocationStore):
+    def __init__(self) -> None:
+        self.invocations: list[ToolInvocationRead] = []
+
+    async def record_invocation(self, request: ToolInvocationCreate) -> ToolInvocationRead:
+        now = datetime.now(UTC)
+        invocation = ToolInvocationRead(
+            id=uuid4(),
+            created_at=now,
+            updated_at=now,
+            **request.model_dump(),
+        )
+        self.invocations.append(invocation)
+        return invocation
+
+
+class FakeMcpToolCallClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.result = McpToolCallResult(
+            content=[{"type": "text", "text": "pods: web-1"}],
+            structured_content={"pods": ["web-1"]},
+            is_error=False,
+        )
+        self.error: McpToolCallError | None = None
+
+    async def call_tool(
+        self,
+        *,
+        base_url: str,
+        transport: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        lease_ref: str,
+    ) -> McpToolCallResult:
+        if self.error is not None:
+            raise self.error
+        self.calls.append(
+            {
+                "base_url": base_url,
+                "transport": transport,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "lease_ref": lease_ref,
+            }
+        )
+        return self.result
+
+
+class InMemoryAuditEventStore:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    async def record_project_event(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        action: str,
+        target_type: str,
+        target_id: str,
+        result: str = "success",
+        risk_level: str = "low",
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.events.append(
+            {
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "result": result,
+                "risk_level": risk_level,
+                "metadata": metadata or {},
+            }
+        )
+
+
+def make_account() -> AccountPrincipal:
+    return AccountPrincipal(account_id=uuid4(), status="active")
+
+
+def make_project(
+    project_id: UUID | None = None,
+    *,
+    permissions: list[str],
+) -> ProjectSummary:
+    resolved_id = project_id or uuid4()
+    return ProjectSummary(
+        id=resolved_id,
+        slug=f"project-{resolved_id.hex[:8]}",
+        name="运维排障项目",
+        status="active",
+        roles=["project_admin"],
+        permissions=permissions,
+    )
+
+
+def build_client(
+    *,
+    account: AccountPrincipal,
+    provider: ProjectAccessProvider,
+    registry_store: FakeToolRegistryStore,
+    invocation_store: ToolInvocationStore,
+    audit_store: InMemoryAuditEventStore,
+    call_client: FakeMcpToolCallClient,
+) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_current_account] = lambda: account
+    app.dependency_overrides[get_project_access_provider] = lambda: provider
+    app.dependency_overrides[get_tool_registry_store] = lambda: registry_store
+    app.dependency_overrides[get_tool_invocation_store] = lambda: invocation_store
+    app.dependency_overrides[get_audit_event_store] = lambda: audit_store
+    app.dependency_overrides[get_mcp_tool_call_client] = lambda: call_client
+    return TestClient(app)
+
+
+def authorized_tool(project_id: UUID) -> AuthorizedToolRead:
+    return AuthorizedToolRead(
+        project_id=project_id,
+        tool_group_id=uuid4(),
+        tool_definition_id=uuid4(),
+        group_ref="k8s.readonly",
+        tool_ref="mcp-k8s-test.kubectl_get_pods",
+        server_ref="mcp-k8s-test",
+        tool_name="kubectl_get_pods",
+        display_name="获取 Pod",
+        description="List pods",
+        input_schema={
+            "type": "object",
+            "properties": {"namespace": {"type": "string"}},
+            "required": ["namespace"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        effective_risk_level="low",
+        approval_required=False,
+        parameter_policy={},
+        allowed_role_refs=["oncall"],
+        allowed_workflow_refs=["incident-response"],
+        allowed_agent_refs=["ops-agent"],
+    )
+
+
+def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    credential_ref_id = uuid4()
+    registry_store.mcp_credentials[(project.id, tool.tool_ref)] = ToolMcpServerCredentialRead(
+        mcp_server_id=uuid4(),
+        server_ref=tool.server_ref,
+        base_url="https://mcp.internal.example/k8s",
+        transport="streamable_http",
+        credential_ref_id=credential_ref_id,
+        credential_ref="vault://ops/k8s/readonly",
+    )
+    invocation_store = FakeInvocationStore()
+    audit_store = InMemoryAuditEventStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=audit_store,
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+            "run_id": "run-123",
+            "node_id": "agent_1",
+            "trace_id": "trace-123",
+            "tool_call_id": "call-123",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tool_ref"] == tool.tool_ref
+    assert payload["status"] == "success"
+    assert payload["policy_decision"] == "allowed"
+    assert payload["result"]["structured_content"] == {"pods": ["web-1"]}
+    assert payload["secret_lease_ref"].startswith("lease_")
+    assert "secret" not in payload["output_summary"].lower()
+    assert len(call_client.calls) == 1
+    assert call_client.calls[0]["tool_name"] == "kubectl_get_pods"
+    assert call_client.calls[0]["arguments"] == {"namespace": "default"}
+    assert call_client.calls[0]["lease_ref"] == payload["secret_lease_ref"]
+    assert registry_store.resolve_requests[0].tool_group_refs == ["k8s.readonly"]
+    assert registry_store.secret_leases[0].credential_ref_id == credential_ref_id
+    assert invocation_store.invocations[0].secret_lease_ref == payload["secret_lease_ref"]
+    assert audit_store.events[-1]["action"] == "tool_gateway.invoke"
+    assert audit_store.events[-1]["result"] == "success"
+
+
+def test_tool_gateway_rejects_unauthorized_tool_without_calling_mcp() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    registry_store = FakeToolRegistryStore(authorized_tools=[])
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=FakeInvocationStore(),
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": "mcp-k8s-test.kubectl_delete_pod",
+            "arguments": {"pod": "web-1"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert call_client.calls == []
+
+
+def test_tool_gateway_rejects_cross_project_authorized_tool_without_calling_mcp() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    other_project = make_project(permissions=["tool-registry:view"])
+    registry_store = FakeToolRegistryStore(authorized_tools=[authorized_tool(other_project.id)])
+    call_client = FakeMcpToolCallClient()
+    invocation_store = FakeInvocationStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project, other_project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=audit_store,
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": "mcp-k8s-test.kubectl_get_pods",
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert call_client.calls == []
+    assert invocation_store.invocations[0].policy_decision == "denied"
+    assert audit_store.events[-1]["result"] == "failure"
+
+
+def test_tool_gateway_rejects_invalid_arguments_without_calling_mcp() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=FakeInvocationStore(),
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": 123, "extra": "nope"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "arguments do not match tool input schema" in response.json()["detail"]
+    assert call_client.calls == []
+
+
+def test_tool_gateway_records_inactive_credential_reference_failure() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    registry_store.mcp_credentials[(project.id, tool.tool_ref)] = ToolMcpServerCredentialRead(
+        mcp_server_id=uuid4(),
+        server_ref=tool.server_ref,
+        base_url="https://mcp.internal.example/k8s",
+        transport="streamable_http",
+        credential_ref_id=None,
+        credential_ref="vault://ops/k8s/archived",
+    )
+    invocation_store = FakeInvocationStore()
+    audit_store = InMemoryAuditEventStore()
+    call_client = FakeMcpToolCallClient()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=audit_store,
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert call_client.calls == []
+    assert invocation_store.invocations[0].status == "failed"
+    assert invocation_store.invocations[0].credential_ref == "vault://ops/k8s/archived"
+    assert audit_store.events[-1]["result"] == "failure"
+
+
+def test_tool_gateway_redacts_mcp_error_secrets() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    tool = authorized_tool(project.id)
+    registry_store = FakeToolRegistryStore(authorized_tools=[tool])
+    registry_store.mcp_credentials[(project.id, tool.tool_ref)] = ToolMcpServerCredentialRead(
+        mcp_server_id=uuid4(),
+        server_ref=tool.server_ref,
+        base_url="https://mcp.internal.example/k8s",
+        transport="streamable_http",
+        credential_ref_id=None,
+        credential_ref="",
+    )
+    invocation_store = FakeInvocationStore()
+    call_client = FakeMcpToolCallClient()
+    call_client.error = McpToolCallError(
+        "upstream failed token=real-token password: real-password api_key=real-key"
+    )
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        invocation_store=invocation_store,
+        audit_store=InMemoryAuditEventStore(),
+        call_client=call_client,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": tool.tool_ref,
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+        },
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "real-token" not in detail
+    assert "real-password" not in detail
+    assert "real-key" not in detail
+    assert "[redacted]" in detail
+    assert "real-token" not in invocation_store.invocations[0].error_message
+    assert "real-password" not in invocation_store.invocations[0].error_message
+    assert "real-key" not in invocation_store.invocations[0].error_message

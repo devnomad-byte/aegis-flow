@@ -45,6 +45,7 @@ from backend.app.tool_registry.schemas import (
     ToolGroupItemCreateRequest,
     ToolGroupItemRead,
     ToolGroupRead,
+    ToolMcpServerCredentialRead,
     ToolSyncRunRead,
 )
 from backend.app.tool_registry.store import (
@@ -520,6 +521,51 @@ class SqlAlchemyToolRegistryStore:
             role_refs=request.role_refs,
             tool_group_refs=requested_refs,
             tools=tools,
+        )
+
+    async def get_mcp_server_credential_for_tool(
+        self,
+        *,
+        project_id: UUID,
+        tool_ref: str,
+    ) -> ToolMcpServerCredentialRead | None:
+        result = await self._session.execute(
+            select(
+                ToolRegistryMcpServer.id,
+                ToolRegistryMcpServer.server_ref,
+                ToolRegistryMcpServer.base_url,
+                ToolRegistryMcpServer.transport,
+                ToolRegistryMcpServer.credential_ref,
+                ToolRegistryCredentialRef.id.label("credential_ref_id"),
+            )
+            .join(
+                ToolRegistryToolDefinition,
+                ToolRegistryToolDefinition.mcp_server_id == ToolRegistryMcpServer.id,
+            )
+            .outerjoin(
+                ToolRegistryCredentialRef,
+                (ToolRegistryCredentialRef.project_id == ToolRegistryMcpServer.project_id)
+                & (ToolRegistryCredentialRef.credential_ref == ToolRegistryMcpServer.credential_ref)
+                & (ToolRegistryCredentialRef.status == "active"),
+            )
+            .where(
+                ToolRegistryMcpServer.project_id == project_id,
+                ToolRegistryMcpServer.status == "active",
+                ToolRegistryToolDefinition.project_id == project_id,
+                ToolRegistryToolDefinition.tool_ref == tool_ref,
+                ToolRegistryToolDefinition.status == "active",
+            )
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return ToolMcpServerCredentialRead(
+            mcp_server_id=row.id,
+            server_ref=row.server_ref,
+            base_url=row.base_url,
+            transport=row.transport,
+            credential_ref_id=row.credential_ref_id,
+            credential_ref=row.credential_ref,
         )
 
     async def sync_mcp_server_tools(

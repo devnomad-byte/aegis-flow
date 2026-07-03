@@ -21,6 +21,7 @@ from backend.app.tool_registry.schemas import (
     ToolGroupItemCreateRequest,
     ToolGroupItemRead,
     ToolGroupRead,
+    ToolMcpServerCredentialRead,
     ToolSyncRunRead,
 )
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
@@ -178,6 +179,14 @@ class ToolRegistryStore(Protocol):
         project_id: UUID,
         request: AuthorizedToolsResolveRequest,
     ) -> AuthorizedToolsResolveResponse:
+        raise NotImplementedError
+
+    async def get_mcp_server_credential_for_tool(
+        self,
+        *,
+        project_id: UUID,
+        tool_ref: str,
+    ) -> ToolMcpServerCredentialRead | None:
         raise NotImplementedError
 
     async def sync_mcp_server_tools(

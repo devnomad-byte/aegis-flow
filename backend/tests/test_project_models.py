@@ -33,6 +33,7 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "retrieval_query_logs",
         "agent_memories",
         "run_lessons",
+        "tool_gateway_invocations",
     }
 
     assert expected_tables.issubset(Base.metadata.tables)
@@ -64,6 +65,7 @@ def test_project_scoped_tables_have_project_id() -> None:
         "retrieval_query_logs",
         "agent_memories",
         "run_lessons",
+        "tool_gateway_invocations",
     }
 
     for table_name in project_scoped_tables:
@@ -102,6 +104,7 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         ("retrieval_eval_cases", ("project_id", "dataset_id", "case_ref")),
         ("agent_memories", ("project_id", "memory_scope", "namespace", "memory_key")),
         ("run_lessons", ("project_id", "lesson_ref")),
+        ("tool_gateway_invocations", ("project_id", "tool_call_id")),
     }
 
     actual: set[tuple[str, tuple[str, ...]]] = set()

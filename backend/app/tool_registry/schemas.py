@@ -143,6 +143,15 @@ class McpServerRead(RegistryResourceRead):
     last_sync_error: str
 
 
+class ToolMcpServerCredentialRead(BaseModel):
+    mcp_server_id: UUID
+    server_ref: str
+    base_url: str
+    transport: McpTransport
+    credential_ref_id: UUID | None = None
+    credential_ref: str = ""
+
+
 class ToolGroupRead(RegistryResourceRead):
     group_ref: str
     risk_level: RiskLevel

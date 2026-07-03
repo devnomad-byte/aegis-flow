@@ -6,6 +6,9 @@ from backend.app.audit.store import AuditEventStore
 from backend.app.db.session import get_async_session
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient, McpToolCallClient
+from backend.app.tool_gateway.sqlalchemy_store import SqlAlchemyToolInvocationStore
+from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.mcp_client import HttpMcpToolsClient, McpToolsClient
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryStore
@@ -47,5 +50,15 @@ def get_tool_registry_store(
     return SqlAlchemyToolRegistryStore(session)
 
 
+def get_tool_invocation_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> ToolInvocationStore:
+    return SqlAlchemyToolInvocationStore(session)
+
+
 def get_mcp_tools_client() -> McpToolsClient:
     return HttpMcpToolsClient()
+
+
+def get_mcp_tool_call_client() -> McpToolCallClient:
+    return HttpMcpToolCallClient()
