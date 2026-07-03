@@ -8,7 +8,11 @@ from backend.app.execution.shell_runner import (
     build_docker_run_command,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.final_acceptance,
+    pytest.mark.real_docker,
+]
 
 DOCKER_IMAGE = "redis:7-alpine"
 

@@ -5,7 +5,11 @@ from backend.app.model_gateway.openai_compatible import (
     OpenAICompatibleModelGatewayClient,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.final_acceptance,
+    pytest.mark.real_ai_provider,
+]
 
 
 def require_real_provider_settings() -> AppSettings:

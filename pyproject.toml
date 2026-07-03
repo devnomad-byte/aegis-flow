@@ -57,6 +57,11 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
   "integration: tests that require local external services such as Docker",
+  "final_acceptance: tests that prove release-critical behavior against real dependencies",
+  "real_ai_provider: tests that call a real OpenAI-compatible AI provider",
+  "real_database: tests that require the configured PostgreSQL database",
+  "real_docker: tests that require the local Docker daemon and sandboxed containers",
+  "real_mcp: tests that require a real HTTP MCP server",
 ]
 
 [tool.coverage.run]

@@ -55,6 +55,31 @@ Current technical direction:
 - Frontend: React, TypeScript, Vite, React Flow, TanStack Query/Router, Zustand
 - Infrastructure: PostgreSQL, Redis, S3-compatible storage, Milvus
 
+## Verification
+
+Backend quality gates:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy .
+uv run pytest --cov=backend.app --cov-report=term-missing
+```
+
+Final acceptance uses real dependencies and must not rely on mock/fake data:
+
+```powershell
+$env:AEGIS_FINAL_ACCEPTANCE='1'
+uv run pytest -m final_acceptance
+```
+
+Current final acceptance coverage includes:
+
+- real Docker sandbox checks for Shell Runner isolation
+- real OpenAI-compatible AI provider smoke test
+
+Real secrets belong only in `.env.local` or process environment variables. They must not be committed, printed, or copied into docs.
+
 ## Status
 
 This repository is being initialized. The first implementation target is the foundation for the control plane, project isolation, and workflow runtime.
