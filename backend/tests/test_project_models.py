@@ -1,5 +1,5 @@
 from backend.app.db.base import Base
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint
 
 
 def test_rbac_tables_are_registered_in_metadata() -> None:
@@ -112,5 +112,23 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         for constraint in table.constraints:
             if isinstance(constraint, UniqueConstraint):
                 actual.add((table.name, tuple(column.name for column in constraint.columns)))
+
+    assert expected.issubset(actual)
+
+
+def test_audit_logs_have_query_indexes_for_risk_and_time_filters() -> None:
+    expected = {
+        ("audit_logs", ("created_at",)),
+        ("audit_logs", ("risk_level",)),
+        ("audit_logs", ("result",)),
+        ("audit_logs", ("target_type",)),
+        ("audit_logs", ("project_id", "created_at")),
+    }
+
+    actual: set[tuple[str, tuple[str, ...]]] = set()
+    audit_table = Base.metadata.tables["audit_logs"]
+    for index in audit_table.indexes:
+        if isinstance(index, Index):
+            actual.add((audit_table.name, tuple(column.name for column in index.columns)))
 
     assert expected.issubset(actual)
