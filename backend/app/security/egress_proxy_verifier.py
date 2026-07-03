@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from backend.app.security.egress_proxy_profile import build_envoy_profile
+
 
 @dataclass(frozen=True)
 class EgressProxyCommandResult:
@@ -34,6 +36,8 @@ class EgressProxyVerificationReport:
     denied_host: EgressProxyCommandResult
     denied_port: EgressProxyCommandResult
     redirect_denied: EgressProxyCommandResult
+    metrics: EgressProxyCommandResult
+    admin_from_client: EgressProxyCommandResult
     proxy_unavailable: EgressProxyCommandResult
     audit_events: list[EgressProxyAuditEvent] = field(default_factory=list)
 
@@ -43,6 +47,8 @@ class DockerEgressProxyVerifier:
     image_ref: str
     allowed_hosts: list[str]
     allowed_ports: list[int]
+    proxy_kind: str = "python"
+    proxy_image_ref: str = "envoyproxy/envoy:v1.35-latest"
     timeout_seconds: int = 30
 
     def run(self) -> EgressProxyVerificationReport:
@@ -95,8 +101,13 @@ class DockerEgressProxyVerifier:
             )
             redirect_denied = self._run_client(
                 egress_network,
-                "curl -sS --max-time 5 -x http://aegis-egress-proxy:8888 "
+                "curl -i -sS --max-time 5 -x http://aegis-egress-proxy:8888 "
                 "http://allowed.internal:8080/redirect",
+            )
+            metrics = self._run_metrics(proxy_name)
+            admin_from_client = self._run_client(
+                egress_network,
+                "curl -sS --max-time 5 http://aegis-egress-proxy:9901/stats/prometheus",
             )
             self._docker(["stop", proxy_name], check=False)
             proxy_logs = self._docker(["logs", proxy_name], check=False)
@@ -115,8 +126,10 @@ class DockerEgressProxyVerifier:
                 denied_host=denied_host,
                 denied_port=denied_port,
                 redirect_denied=redirect_denied,
+                metrics=metrics,
+                admin_from_client=admin_from_client,
                 proxy_unavailable=proxy_unavailable,
-                audit_events=parse_proxy_audit_events(proxy_logs.stdout),
+                audit_events=parse_proxy_audit_events(f"{proxy_logs.stdout}\n{proxy_logs.stderr}"),
             )
         finally:
             self._docker(["rm", "-f", target_name, proxy_name], check=False)
@@ -144,6 +157,44 @@ class DockerEgressProxyVerifier:
         )
 
     def _start_proxy(self, name: str, network: str, script_dir: Path) -> None:
+        if self.proxy_kind == "envoy":
+            profile = build_envoy_profile(
+                allowed_hosts=self.allowed_hosts,
+                allowed_ports=self.allowed_ports,
+                image_ref=self.proxy_image_ref,
+            )
+            profile.write_to_directory(script_dir)
+            self._docker(
+                [
+                    "run",
+                    "-d",
+                    "--name",
+                    name,
+                    "--network",
+                    network,
+                    "--network-alias",
+                    "aegis-egress-proxy",
+                    "--mount",
+                    (
+                        f"type=bind,source={script_dir / 'envoy.yaml'},"
+                        "target=/etc/envoy/envoy.yaml,readonly"
+                    ),
+                    "--mount",
+                    (
+                        f"type=bind,source={script_dir / 'policy.lua'},"
+                        "target=/etc/envoy/policy.lua,readonly"
+                    ),
+                    self.proxy_image_ref,
+                    "envoy",
+                    "-c",
+                    "/etc/envoy/envoy.yaml",
+                ]
+            )
+            return
+
+        if self.proxy_kind != "python":
+            raise ValueError(f"Unsupported egress proxy verifier kind: {self.proxy_kind}")
+
         self._docker(
             [
                 "run",
@@ -183,6 +234,25 @@ class DockerEgressProxyVerifier:
             check=False,
         )
 
+    def _run_metrics(self, proxy_name: str) -> EgressProxyCommandResult:
+        if self.proxy_kind != "envoy":
+            return EgressProxyCommandResult(exit_code=0, stdout="", stderr="")
+        return self._docker(
+            [
+                "exec",
+                proxy_name,
+                "/bin/bash",
+                "-lc",
+                (
+                    "exec 3<>/dev/tcp/127.0.0.1/9901; "
+                    "printf 'GET /stats/prometheus HTTP/1.1\\r\\nHost: localhost\\r\\n"
+                    "Connection: close\\r\\n\\r\\n' >&3; "
+                    "cat <&3"
+                ),
+            ],
+            check=False,
+        )
+
     def _docker(self, args: list[str], *, check: bool = True) -> EgressProxyCommandResult:
         completed = subprocess.run(
             ["docker", *args],
@@ -208,10 +278,12 @@ def parse_proxy_audit_events(log_text: str) -> list[EgressProxyAuditEvent]:
     events: list[EgressProxyAuditEvent] = []
     for line in log_text.splitlines():
         line = line.strip()
-        if not line.startswith("{"):
+        json_start = line.find("{")
+        if json_start < 0:
             continue
+        json_text = line[json_start:]
         try:
-            payload = json.loads(line)
+            payload = json.loads(json_text)
         except json.JSONDecodeError:
             continue
         reason = str(payload.get("reason") or "")

@@ -1,0 +1,18 @@
+services:
+  aegis-egress-envoy:
+    image: envoyproxy/envoy:v1.35-latest
+    command:
+    - envoy
+    - -c
+    - /etc/envoy/envoy.yaml
+    networks:
+    - aegis-egress
+    - aegis-upstream
+    volumes:
+    - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    - ./policy.lua:/etc/envoy/policy.lua:ro
+networks:
+  aegis-egress:
+    name: aegis-egress-dev
+  aegis-upstream:
+    name: aegis-upstream-dev

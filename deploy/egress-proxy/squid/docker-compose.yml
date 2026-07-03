@@ -1,0 +1,13 @@
+services:
+  aegis-egress-squid:
+    image: ubuntu/squid:6.6-24.04_beta
+    networks:
+    - aegis-egress
+    - aegis-upstream
+    volumes:
+    - ./squid.conf:/etc/squid/squid.conf:ro
+networks:
+  aegis-egress:
+    name: aegis-egress-dev
+  aegis-upstream:
+    name: aegis-upstream-dev
