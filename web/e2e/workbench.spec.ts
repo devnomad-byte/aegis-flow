@@ -52,3 +52,11 @@ test("renders project command center on desktop and mobile", async ({ page }) =>
   await expect(page.getByRole("heading", { name: "Project Command Center" })).toBeVisible();
   await expect(page.getByText("Open Workflow Studio")).toBeVisible();
 });
+
+test("renders the prompt library settings workspace", async ({ page }) => {
+  await page.goto("/projects/ops-command/settings/prompts");
+
+  await expect(page.getByRole("heading", { name: "Prompt Library" })).toBeVisible();
+  await expect(page.getByText("TEMPLATE RAIL")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create template" })).toBeVisible();
+});

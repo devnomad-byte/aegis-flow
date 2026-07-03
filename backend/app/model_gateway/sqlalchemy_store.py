@@ -79,6 +79,15 @@ class SqlAlchemyModelGatewayStore:
         await self._session.refresh(template)
         return PromptTemplateRead.model_validate(template)
 
+    async def list_prompt_templates(self, project_id: UUID) -> list[PromptTemplateRead]:
+        statement = (
+            select(PromptTemplate)
+            .where(PromptTemplate.project_id == project_id)
+            .order_by(PromptTemplate.template_ref, PromptTemplate.id)
+        )
+        result = await self._session.execute(statement)
+        return [PromptTemplateRead.model_validate(template) for template in result.scalars().all()]
+
     async def get_prompt_template(
         self,
         *,

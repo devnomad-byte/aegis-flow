@@ -60,6 +60,12 @@ const projectModelGatewaySettingsRoute = createRoute({
   component: ProjectModelGatewaySettingsRoute,
 });
 
+const projectPromptLibraryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/settings/prompts",
+  component: ProjectPromptLibraryRoute,
+});
+
 const projectRunsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId/runs",
@@ -73,6 +79,7 @@ const routeTree = rootRoute.addChildren([
   projectRoute,
   projectWorkflowsRoute,
   projectModelGatewaySettingsRoute,
+  projectPromptLibraryRoute,
   projectRunsRoute,
 ]);
 
@@ -135,6 +142,18 @@ function ProjectModelGatewaySettingsRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="model-gateway-settings" />;
+}
+
+function ProjectPromptLibraryRoute() {
+  const context = projectPromptLibraryRoute.useRouteContext();
+  const params = projectPromptLibraryRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="prompt-library" />;
 }
 
 function ProjectRunsRoute() {

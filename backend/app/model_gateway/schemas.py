@@ -123,6 +123,13 @@ class PromptTemplateRead(PromptTemplateCreate):
     updated_at: datetime
 
 
+class PromptTemplateListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    templates: list[PromptTemplateRead]
+    count: int
+
+
 class PromptTemplateCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

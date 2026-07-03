@@ -72,6 +72,65 @@ describe("App", () => {
     expect(screen.getByText("POLICY EDITOR")).toBeInTheDocument();
   });
 
+  it("renders prompt library settings for the project prompt route", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/prompt-templates")) {
+        return new Response(
+          JSON.stringify({
+            templates: [
+              {
+                id: "template-1",
+                project_id: "ops-command",
+                template_ref: "incident-summary",
+                name: "Incident Summary",
+                description: "Summarize incidents.",
+                status: "active",
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-04T08:00:00Z",
+                updated_at: "2026-07-04T08:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          versions: [
+            {
+              id: "version-1",
+              project_id: "ops-command",
+              template_id: "template-1",
+              template_ref: "incident-summary",
+              version: "v1",
+              system_prompt: "You summarize incidents.",
+              user_prompt: "Incident: {{incident}}",
+              variables: ["incident"],
+              output_schema: { type: "object" },
+              status: "active",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-04T08:00:00Z",
+              updated_at: "2026-07-04T08:00:00Z",
+            },
+          ],
+          count: 1,
+        }),
+        { status: 200 },
+      );
+    });
+
+    render(<App initialPath="/projects/ops-command/settings/prompts" />);
+
+    expect(await screen.findByRole("heading", { name: "Prompt Library" })).toBeInTheDocument();
+    expect(await screen.findByText("Incident Summary")).toBeInTheDocument();
+    expect(screen.getByText("TEMPLATE RAIL")).toBeInTheDocument();
+  });
+
   it("renders run observatory for project run detail routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ invocations: [], count: 0 }), { status: 200 }),

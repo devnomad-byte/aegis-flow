@@ -5,6 +5,7 @@ import {
   GitBranch,
   LayoutDashboard,
   MessageSquareText,
+  ScrollText,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import { useEffect } from "react";
 
 import { ProjectCommandCenter } from "../modules/project-command-center/ProjectCommandCenter";
 import { ProjectModelGatewaySettings } from "../modules/model-gateway/ProjectModelGatewaySettings";
+import { ProjectPromptLibrary } from "../modules/prompt-library/ProjectPromptLibrary";
 import { RunObservatory } from "../modules/run-observatory/RunObservatory";
 import { WorkflowStudio } from "../modules/workflow-studio/WorkflowStudio";
 import type { AegisRuntime } from "../app/runtime";
@@ -28,12 +30,13 @@ const navItems = [
   { label: "Debug Chat", icon: MessageSquareText, route: "workflows" },
   { label: "Policy Center", icon: ShieldCheck, route: "workflows" },
   { label: "Model Gateway", icon: SlidersHorizontal, route: "model-gateway-settings" },
+  { label: "Prompt Library", icon: ScrollText, route: "prompt-library" },
 ];
 
 type ProjectShellProps = {
   project: ProjectContext;
   runtime: AegisRuntime;
-  view?: "command" | "workflows" | "model-gateway-settings" | "runs";
+  view?: "command" | "workflows" | "model-gateway-settings" | "prompt-library" | "runs";
 };
 
 export function ProjectShell({ project, runtime, view = "command" }: ProjectShellProps) {
@@ -57,7 +60,8 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
               (view === "command" && item.route === "command") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
               (view === "runs" && item.route === "runs") ||
-              (view === "model-gateway-settings" && item.route === "model-gateway-settings");
+              (view === "model-gateway-settings" && item.route === "model-gateway-settings") ||
+              (view === "prompt-library" && item.route === "prompt-library");
             return (
               <button
                 className={isActive ? "shell-nav-item shell-nav-item-active" : "shell-nav-item"}
@@ -67,6 +71,13 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId/settings/model-gateway",
+                    });
+                    return;
+                  }
+                  if (item.route === "prompt-library") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/settings/prompts",
                     });
                     return;
                   }
@@ -119,6 +130,8 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
 
       {view === "model-gateway-settings" ? (
         <ProjectModelGatewaySettings project={project} />
+      ) : view === "prompt-library" ? (
+        <ProjectPromptLibrary project={project} />
       ) : view === "runs" ? (
         <RunObservatory project={project} />
       ) : view === "command" ? (

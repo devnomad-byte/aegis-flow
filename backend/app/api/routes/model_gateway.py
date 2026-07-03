@@ -21,6 +21,7 @@ from backend.app.model_gateway.schemas import (
     ModelGatewayPolicyUpsertRequest,
     PromptTemplateCreate,
     PromptTemplateCreateRequest,
+    PromptTemplateListResponse,
     PromptTemplateRead,
     PromptTemplateVersionCreate,
     PromptTemplateVersionCreateRequest,
@@ -105,6 +106,32 @@ async def upsert_model_gateway_policy(
         },
     )
     return policy
+
+
+@router.get("/prompt-templates", response_model=PromptTemplateListResponse)
+async def list_prompt_templates(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:view",
+    )
+    templates = await model_gateway_store.list_prompt_templates(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.template.list",
+        target_type="prompt_template",
+        target_id=str(project_id),
+        metadata={"template_count": len(templates)},
+    )
+    return PromptTemplateListResponse(templates=templates, count=len(templates))
 
 
 @router.post("/prompt-templates", response_model=PromptTemplateRead)

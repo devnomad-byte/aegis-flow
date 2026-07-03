@@ -115,6 +115,60 @@ async def test_prompt_library_template_and_version_api_are_project_scoped_and_au
 
 
 @pytest.mark.asyncio
+async def test_prompt_library_lists_project_templates_without_version_prompt_bodies(
+    prompt_library_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    account = make_account()
+    await seed_project(prompt_library_session_factory, project_id, account.account_id)
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider(
+            [make_project(project_id, permissions=["model-gateway:view", "model-gateway:write"])]
+        ),
+        session_factory=prompt_library_session_factory,
+    )
+    template_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates",
+        json={
+            "template_ref": "incident-summary",
+            "name": "Incident Summary",
+            "description": "Summarize operational incidents.",
+            "status": "active",
+        },
+    )
+    assert template_response.status_code == 200
+    version_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/versions",
+        json={
+            "version": "v1",
+            "system_prompt": "Do not leak this system prompt body.",
+            "user_prompt": "Do not leak this user prompt body.",
+            "variables": ["incident"],
+            "output_schema": {"type": "object"},
+            "status": "active",
+        },
+    )
+    assert version_response.status_code == 200
+
+    list_response = client.get(f"/api/v1/projects/{project_id}/model-gateway/prompt-templates")
+
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["count"] == 1
+    assert payload["templates"][0]["template_ref"] == "incident-summary"
+    assert payload["templates"][0]["name"] == "Incident Summary"
+    assert "system prompt body" not in list_response.text.lower()
+    assert "user prompt body" not in list_response.text.lower()
+
+    async with prompt_library_session_factory() as session:
+        audit_events = list(await session.scalars(select(AuditLog).order_by(AuditLog.created_at)))
+
+    assert audit_events[-1].action == "prompt_library.template.list"
+    assert audit_events[-1].event_metadata == {"template_count": 1}
+
+
+@pytest.mark.asyncio
 async def test_prompt_library_write_requires_model_gateway_write_permission(
     prompt_library_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
