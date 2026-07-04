@@ -12,6 +12,7 @@ from backend.app.tool_registry.image_evidence import (
     ShellImageEvidenceProvider,
 )
 from backend.app.tool_registry.schemas import (
+    ShellImageAdmissionPolicyRead,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
 )
@@ -101,6 +102,7 @@ class ShellImageAdmissionService:
         actor_id: UUID,
         request: ShellImageAdmissionResolveRequest,
     ) -> ShellImageAdmissionRead:
+        policy = await self.store.get_shell_image_admission_policy(project_id)
         digest_result = await self.digest_resolver.resolve(request.image_ref)
         digest_match = (
             digest_result.digest_match and digest_result.registry_digest == request.image_digest
@@ -123,6 +125,12 @@ class ShellImageAdmissionService:
             policy_decision = evidence_result.policy_decision
             reason = evidence_result.decision_reason
             evidence = sanitize_image_evidence_summary(evidence_result.evidence)
+        policy_decision, reason = apply_shell_image_admission_policy(
+            policy=policy,
+            policy_decision=policy_decision,
+            decision_reason=reason,
+            signature_status=signature_status,
+        )
         return await self.store.record_shell_image_admission(
             project_id=project_id,
             actor_id=actor_id,
@@ -154,6 +162,12 @@ class ShellImageAdmissionStore(Protocol):
         vulnerability_status: str,
         evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
+        raise NotImplementedError
+
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
         raise NotImplementedError
 
 
@@ -202,6 +216,28 @@ def sanitize_image_evidence_summary(evidence: dict[str, object]) -> dict[str, ob
             nested_key: value[nested_key] for nested_key in allowed if nested_key in value
         }
     return sanitized
+
+
+def apply_shell_image_admission_policy(
+    *,
+    policy: ShellImageAdmissionPolicyRead,
+    policy_decision: str,
+    decision_reason: str,
+    signature_status: str,
+) -> tuple[str, str]:
+    would_reject_reasons: list[str] = []
+    if policy_decision == "rejected":
+        would_reject_reasons.append(decision_reason)
+    if policy.cosign_required and signature_status != "passed":
+        would_reject_reasons.append("Cosign signature evidence is required by project policy")
+
+    if not would_reject_reasons:
+        return "approved", decision_reason
+
+    reason = "; ".join(reason for reason in would_reject_reasons if reason)
+    if policy.enforcement_mode == "dry_run":
+        return "would_reject", f"dry-run would reject: {reason}"
+    return "rejected", reason
 
 
 def _split_registry_and_repo(image_ref_without_reference: str) -> tuple[str, str]:

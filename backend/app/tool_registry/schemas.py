@@ -38,7 +38,7 @@ CredentialRequesterType = Literal["tool_gateway", "execution_gateway", "api", "s
 CredentialAccessDecision = Literal["recorded", "denied"]
 SecretLeaseStatus = Literal["active", "revoked", "expired", "denied"]
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
-ImageAdmissionDecision = Literal["approved", "rejected"]
+ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
 ShellImageAdmissionEnforcementMode = Literal["dry_run", "enforce"]
 
 DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}

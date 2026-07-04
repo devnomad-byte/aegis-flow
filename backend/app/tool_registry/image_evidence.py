@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
-ImageAdmissionDecision = Literal["approved", "rejected"]
+ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
 
 DEFAULT_BLOCKED_SEVERITIES = frozenset({"HIGH", "CRITICAL"})
 KNOWN_SEVERITIES = ("UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL")

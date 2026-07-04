@@ -199,7 +199,7 @@ def _image_is_allowlisted(
     if template.image_ref in image_policy.allowlist:
         return True
     return (
-        template.image_admission_status == "approved"
+        template.image_admission_status in {"approved", "would_reject"}
         and bool(template.image_registry_digest)
         and template.image_registry_digest == template.image_digest
     )

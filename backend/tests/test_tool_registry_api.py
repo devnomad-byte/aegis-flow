@@ -586,10 +586,14 @@ class InMemoryToolRegistryStore:
         template_ref = str(request.template_ref)
         template_version = int(request.template_version)
         reference = f"{template_ref}@{template_version}"
-        admission = self._find_approved_admission(
+        policy = await self.get_shell_image_admission_policy(project_id)
+        admission = self._find_accepted_admission(
             project_id,
             image_ref=str(request.image_ref),
             image_digest=str(request.image_digest),
+            accepted_decisions={"approved", "would_reject"}
+            if policy.enforcement_mode == "dry_run"
+            else {"approved"},
         )
         if (
             str(request.environment_key).lower() in {"prod", "production"}
@@ -700,18 +704,19 @@ class InMemoryToolRegistryStore:
         ] + [admission]
         return admission
 
-    def _find_approved_admission(
+    def _find_accepted_admission(
         self,
         project_id: UUID,
         *,
         image_ref: str,
         image_digest: str,
+        accepted_decisions: set[str],
     ) -> ShellImageAdmissionRead | None:
         for admission in self.image_admissions.get(project_id, []):
             if (
                 admission.image_ref == image_ref
                 and admission.image_digest == image_digest
-                and admission.policy_decision == "approved"
+                and admission.policy_decision in accepted_decisions
             ):
                 return admission
         return None
@@ -1805,6 +1810,102 @@ def test_tool_registry_resolves_shell_image_admission_and_allows_high_risk_templ
     ]
     admission_metadata = cast(dict[str, object], audit_store.events[-2]["metadata"])
     assert admission_metadata["policy_decision"] == "approved"
+
+
+def test_tool_registry_shell_image_policy_dry_run_allows_would_reject_template() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    digest = "sha256:" + ("d" * 64)
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        digest_resolver=StaticDigestResolver(
+            OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=digest,
+                computed_digest=digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            )
+        ),
+        evidence_provider=StaticShellImageEvidenceProvider(
+            ShellImageEvidenceResult(
+                signature_status="not_checked",
+                sbom_status="passed",
+                vulnerability_status="passed",
+                policy_decision="approved",
+                decision_reason="SBOM and vulnerability evidence passed",
+                evidence={
+                    "sbom": {"tool": "trivy", "format": "CycloneDX", "component_count": 2},
+                    "vulnerabilities": {
+                        "tool": "trivy",
+                        "severity_counts": {"HIGH": 0, "CRITICAL": 0},
+                        "blocked_count": 0,
+                    },
+                },
+            )
+        ),
+    )
+
+    policy_response = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy",
+        json={
+            "enforcement_mode": "dry_run",
+            "cosign_required": True,
+            "notation_trust_policy": {
+                "version": "1.0",
+                "trustPolicies": [
+                    {
+                        "name": "runtime-images",
+                        "registryScopes": ["registry.example/aegis/runtime"],
+                        "signatureVerification": {"level": "strict"},
+                        "trustStores": ["ca:aegis-runtime"],
+                        "trustedIdentities": ["x509.subject: CN=SecureBuilder"],
+                    }
+                ],
+            },
+        },
+    )
+    admission = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/resolve",
+        json={
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+        },
+    )
+    created = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "dry-run-diag",
+            "template_version": 1,
+            "name": "Dry Run Diagnostics",
+            "risk_level": "high",
+            "environment_key": "prod",
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo ok"],
+            "parameter_schema": {"type": "object"},
+            "timeout_seconds": 30,
+        },
+    )
+
+    assert policy_response.status_code == 200
+    assert admission.status_code == 200
+    assert admission.json()["policy_decision"] == "would_reject"
+    assert created.status_code == 201
+    assert created.json()["image_admission_status"] == "would_reject"
+    rendered = admission.text + repr(audit_store.events)
+    assert "SecureBuilder" not in rendered
+    admission_metadata = cast(dict[str, object], audit_store.events[-2]["metadata"])
+    assert admission_metadata["policy_decision"] == "would_reject"
+    assert admission_metadata["enforcement_mode"] == "dry_run"
+    assert admission_metadata["cosign_required"] is True
 
 
 def test_tool_registry_shell_image_admission_records_real_evidence_statuses_safely() -> None:

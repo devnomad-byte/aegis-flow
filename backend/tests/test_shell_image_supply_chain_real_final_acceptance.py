@@ -27,6 +27,7 @@ from backend.app.main import create_app
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResolver
 from backend.app.tool_registry.models import (
     ToolRegistryImageAdmission,
+    ToolRegistryShellImagePolicy,
     ToolRegistryShellTemplate,
 )
 from fastapi.testclient import TestClient
@@ -129,8 +130,62 @@ def test_real_postgres_and_real_http_shell_image_admission_final_acceptance() ->
                         "timeout_seconds": 30,
                     },
                 )
+                dry_run_policy_response = client.put(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-images/admission-policy",
+                    json={
+                        "enforcement_mode": "dry_run",
+                        "cosign_required": True,
+                    },
+                )
+                dry_run_admission_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-images/admissions/resolve",
+                    json={"image_ref": image_ref, "image_digest": digest},
+                )
+                dry_run_create_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-templates",
+                    json={
+                        "template_ref": "dry-run-image-admission",
+                        "template_version": 1,
+                        "name": "Dry Run Image Admission",
+                        "risk_level": "high",
+                        "environment_key": "prod",
+                        "image_ref": image_ref,
+                        "image_digest": digest,
+                        "entrypoint": "/bin/sh",
+                        "argv_template": ["-lc", "echo ok"],
+                        "parameter_schema": {"type": "object"},
+                        "timeout_seconds": 30,
+                    },
+                )
+                enforce_policy_response = client.put(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-images/admission-policy",
+                    json={
+                        "enforcement_mode": "enforce",
+                        "cosign_required": True,
+                    },
+                )
+                enforce_admission_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-images/admissions/resolve",
+                    json={"image_ref": image_ref, "image_digest": digest},
+                )
+                enforce_create_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/shell-templates",
+                    json={
+                        "template_ref": "enforce-image-admission",
+                        "template_version": 1,
+                        "name": "Enforce Image Admission",
+                        "risk_level": "high",
+                        "environment_key": "prod",
+                        "image_ref": image_ref,
+                        "image_digest": digest,
+                        "entrypoint": "/bin/sh",
+                        "argv_template": ["-lc", "echo ok"],
+                        "parameter_schema": {"type": "object"},
+                        "timeout_seconds": 30,
+                    },
+                )
 
-            assert registry_state["manifest_requests"] == 1
+            assert registry_state["manifest_requests"] == 3
             assert admission_response.status_code == 200
             admission_body = admission_response.json()
             assert admission_body["policy_decision"] == "approved"
@@ -142,6 +197,15 @@ def test_real_postgres_and_real_http_shell_image_admission_final_acceptance() ->
             created_body = create_response.json()
             assert created_body["image_admission_status"] == "approved"
             assert created_body["image_registry_digest"] == digest
+            assert dry_run_policy_response.status_code == 200
+            assert dry_run_admission_response.status_code == 200
+            assert dry_run_admission_response.json()["policy_decision"] == "would_reject"
+            assert dry_run_create_response.status_code == 201
+            assert dry_run_create_response.json()["image_admission_status"] == "would_reject"
+            assert enforce_policy_response.status_code == 200
+            assert enforce_admission_response.status_code == 200
+            assert enforce_admission_response.json()["policy_decision"] == "rejected"
+            assert enforce_create_response.status_code == 400
             rendered = json.dumps([admission_body, created_body])
             assert "raw-token" not in rendered
             assert "password" not in rendered.lower()
@@ -218,10 +282,18 @@ async def _assert_persisted(
             )
         )
         assert admission is not None
-        assert admission.policy_decision == "approved"
+        assert admission.policy_decision == "rejected"
         assert template is not None
         assert template.image_admission_status == "approved"
         assert template.image_registry_digest == digest
+        dry_run_template = await session.scalar(
+            select(ToolRegistryShellTemplate).where(
+                ToolRegistryShellTemplate.project_id == project_id,
+                ToolRegistryShellTemplate.template_ref == "dry-run-image-admission",
+            )
+        )
+        assert dry_run_template is not None
+        assert dry_run_template.image_admission_status == "would_reject"
 
 
 async def _ensure_permission(session: AsyncSession, code: str) -> ProjectPermission:
@@ -259,6 +331,7 @@ async def _cleanup(
             )
         for model in (
             ToolRegistryShellTemplate,
+            ToolRegistryShellImagePolicy,
             ToolRegistryImageAdmission,
             AuditLog,
             ProjectMember,

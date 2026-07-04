@@ -25,6 +25,7 @@ from backend.app.tool_registry.image_supply_chain import (
     ShellImageAdmissionService,
 )
 from backend.app.tool_registry.schemas import (
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
 )
@@ -202,6 +203,42 @@ async def test_trivy_provider_uses_configured_cache_dir(
     assert "--cache-dir" in runner.commands[1].argv
 
 
+@pytest.mark.asyncio
+async def test_trivy_provider_uses_policy_blocked_severities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = RecordingRunner(
+        json_results=[
+            {"bomFormat": "CycloneDX", "components": [{"name": "busybox"}]},
+            {
+                "Results": [
+                    {
+                        "Vulnerabilities": [
+                            {"VulnerabilityID": "CVE-LOW", "Severity": "LOW"},
+                            {"VulnerabilityID": "CVE-MED", "Severity": "MEDIUM"},
+                        ]
+                    }
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr("backend.app.tool_registry.image_evidence.shutil.which", lambda _: "trivy")
+    provider = TrivyCliEvidenceProvider(
+        blocked_severities=frozenset({"LOW"}),
+        runner=runner,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime:7-alpine",
+        image_digest="sha256:" + ("e" * 64),
+    )
+
+    assert result.policy_decision == "rejected"
+    assert result.vulnerability_status == "failed"
+    assert result.evidence["vulnerabilities"]["blocked_severities"] == ["LOW"]
+    assert result.evidence["vulnerabilities"]["blocked_count"] == 1
+
+
 AsgiApp = Callable[
     [
         MutableMapping[str, Any],
@@ -253,7 +290,7 @@ async def test_oci_manifest_digest_resolver_validates_registry_header_and_body_d
 
 
 @pytest.mark.asyncio
-async def test_shell_image_admission_service_records_rejected_digest_mismatch() -> None:
+async def test_default_policy_records_would_reject_on_digest_mismatch() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -295,7 +332,7 @@ async def test_shell_image_admission_service_records_rejected_digest_mismatch() 
 
     await engine.dispose()
 
-    assert admission.policy_decision == "rejected"
+    assert admission.policy_decision == "would_reject"
     assert admission.digest_match is False
     assert admission.registry_digest == registry_digest
     assert admission.image_digest == requested_digest
@@ -487,13 +524,192 @@ async def test_high_vulnerability_evidence_rejects_image_admission() -> None:
 
     await engine.dispose()
 
-    assert admission.policy_decision == "rejected"
+    assert admission.policy_decision == "would_reject"
     assert admission.sbom_status == "passed"
     assert admission.vulnerability_status == "failed"
     assert admission.evidence["vulnerabilities"]["blocked_count"] == 1
     rendered = json.dumps(admission.evidence)
     assert "raw-token" not in rendered
     assert "Description" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_dry_run_policy_records_would_reject_and_allows_high_risk_template() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    project_id = uuid4()
+    actor_id = uuid4()
+    payload = _manifest_payload()
+    digest = _digest(payload)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="dry-run@example.com", display_name="Dry Run"))
+        session.add(Project(id=project_id, slug="dry-run", name="Dry Run"))
+        await session.commit()
+        store = SqlAlchemyToolRegistryStore(session)
+        await store.upsert_shell_image_admission_policy(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionPolicyUpdateRequest(
+                enforcement_mode="dry_run",
+                cosign_required=True,
+            ),
+        )
+        service = ShellImageAdmissionService(
+            store=store,
+            digest_resolver=StaticDigestResolver(
+                OciManifestDigestResult(
+                    image_ref="registry.example/aegis/runtime:7-alpine",
+                    registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                    registry_digest=digest,
+                    computed_digest=digest,
+                    digest_match=True,
+                    content_type="application/vnd.oci.image.manifest.v1+json",
+                    manifest_size_bytes=len(payload),
+                )
+            ),
+            evidence_provider=StaticShellImageEvidenceProvider(
+                ShellImageEvidenceResult(
+                    signature_status="not_checked",
+                    sbom_status="passed",
+                    vulnerability_status="passed",
+                    policy_decision="approved",
+                    decision_reason="SBOM and vulnerability evidence passed",
+                    evidence={
+                        "sbom": {"tool": "trivy", "format": "CycloneDX", "component_count": 2},
+                        "vulnerabilities": {
+                            "tool": "trivy",
+                            "severity_counts": {"HIGH": 0, "CRITICAL": 0},
+                            "blocked_count": 0,
+                        },
+                    },
+                )
+            ),
+        )
+
+        admission = await service.resolve_and_record(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionResolveRequest(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=digest,
+            ),
+        )
+        template = await store.create_shell_template(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellTemplateCreateRequest(
+                template_ref="dry-run-diag",
+                template_version=1,
+                name="Dry Run Diagnostics",
+                risk_level="high",
+                environment_key="prod",
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=digest,
+                entrypoint="/bin/sh",
+                argv_template=["-lc", "echo ok"],
+                parameter_schema={"type": "object"},
+            ),
+        )
+
+    await engine.dispose()
+
+    assert admission.policy_decision == "would_reject"
+    assert admission.signature_status == "not_checked"
+    assert "dry-run" in admission.decision_reason.lower()
+    assert "cosign" in admission.decision_reason.lower()
+    assert template.image_admission_status == "would_reject"
+    assert template.image_registry_digest == digest
+
+
+@pytest.mark.asyncio
+async def test_enforce_policy_rejects_missing_required_signature_and_blocks_template() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    project_id = uuid4()
+    actor_id = uuid4()
+    payload = _manifest_payload()
+    digest = _digest(payload)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="enforce@example.com", display_name="Enforce"))
+        session.add(Project(id=project_id, slug="enforce", name="Enforce"))
+        await session.commit()
+        store = SqlAlchemyToolRegistryStore(session)
+        await store.upsert_shell_image_admission_policy(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionPolicyUpdateRequest(
+                enforcement_mode="enforce",
+                cosign_required=True,
+            ),
+        )
+        service = ShellImageAdmissionService(
+            store=store,
+            digest_resolver=StaticDigestResolver(
+                OciManifestDigestResult(
+                    image_ref="registry.example/aegis/runtime:7-alpine",
+                    registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                    registry_digest=digest,
+                    computed_digest=digest,
+                    digest_match=True,
+                    content_type="application/vnd.oci.image.manifest.v1+json",
+                    manifest_size_bytes=len(payload),
+                )
+            ),
+            evidence_provider=StaticShellImageEvidenceProvider(
+                ShellImageEvidenceResult(
+                    signature_status="not_checked",
+                    sbom_status="passed",
+                    vulnerability_status="passed",
+                    policy_decision="approved",
+                    decision_reason="SBOM and vulnerability evidence passed",
+                    evidence={
+                        "sbom": {"tool": "trivy", "format": "CycloneDX", "component_count": 2},
+                        "vulnerabilities": {
+                            "tool": "trivy",
+                            "severity_counts": {"HIGH": 0, "CRITICAL": 0},
+                            "blocked_count": 0,
+                        },
+                    },
+                )
+            ),
+        )
+
+        admission = await service.resolve_and_record(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionResolveRequest(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=digest,
+            ),
+        )
+        with pytest.raises(ShellImageAdmissionRequiredError):
+            await store.create_shell_template(
+                project_id=project_id,
+                actor_id=actor_id,
+                request=ShellTemplateCreateRequest(
+                    template_ref="enforce-diag",
+                    template_version=1,
+                    name="Enforce Diagnostics",
+                    risk_level="high",
+                    environment_key="prod",
+                    image_ref="registry.example/aegis/runtime:7-alpine",
+                    image_digest=digest,
+                    entrypoint="/bin/sh",
+                    argv_template=["-lc", "echo ok"],
+                    parameter_schema={"type": "object"},
+                ),
+            )
+
+    await engine.dispose()
+
+    assert admission.policy_decision == "rejected"
+    assert "cosign" in admission.decision_reason.lower()
 
 
 class StaticDigestResolver:

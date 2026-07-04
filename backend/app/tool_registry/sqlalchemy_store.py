@@ -224,15 +224,16 @@ class SqlAlchemyToolRegistryStore:
             project_id=project_id,
             credential_ref=request.credential_ref,
         )
-        admission = await self._find_approved_image_admission(
+        policy = await self.get_shell_image_admission_policy(project_id)
+        accepted_decisions = _accepted_image_admission_decisions(policy)
+        admission = await self._find_accepted_image_admission(
             project_id=project_id,
             image_ref=request.image_ref,
             image_digest=request.image_digest,
+            accepted_decisions=accepted_decisions,
         )
         if _requires_image_admission(request) and admission is None:
-            raise ShellImageAdmissionRequiredError(
-                "Approved shell image admission is required for production or high risk templates"
-            )
+            raise ShellImageAdmissionRequiredError(_required_image_admission_message(policy))
         policy_input = _policy_input_from_shell_request(
             project_id=project_id,
             request=request,
@@ -1284,12 +1285,13 @@ class SqlAlchemyToolRegistryStore:
         )
         return [ToolDefinitionRead.model_validate(resource) for resource in result.all()]
 
-    async def _find_approved_image_admission(
+    async def _find_accepted_image_admission(
         self,
         *,
         project_id: UUID,
         image_ref: str,
         image_digest: str,
+        accepted_decisions: set[str],
     ) -> ShellImageAdmissionRead | None:
         if not image_ref or not image_digest:
             return None
@@ -1298,7 +1300,7 @@ class SqlAlchemyToolRegistryStore:
                 ToolRegistryImageAdmission.project_id == project_id,
                 ToolRegistryImageAdmission.image_ref == image_ref,
                 ToolRegistryImageAdmission.image_digest == image_digest,
-                ToolRegistryImageAdmission.policy_decision == "approved",
+                ToolRegistryImageAdmission.policy_decision.in_(accepted_decisions),
             )
         )
         admission = result.scalar_one_or_none()
@@ -1361,6 +1363,21 @@ def _requires_image_admission(request: ShellTemplateCreateRequest) -> bool:
         "high",
         "critical",
     }
+
+
+def _accepted_image_admission_decisions(policy: ShellImageAdmissionPolicyRead) -> set[str]:
+    if policy.enforcement_mode == "dry_run":
+        return {"approved", "would_reject"}
+    return {"approved"}
+
+
+def _required_image_admission_message(policy: ShellImageAdmissionPolicyRead) -> str:
+    if policy.enforcement_mode == "dry_run":
+        return (
+            "Approved or dry-run shell image admission is required for production or high risk "
+            "templates"
+        )
+    return "Approved shell image admission is required for production or high risk templates"
 
 
 def _authorized_context_matches(

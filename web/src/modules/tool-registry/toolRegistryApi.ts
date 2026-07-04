@@ -47,7 +47,7 @@ export type ShellImageAdmission = {
   signature_status: "not_checked" | "passed" | "failed";
   sbom_status: "not_checked" | "passed" | "failed";
   vulnerability_status: "not_checked" | "passed" | "failed";
-  policy_decision: "approved" | "rejected";
+  policy_decision: "approved" | "would_reject" | "rejected";
   decision_reason: string;
   checked_at: string;
   evidence: Record<string, unknown>;

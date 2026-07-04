@@ -98,15 +98,6 @@ def get_shell_image_evidence_provider() -> ShellImageEvidenceProvider:
                 key_ref=settings.cosign_key_ref,
             )
         )
-    if settings.trivy_enabled:
-        providers.append(
-            TrivyCliEvidenceProvider(
-                trivy_command=settings.trivy_command,
-                timeout_seconds=settings.scan_timeout_seconds,
-                blocked_severities=settings.blocked_severity_set,
-                cache_dir=settings.trivy_cache_dir,
-            )
-        )
     if not providers:
         return NoopShellImageEvidenceProvider()
     return merge_evidence_providers(*providers)
@@ -778,10 +769,14 @@ async def resolve_shell_image_admission(
         project_id,
         "tool-registry:write",
     )
+    policy = await registry_store.get_shell_image_admission_policy(project_id)
     service = ShellImageAdmissionService(
         store=registry_store,
         digest_resolver=digest_resolver,
-        evidence_provider=evidence_provider,
+        evidence_provider=_policy_aware_evidence_provider(
+            policy=policy,
+            base_provider=evidence_provider,
+        ),
     )
     try:
         admission = await service.resolve_and_record(
@@ -811,9 +806,33 @@ async def resolve_shell_image_admission(
             "vulnerability_status": admission.vulnerability_status,
             "blocked_vulnerability_count": _blocked_vulnerability_count(admission),
             "policy_decision": admission.policy_decision,
+            "enforcement_mode": policy.enforcement_mode,
+            "cosign_required": policy.cosign_required,
+            "artifact_retention_requested": (
+                policy.sbom_artifact_retention_enabled or policy.scan_report_retention_enabled
+            ),
         },
     )
     return admission.model_copy(update={"evidence": _sanitize_image_evidence(admission.evidence)})
+
+
+def _policy_aware_evidence_provider(
+    *,
+    policy: ShellImageAdmissionPolicyRead,
+    base_provider: ShellImageEvidenceProvider,
+) -> ShellImageEvidenceProvider:
+    settings = AppSettings().shell_image_supply_chain
+    providers = [base_provider]
+    if settings.trivy_enabled:
+        providers.append(
+            TrivyCliEvidenceProvider(
+                trivy_command=settings.trivy_command,
+                timeout_seconds=settings.scan_timeout_seconds,
+                blocked_severities=frozenset(policy.blocked_severities),
+                cache_dir=settings.trivy_cache_dir,
+            )
+        )
+    return merge_evidence_providers(*providers)
 
 
 @router.get(
