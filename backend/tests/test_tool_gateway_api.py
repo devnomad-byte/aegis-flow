@@ -7,6 +7,7 @@ from backend.app.api.dependencies import (
     get_current_account,
     get_mcp_tool_call_client,
     get_project_access_provider,
+    get_tool_gateway_service,
     get_tool_invocation_store,
     get_tool_registry_store,
 )
@@ -18,9 +19,13 @@ from backend.app.tool_gateway.schemas import (
     ToolApprovalDecisionRead,
     ToolApprovalTaskCreate,
     ToolApprovalTaskRead,
+    ToolGatewayResult,
     ToolInvocationCreate,
     ToolInvocationRead,
+    ToolInvocationRequest,
+    ToolInvocationResponse,
 )
+from backend.app.tool_gateway.service import ToolGatewayServiceError
 from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.schemas import (
     AuthorizedToolRead,
@@ -357,6 +362,84 @@ class InMemoryAuditEventStore:
         )
 
 
+class RecordingToolGatewayService:
+    def __init__(self, *, response_status: str = "success") -> None:
+        self.invoke_calls: list[dict[str, object]] = []
+        self.resume_calls: list[dict[str, object]] = []
+        self.response_status = response_status
+        self.error: ToolGatewayServiceError | None = None
+
+    async def invoke(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ToolInvocationRequest,
+    ) -> ToolInvocationResponse:
+        self.invoke_calls.append(
+            {"project_id": project_id, "actor_id": actor_id, "request": request}
+        )
+        if self.error is not None:
+            raise self.error
+        return self._response(project_id=project_id, request=request)
+
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
+    ) -> ToolInvocationResponse:
+        self.resume_calls.append(
+            {
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "approval_task_id": approval_task_id,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self._response(project_id=project_id)
+
+    def _response(
+        self,
+        *,
+        project_id: UUID,
+        request: ToolInvocationRequest | None = None,
+    ) -> ToolInvocationResponse:
+        status = self.response_status
+        approval_required = status == "pending_approval"
+        return ToolInvocationResponse(
+            invocation_id=uuid4(),
+            project_id=project_id,
+            tool_ref=request.tool_ref if request else "mcp-k8s-test.kubectl_get_pods",
+            tool_name="kubectl_get_pods",
+            server_ref="mcp-k8s-test",
+            status=status,
+            policy_decision="approval_required" if approval_required else "allowed",
+            effective_risk_level="high" if approval_required else "low",
+            approval_required=approval_required,
+            input_summary="{}",
+            output_summary="tool invocation is waiting for approval" if approval_required else "ok",
+            error_type="",
+            error_message="",
+            duration_ms=1,
+            credential_ref="",
+            secret_lease_ref="",
+            run_id=request.run_id if request else "",
+            node_id=request.node_id if request else "",
+            trace_id=request.trace_id if request else "",
+            tool_call_id=request.tool_call_id if request else "",
+            result=None
+            if approval_required
+            else ToolGatewayResult(
+                content=[{"type": "text", "text": "ok"}],
+                structured_content={"ok": True},
+                is_error=False,
+            ),
+        )
+
+
 def make_account() -> AccountPrincipal:
     return AccountPrincipal(account_id=uuid4(), status="active")
 
@@ -393,6 +476,19 @@ def build_client(
     app.dependency_overrides[get_tool_invocation_store] = lambda: invocation_store
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
     app.dependency_overrides[get_mcp_tool_call_client] = lambda: call_client
+    return TestClient(app)
+
+
+def build_client_with_tool_gateway_service(
+    *,
+    account: AccountPrincipal,
+    provider: ProjectAccessProvider,
+    service: RecordingToolGatewayService,
+) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_current_account] = lambda: account
+    app.dependency_overrides[get_project_access_provider] = lambda: provider
+    app.dependency_overrides[get_tool_gateway_service] = lambda: service
     return TestClient(app)
 
 
@@ -444,6 +540,100 @@ def high_risk_authorized_tool(project_id: UUID) -> AuthorizedToolRead:
             },
         }
     )
+
+
+def test_tool_gateway_invoke_route_delegates_to_tool_gateway_service() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    service = RecordingToolGatewayService(response_status="pending_approval")
+    client = build_client_with_tool_gateway_service(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        service=service,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": "mcp-k8s-test.kubectl_get_pods",
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+            "workflow_ref": "incident-response",
+            "agent_ref": "ops-agent",
+            "role_refs": ["oncall"],
+            "run_id": "run-123",
+            "node_id": "agent_1",
+            "trace_id": "trace-123",
+            "tool_call_id": "call-123",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "pending_approval"
+    assert len(service.invoke_calls) == 1
+    recorded_call = service.invoke_calls[0]
+    assert recorded_call["project_id"] == project.id
+    assert recorded_call["actor_id"] == account.account_id
+    recorded_request = recorded_call["request"]
+    assert isinstance(recorded_request, ToolInvocationRequest)
+    assert recorded_request.tool_ref == "mcp-k8s-test.kubectl_get_pods"
+    assert recorded_request.workflow_ref == "incident-response"
+    assert service.resume_calls == []
+
+
+def test_tool_gateway_resume_route_delegates_to_tool_gateway_service() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    service = RecordingToolGatewayService()
+    client = build_client_with_tool_gateway_service(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        service=service,
+    )
+    approval_task_id = uuid4()
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/approvals/{approval_task_id}/resume",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert service.invoke_calls == []
+    assert service.resume_calls == [
+        {
+            "project_id": project.id,
+            "actor_id": account.account_id,
+            "approval_task_id": approval_task_id,
+        }
+    ]
+
+
+def test_tool_gateway_route_maps_service_error_status_and_detail() -> None:
+    account = make_account()
+    project = make_project(permissions=["tool-registry:view"])
+    service = RecordingToolGatewayService()
+    service.error = ToolGatewayServiceError(
+        status_code=403,
+        detail="Tool is not authorized for this runtime context",
+    )
+    client = build_client_with_tool_gateway_service(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        service=service,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-gateway/invoke",
+        json={
+            "tool_ref": "mcp-k8s-test.kubectl_get_pods",
+            "arguments": {"namespace": "default"},
+            "tool_group_refs": ["k8s.readonly"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Tool is not authorized for this runtime context"
+    assert len(service.invoke_calls) == 1
 
 
 def test_tool_gateway_invokes_authorized_mcp_tool_with_secret_lease_and_audit() -> None:
