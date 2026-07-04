@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
+from backend.app.execution.gateway import ShellExecutionRequest, ShellExecutionResult
 from backend.app.model_gateway.runner import LlmNodeRunRequest, LlmNodeRunResult
 from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
@@ -29,6 +31,7 @@ from backend.app.workflows.dsl import (
     LlmNodeData,
     McpToolNodeData,
     NodeDefinition,
+    ShellNodeData,
     WorkflowDefinition,
     WorkflowMetadata,
 )
@@ -284,6 +287,76 @@ async def test_runtime_resumes_tool_approval_without_second_invoke() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_runtime_executes_shell_node_through_execution_gateway() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_shell_node())
+    store = InMemoryWorkflowRunStore()
+    policy_store = InMemoryPolicyGateStore()
+    trace_store = InMemoryTraceStore()
+    execution_gateway = RecordingShellExecutionGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=policy_store,
+        trace_store=trace_store,
+        llm_runner=RecordingLlmRunner(content="unused"),
+        tool_gateway=RecordingToolGateway(),
+        execution_gateway=execution_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello shell"},
+            run_id="run-shell-test",
+            trace_id="trace-shell-test",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["nodes"]["shell_1"] == {
+        "status": "success",
+        "exit_code": 0,
+        "duration_ms": 11,
+        "stdout_summary": "hello shell",
+        "stderr_summary": "",
+        "invocation_id": "shell-call-1",
+        "command_hash": "sha256:shell",
+        "sandbox_image": "redis:7-alpine",
+        "sandbox_image_digest": "",
+        "network_mode": "none",
+    }
+    assert len(execution_gateway.calls) == 1
+    call = execution_gateway.calls[0]
+    assert call.project_id == project_id
+    assert call.actor_id == actor_id
+    assert call.workflow_ref == "shell_flow:1"
+    assert call.run_id == "run-shell-test"
+    assert call.node_id == "shell_1"
+    assert call.trace_id == "trace-shell-test"
+    assert call.template_ref == "echo-shell"
+    assert call.template_version == 1
+    assert call.environment == "test"
+    assert call.parameters == {"message": "hello shell"}
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "shell_1",
+        "end_1",
+    ]
+    assert [event["node_id"] for event in policy_store.events] == [
+        "start_1",
+        "shell_1",
+        "end_1",
+    ]
+    shell_span = next(span for span in trace_store.spans if span["node_id"] == "shell_1")
+    assert shell_span["component"] == "workflow_runtime"
+    shell_attributes = cast(dict[str, Any], shell_span["attributes"])
+    assert shell_attributes["node_type"] == "shell"
+
+
 def test_compiler_rejects_non_published_workflow_version() -> None:
     project_id = uuid4()
     version = make_version(
@@ -298,12 +371,12 @@ def test_compiler_rejects_non_published_workflow_version() -> None:
 
 def test_compiler_builds_langgraph_for_supported_nodes() -> None:
     project_id = uuid4()
-    version = make_version(project_id=project_id, workflow=workflow_with_human_approval())
+    version = make_version(project_id=project_id, workflow=workflow_with_shell_node())
 
     compiled = compile_workflow_version(version)
 
-    assert compiled.workflow_ref == "approval_flow:1"
-    assert compiled.supported_node_ids == ["start_1", "approval_1", "end_1"]
+    assert compiled.workflow_ref == "shell_flow:1"
+    assert compiled.supported_node_ids == ["start_1", "shell_1", "end_1"]
     assert compiled.graph is not None
 
 
@@ -578,6 +651,29 @@ class RecordingToolGateway:
         )
 
 
+class RecordingShellExecutionGateway:
+    def __init__(self, *, result: ShellExecutionResult | None = None) -> None:
+        self.calls: list[ShellExecutionRequest] = []
+        self.result = result or ShellExecutionResult(
+            status="success",
+            exit_code=0,
+            duration_ms=11,
+            stdout_summary="hello shell",
+            stderr_summary="",
+            invocation_id="shell-call-1",
+            command_hash="sha256:shell",
+            sandbox_image="redis:7-alpine",
+            sandbox_image_digest="",
+            network_mode="none",
+            error_type="",
+            error_message="",
+        )
+
+    async def run_shell(self, request: ShellExecutionRequest) -> ShellExecutionResult:
+        self.calls.append(request)
+        return self.result
+
+
 def workflow_with_llm_condition_tool() -> WorkflowDefinition:
     return WorkflowDefinition(
         schema_version="workflow.dsl/v0.2",
@@ -667,6 +763,39 @@ def workflow_with_human_approval() -> WorkflowDefinition:
         edges=[
             EdgeDefinition(source="start_1", target="approval_1"),
             EdgeDefinition(source="approval_1", target="end_1"),
+        ],
+    )
+
+
+def workflow_with_shell_node() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="shell_flow",
+            name="Shell Flow",
+            project_id="runtime-project",
+            version=1,
+            status="published",
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="shell_1",
+                name="Echo Shell",
+                type="shell",
+                data=ShellNodeData(
+                    template_ref="echo-shell",
+                    template_version=1,
+                    environment="test",
+                    approval_required=False,
+                ),
+                parameters={"message": "{{message}}"},
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="shell_1"),
+            EdgeDefinition(source="shell_1", target="end_1"),
         ],
     )
 

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from langgraph.graph import END, START, StateGraph
 
+from backend.app.execution.gateway import ShellExecutionRequest, ShellExecutionResult
 from backend.app.model_gateway.runner import LlmNodeRunRequest, LlmNodeRunResult
 from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
@@ -36,13 +37,14 @@ from backend.app.workflows.dsl import (
     LlmNodeData,
     McpToolNodeData,
     NodeDefinition,
+    ShellNodeData,
     WorkflowDefinition,
 )
 from backend.app.workflows.schemas import WorkflowVersionRead
 
 _TEMPLATE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
 _SUPPORTED_NODE_TYPES = frozenset(
-    {"start", "llm", "condition", "mcp_tool", "human_approval", "end"}
+    {"start", "llm", "condition", "mcp_tool", "shell", "human_approval", "end"}
 )
 
 
@@ -81,6 +83,11 @@ class ToolGatewayRuntimeClient(Protocol):
         raise NotImplementedError
 
 
+class ShellExecutionRuntimeClient(Protocol):
+    async def run_shell(self, request: ShellExecutionRequest) -> ShellExecutionResult:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class WorkflowRuntimeRunner:
     run_store: WorkflowRunStore
@@ -88,6 +95,7 @@ class WorkflowRuntimeRunner:
     trace_store: Any
     llm_runner: LlmNodeRuntimeRunner
     tool_gateway: ToolGatewayRuntimeClient
+    execution_gateway: ShellExecutionRuntimeClient | None = None
 
     async def run(self, request: WorkflowRunRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -106,6 +114,7 @@ class WorkflowRuntimeRunner:
             trace_store=self.trace_store,
             llm_runner=self.llm_runner,
             tool_gateway=self.tool_gateway,
+            execution_gateway=self.execution_gateway,
         )
         run_record = await self.run_store.create_run(
             WorkflowRunCreate(
@@ -235,6 +244,7 @@ class WorkflowRuntimeRunner:
             trace_store=self.trace_store,
             llm_runner=self.llm_runner,
             tool_gateway=self.tool_gateway,
+            execution_gateway=self.execution_gateway,
             workflow_run_id=run_record.id,
         )
 
@@ -342,6 +352,7 @@ class _RuntimeExecution:
     trace_store: Any
     llm_runner: LlmNodeRuntimeRunner
     tool_gateway: ToolGatewayRuntimeClient
+    execution_gateway: ShellExecutionRuntimeClient | None = None
     workflow_run_id: UUID | None = None
     node_results: list[WorkflowNodeRunResult] = None  # type: ignore[assignment]
 
@@ -528,6 +539,8 @@ class _RuntimeExecution:
             return _evaluate_condition_node(node, state)
         if node.type == "mcp_tool":
             return await self._run_tool_node(node, state)
+        if node.type == "shell":
+            return await self._run_shell_node(node, state)
         if node.type == "human_approval":
             return _build_pending_approval(node, state)
         raise WorkflowRuntimeError(f"unsupported workflow node type: {node.type}")
@@ -589,6 +602,48 @@ class _RuntimeExecution:
             ),
         )
         return _tool_response_to_output(response, node=node)
+
+    async def _run_shell_node(
+        self,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+    ) -> dict[str, Any]:
+        if self.execution_gateway is None:
+            raise WorkflowRuntimeError("execution gateway is not configured")
+        if not isinstance(node.data, ShellNodeData):
+            raise WorkflowRuntimeError(f"shell node data is invalid: {node.id}")
+        parameters = _render_json_value(node.parameters, _template_context(state))
+        if not isinstance(parameters, dict):
+            raise WorkflowRuntimeError("shell node parameters must render to an object")
+        result = await self.execution_gateway.run_shell(
+            ShellExecutionRequest(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                workflow_ref=self.workflow_ref,
+                run_id=self.run_id,
+                node_id=node.id,
+                trace_id=self.trace_id,
+                template_ref=node.data.template_ref,
+                template_version=node.data.template_version,
+                environment=node.data.environment,
+                parameters=parameters,
+            )
+        )
+        output = {
+            "status": result.status,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+            "stdout_summary": result.stdout_summary,
+            "stderr_summary": result.stderr_summary,
+            "invocation_id": result.invocation_id,
+            "command_hash": result.command_hash,
+            "sandbox_image": result.sandbox_image,
+            "sandbox_image_digest": result.sandbox_image_digest,
+            "network_mode": result.network_mode,
+        }
+        if result.status != "success":
+            raise WorkflowRuntimeError(result.error_message or result.status)
+        return output
 
     async def _resume_tool_node(
         self,

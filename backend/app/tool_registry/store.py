@@ -95,6 +95,15 @@ class ToolRegistryStore(Protocol):
     ) -> ShellTemplateRead:
         raise NotImplementedError
 
+    async def get_active_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        template_version: int,
+    ) -> ShellTemplateRead | None:
+        raise NotImplementedError
+
     async def create_credential_ref(
         self,
         *,

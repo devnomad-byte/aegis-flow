@@ -204,11 +204,37 @@ class SqlAlchemyToolRegistryStore:
             risk_level=request.risk_level,
             environment_key=request.environment_key,
             credential_ref=request.credential_ref,
+            image_ref=request.image_ref,
+            image_digest=request.image_digest,
+            entrypoint=request.entrypoint,
+            argv_template=request.argv_template,
+            parameter_schema=request.parameter_schema,
+            timeout_seconds=request.timeout_seconds,
             description=request.description,
             created_by=actor_id,
             updated_by=actor_id,
         )
         return ShellTemplateRead.model_validate(await self._insert(resource))
+
+    async def get_active_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        template_version: int,
+    ) -> ShellTemplateRead | None:
+        result = await self._session.execute(
+            select(ToolRegistryShellTemplate).where(
+                ToolRegistryShellTemplate.project_id == project_id,
+                ToolRegistryShellTemplate.template_ref == template_ref,
+                ToolRegistryShellTemplate.template_version == template_version,
+                ToolRegistryShellTemplate.status == "active",
+            )
+        )
+        template = result.scalar_one_or_none()
+        if template is None:
+            return None
+        return ShellTemplateRead.model_validate(template)
 
     async def create_credential_ref(
         self,

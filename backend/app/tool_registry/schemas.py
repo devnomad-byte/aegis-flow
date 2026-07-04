@@ -104,6 +104,12 @@ class ShellTemplateCreateRequest(BaseModel):
     environment_key: str = Field(min_length=1, max_length=80)
     description: str = ""
     credential_ref: str = Field(default="", max_length=240)
+    image_ref: str = Field(default="", max_length=260)
+    image_digest: str = Field(default="", max_length=160)
+    entrypoint: str = Field(default="", max_length=160)
+    argv_template: list[str] = Field(default_factory=list)
+    parameter_schema: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=60, ge=1, le=3600)
 
 
 class CredentialRefCreateRequest(BaseModel):
@@ -218,6 +224,12 @@ class ShellTemplateRead(RegistryResourceRead):
     risk_level: RiskLevel
     environment_key: str
     credential_ref: str
+    image_ref: str
+    image_digest: str
+    entrypoint: str
+    argv_template: list[str] = Field(default_factory=list)
+    parameter_schema: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int
 
 
 class CredentialRefRead(BaseModel):

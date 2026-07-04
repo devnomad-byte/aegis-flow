@@ -19,6 +19,7 @@ from backend.app.api.dependencies import (
 from backend.app.audit.models import AuditLog
 from backend.app.core.settings import AppSettings
 from backend.app.db.session import get_async_session
+from backend.app.execution.models import ShellRunnerInvocation
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.models import (
     Account,
@@ -43,6 +44,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryEnvironment,
     ToolRegistryMcpServer,
     ToolRegistrySecretLease,
+    ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
     ToolRegistryToolGroup,
     ToolRegistryToolGroupItem,
@@ -608,6 +610,157 @@ def test_real_workflow_runtime_resumes_high_risk_tool_approval() -> None:
         asyncio.run(engine.dispose())
 
 
+@pytest.mark.real_docker
+def test_real_workflow_runtime_runs_shell_node_through_docker_sandbox() -> None:
+    settings = require_real_workflow_runtime_final_acceptance()
+    project_id = uuid4()
+    actor_id = uuid4()
+    cleanup_ids = _CleanupIds(project_id=project_id, actor_id=actor_id)
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def seed() -> None:
+        async with session_factory() as session:
+            role_id = uuid4()
+            member_id = uuid4()
+            session.add(
+                Account(
+                    id=actor_id,
+                    email=f"runtime-shell-{actor_id.hex[:12]}@example.com",
+                    display_name="Workflow Runtime Shell Final Acceptance",
+                )
+            )
+            session.add(
+                Project(
+                    id=project_id,
+                    slug=f"runtime-shell-{project_id.hex[:12]}",
+                    name="Workflow Runtime Shell Final Acceptance",
+                )
+            )
+            session.add(ProjectMember(id=member_id, project_id=project_id, account_id=actor_id))
+            session.add(
+                ProjectRole(
+                    id=role_id,
+                    project_id=project_id,
+                    code="runtime_shell_admin",
+                    name="Runtime Shell Admin",
+                    description="Workflow runtime shell final acceptance role",
+                )
+            )
+            session.add(ProjectMemberRole(member_id=member_id, role_id=role_id))
+            for code in {
+                "project:view",
+                "workflow:view",
+                "workflow:write",
+                "workflow:run",
+                "tool-registry:view",
+                "tool-registry:write",
+                "audit:view",
+            }:
+                permission = await _ensure_permission(session, code)
+                session.add(ProjectRolePermission(role_id=role_id, permission_id=permission.id))
+            await session.commit()
+
+    asyncio.run(seed())
+    try:
+        app = create_app(settings)
+
+        async def override_async_session() -> AsyncIterator[AsyncSession]:
+            async with session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_current_account] = lambda: AccountPrincipal(
+            account_id=actor_id,
+            status="active",
+        )
+        app.dependency_overrides[get_async_session] = override_async_session
+        with TestClient(app) as client:
+            env_response = client.post(
+                f"/api/v1/projects/{project_id}/tool-registry/environments",
+                json={"key": "test", "name": "Test", "egress_allowed_hosts": []},
+            )
+            assert env_response.status_code == 201
+
+            template_response = client.post(
+                f"/api/v1/projects/{project_id}/tool-registry/shell-templates",
+                json={
+                    "template_ref": "runtime-shell-echo",
+                    "template_version": 1,
+                    "name": "Runtime Shell Echo",
+                    "risk_level": "low",
+                    "environment_key": "test",
+                    "image_ref": "redis:7-alpine",
+                    "entrypoint": "/bin/sh",
+                    "argv_template": [
+                        "-lc",
+                        "echo shell={{message}} && id -u && "
+                        "touch /blocked 2>/tmp/root.err; echo root_status=$?",
+                    ],
+                    "parameter_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                        "additionalProperties": False,
+                    },
+                    "timeout_seconds": 20,
+                },
+            )
+            assert template_response.status_code == 201
+
+            import_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/import-yaml",
+                json={"yaml_text": workflow_shell_yaml(project_id)},
+            )
+            assert import_response.status_code == 201
+            draft_id = import_response.json()["id"]
+
+            publish_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/drafts/{draft_id}/publish",
+                json={"release_note": "workflow runtime shell final acceptance"},
+            )
+            assert publish_response.status_code == 201
+            version_id = publish_response.json()["id"]
+
+            run_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs",
+                json={
+                    "inputs": {"message": "hello-shell"},
+                    "run_ref": "run-runtime-shell-final",
+                    "trace_id": "trace-runtime-shell-final",
+                },
+            )
+            assert run_response.status_code == 201
+            run_body = run_response.json()
+            assert run_body["status"] == "success"
+            shell_output = run_body["outputs"]["nodes"]["shell_1"]
+            assert shell_output["status"] == "success"
+            assert shell_output["exit_code"] == 0
+            assert "shell=hello-shell" in shell_output["stdout_summary"]
+            assert "\n10000" in shell_output["stdout_summary"]
+            assert "root_status=1" in shell_output["stdout_summary"]
+
+            trace_response = client.get(
+                f"/api/v1/projects/{project_id}/runtime-traces/spans",
+                params={
+                    "run_id": "run-runtime-shell-final",
+                    "trace_id": "trace-runtime-shell-final",
+                },
+            )
+            assert trace_response.status_code == 200
+            trace_body = trace_response.json()
+            components = {span["component"] for span in trace_body["spans"]}
+            assert {"workflow_runtime", "shell_runner"} <= components
+            shell_span = next(
+                span for span in trace_body["spans"] if span["component"] == "shell_runner"
+            )
+            assert shell_span["attributes"]["shell.template_ref"] == "runtime-shell-echo"
+            assert shell_span["attributes"]["shell.network_mode"] == "none"
+            assert "raw-token" not in str(trace_body)
+    finally:
+        asyncio.run(_cleanup(session_factory, cleanup_ids))
+        asyncio.run(engine.dispose())
+
+
 @contextmanager
 def running_high_risk_http_mcp_server() -> Iterator[tuple[str, dict[str, Any]]]:
     state: dict[str, Any] = {"tools_list_count": 0, "tool_calls": []}
@@ -840,6 +993,48 @@ policies:
 """
 
 
+def workflow_shell_yaml(project_id: UUID) -> str:
+    return f"""
+schema_version: workflow.dsl/v0.2
+workflow:
+  id: runtime_shell_final
+  name: Runtime Shell Final
+  project_id: "{project_id}"
+  version: 1
+  status: draft
+inputs:
+  - key: message
+    type: string
+    required: true
+nodes:
+  - id: start_1
+    name: Start
+    type: start
+  - id: shell_1
+    name: Echo Shell
+    type: shell
+    data:
+      template_ref: runtime-shell-echo
+      template_version: 1
+      environment: test
+      approval_required: false
+    parameters:
+      message: "{{{{message}}}}"
+  - id: end_1
+    name: End
+    type: end
+edges:
+  - source: start_1
+    target: shell_1
+  - source: shell_1
+    target: end_1
+policies:
+  default_environment: test
+  max_runtime_seconds: 900
+  max_tool_calls: 20
+"""
+
+
 async def _ensure_permission(session: AsyncSession, code: str) -> ProjectPermission:
     existing = await session.scalar(select(ProjectPermission).where(ProjectPermission.code == code))
     if existing is not None:
@@ -867,6 +1062,11 @@ async def _cleanup(
         await session.execute(delete(AuditLog).where(AuditLog.project_id == cleanup_ids.project_id))
         await session.execute(
             delete(PolicyGateEvent).where(PolicyGateEvent.project_id == cleanup_ids.project_id)
+        )
+        await session.execute(
+            delete(ShellRunnerInvocation).where(
+                ShellRunnerInvocation.project_id == cleanup_ids.project_id
+            )
         )
         await session.execute(
             delete(WorkflowRunCheckpoint).where(
@@ -929,6 +1129,11 @@ async def _cleanup(
         await session.execute(
             delete(ToolRegistryMcpServer).where(
                 ToolRegistryMcpServer.project_id == cleanup_ids.project_id
+            )
+        )
+        await session.execute(
+            delete(ToolRegistryShellTemplate).where(
+                ToolRegistryShellTemplate.project_id == cleanup_ids.project_id
             )
         )
         await session.execute(

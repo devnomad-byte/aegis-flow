@@ -13,6 +13,7 @@ SUPPORTED_NODE_TYPES = frozenset(
         "llm",
         "condition",
         "mcp_tool",
+        "shell",
         "human_approval",
         "end",
     }

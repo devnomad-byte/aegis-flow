@@ -573,6 +573,12 @@ class InMemoryToolRegistryStore:
                 risk_level=str(request.risk_level),
                 environment_key=str(request.environment_key),
                 credential_ref=str(request.credential_ref),
+                image_ref=str(request.image_ref),
+                image_digest=str(request.image_digest),
+                entrypoint=str(request.entrypoint),
+                argv_template=list(request.argv_template),
+                parameter_schema=dict(request.parameter_schema),
+                timeout_seconds=int(request.timeout_seconds),
             )
         )
 
@@ -790,6 +796,48 @@ def test_tool_registry_environment_returns_egress_allowed_hosts() -> None:
         "mcp.example.com",
         "*.trusted.example",
     ]
+
+
+def test_tool_registry_shell_template_accepts_execution_metadata() -> None:
+    project = make_project(permissions=["tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "echo-shell",
+            "template_version": 1,
+            "name": "Echo Shell",
+            "risk_level": "low",
+            "environment_key": "test",
+            "image_ref": "redis:7-alpine",
+            "image_digest": "sha256:test-image",
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo {{message}}"],
+            "parameter_schema": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+            "timeout_seconds": 30,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["template_ref"] == "echo-shell"
+    assert payload["image_ref"] == "redis:7-alpine"
+    assert payload["image_digest"] == "sha256:test-image"
+    assert payload["entrypoint"] == "/bin/sh"
+    assert payload["argv_template"] == ["-lc", "echo {{message}}"]
+    assert payload["parameter_schema"]["required"] == ["message"]
+    assert payload["timeout_seconds"] == 30
 
 
 def test_tool_registry_rejects_mcp_server_when_environment_allowlist_does_not_match() -> None:
