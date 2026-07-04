@@ -250,3 +250,91 @@ class WorkflowRunEventListResponse(BaseModel):
 
     events: list[WorkflowRunEventRead] = Field(default_factory=list)
     count: int
+
+
+class LangGraphCheckpointTableHealthRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    exists: bool
+    row_count: int | None = None
+
+
+class LangGraphCheckpointHealthRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    ready: bool
+    tables: dict[str, LangGraphCheckpointTableHealthRead]
+
+
+class LangGraphCheckpointThreadMetricsRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    project_id: UUID
+    run_id: str
+    status: str
+    updated_at: datetime
+    checkpoint_rows: int
+    checkpoint_blob_rows: int
+    checkpoint_write_rows: int
+
+
+class LangGraphCheckpointProjectMetricsRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    project_id: UUID
+    terminal_threads: int
+    expired_terminal_threads: int
+    checkpoint_rows: int
+    checkpoint_blob_rows: int
+    checkpoint_write_rows: int
+    oldest_terminal_updated_at: datetime | None = None
+    newest_terminal_updated_at: datetime | None = None
+
+
+class LangGraphCheckpointAlertRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    code: str
+    severity: str
+    message: str
+    count: int = 0
+
+
+class LangGraphCheckpointCleanupFailureRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    run_id: str
+    error_summary: str
+    retryable: bool
+
+
+class LangGraphCheckpointGovernanceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    health: LangGraphCheckpointHealthRead
+    project: LangGraphCheckpointProjectMetricsRead | None = None
+    candidates: list[LangGraphCheckpointThreadMetricsRead] = Field(default_factory=list)
+    alerts: list[LangGraphCheckpointAlertRead] = Field(default_factory=list)
+    retention_days: int
+    limit: int
+
+
+class LangGraphCheckpointRetentionRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    limit: int = Field(default=100, ge=1, le=500)
+    dry_run: bool = True
+    reason: str = Field(default="", max_length=500)
+
+
+class LangGraphCheckpointRetentionRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    dry_run: bool
+    retention_days: int
+    limit: int
+    candidates: list[LangGraphCheckpointThreadMetricsRead] = Field(default_factory=list)
+    deleted_threads: list[LangGraphCheckpointThreadMetricsRead] = Field(default_factory=list)
+    failed_threads: list[LangGraphCheckpointCleanupFailureRead] = Field(default_factory=list)
+    alerts: list[LangGraphCheckpointAlertRead] = Field(default_factory=list)

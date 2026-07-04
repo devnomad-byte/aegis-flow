@@ -41,6 +41,7 @@ from backend.app.tool_registry.mcp_client import HttpMcpToolsClient, McpToolsCli
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryStore
 from backend.app.workflow_runtime.background import InProcessWorkflowRunScheduler
+from backend.app.workflow_runtime.checkpoint_lifecycle import LangGraphCheckpointLifecycleService
 from backend.app.workflow_runtime.checkpointing import (
     PostgresWorkflowCheckpointerProvider,
     WorkflowCheckpointerProvider,
@@ -217,6 +218,13 @@ def get_workflow_checkpointer_provider() -> WorkflowCheckpointerProvider:
 
 
 WorkflowCheckpointerProviderDependency = Depends(get_workflow_checkpointer_provider)
+
+
+def get_checkpoint_lifecycle_service() -> LangGraphCheckpointLifecycleService:
+    return LangGraphCheckpointLifecycleService(AppSettings().database)
+
+
+CheckpointLifecycleServiceDependency = Depends(get_checkpoint_lifecycle_service)
 
 
 def get_tool_gateway_service(

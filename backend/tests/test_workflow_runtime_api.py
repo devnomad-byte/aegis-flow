@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from backend.app.api.dependencies import (
     get_audit_event_store,
+    get_checkpoint_lifecycle_service,
     get_current_account,
     get_project_access_provider,
     get_workflow_run_event_store,
@@ -16,6 +17,13 @@ from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
 from backend.app.workflow_runtime.schemas import (
+    LangGraphCheckpointAlertRead,
+    LangGraphCheckpointGovernanceResponse,
+    LangGraphCheckpointHealthRead,
+    LangGraphCheckpointProjectMetricsRead,
+    LangGraphCheckpointRetentionRunRead,
+    LangGraphCheckpointTableHealthRead,
+    LangGraphCheckpointThreadMetricsRead,
     WorkflowRunCancelRequest,
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
@@ -296,11 +304,94 @@ class RecordingWorkflowRunScheduler:
         )
 
 
+class RecordingCheckpointLifecycle:
+    def __init__(self, *, project_id: UUID) -> None:
+        table_health = {
+            "checkpoint_migrations": LangGraphCheckpointTableHealthRead(exists=True, row_count=1),
+            "checkpoints": LangGraphCheckpointTableHealthRead(exists=True, row_count=3),
+            "checkpoint_blobs": LangGraphCheckpointTableHealthRead(exists=True, row_count=2),
+            "checkpoint_writes": LangGraphCheckpointTableHealthRead(exists=True, row_count=5),
+        }
+        self.health = LangGraphCheckpointHealthRead(ready=True, tables=table_health)
+        self.thread = LangGraphCheckpointThreadMetricsRead(
+            project_id=project_id,
+            run_id="run-expired",
+            status="success",
+            updated_at=datetime.now(UTC),
+            checkpoint_rows=3,
+            checkpoint_blob_rows=2,
+            checkpoint_write_rows=5,
+        )
+        self.summary_requests: list[dict[str, object]] = []
+        self.retention_requests: list[dict[str, object]] = []
+
+    async def governance_summary(
+        self,
+        *,
+        project_id: UUID,
+        retention_days: int,
+        limit: int = 100,
+    ) -> LangGraphCheckpointGovernanceResponse:
+        self.summary_requests.append(
+            {"project_id": project_id, "retention_days": retention_days, "limit": limit}
+        )
+        return LangGraphCheckpointGovernanceResponse(
+            health=self.health,
+            project=LangGraphCheckpointProjectMetricsRead(
+                project_id=project_id,
+                terminal_threads=1,
+                expired_terminal_threads=1,
+                checkpoint_rows=3,
+                checkpoint_blob_rows=2,
+                checkpoint_write_rows=5,
+                oldest_terminal_updated_at=self.thread.updated_at,
+                newest_terminal_updated_at=self.thread.updated_at,
+            ),
+            candidates=[self.thread],
+            alerts=[
+                LangGraphCheckpointAlertRead(
+                    code="retention_backlog",
+                    severity="warning",
+                    message="terminal workflow runs have checkpoint threads past retention",
+                    count=1,
+                )
+            ],
+            retention_days=retention_days,
+            limit=limit,
+        )
+
+    async def run_retention(
+        self,
+        *,
+        project_id: UUID,
+        retention_days: int,
+        limit: int = 100,
+        dry_run: bool = True,
+    ) -> LangGraphCheckpointRetentionRunRead:
+        self.retention_requests.append(
+            {
+                "project_id": project_id,
+                "retention_days": retention_days,
+                "limit": limit,
+                "dry_run": dry_run,
+            }
+        )
+        return LangGraphCheckpointRetentionRunRead(
+            dry_run=dry_run,
+            retention_days=retention_days,
+            limit=limit,
+            candidates=[self.thread],
+            deleted_threads=[] if dry_run else [self.thread],
+            failed_threads=[],
+            alerts=[],
+        )
+
+
 def test_workflow_runtime_api_requires_workflow_run_permission() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:view"]),
         version=version,
@@ -319,7 +410,7 @@ def test_workflow_runtime_api_runs_published_version_and_audits() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
-    client, runner, audit_store = build_client(
+    client, runner, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -352,7 +443,7 @@ def test_workflow_runtime_api_submits_background_run_and_records_event() -> None
     run_store = InMemoryRunStore()
     event_store = InMemoryRunEventStore()
     scheduler = RecordingWorkflowRunScheduler()
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -394,7 +485,7 @@ def test_workflow_runtime_api_get_run_detail_requires_workflow_run_permission() 
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     run = make_run(project_id, version.id)
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:view"]),
         version=version,
@@ -425,7 +516,7 @@ def test_workflow_runtime_api_get_run_detail_returns_checkpoints_and_audits() ->
             status="pending_approval",
         )
     ]
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -454,7 +545,7 @@ def test_workflow_runtime_api_get_run_detail_hides_version_mismatch() -> None:
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     run = make_run(project_id, uuid4())
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -476,7 +567,7 @@ def test_workflow_runtime_api_lists_runs_for_version_and_audits() -> None:
     older_run = make_run(project_id, version.id, run_id="run-older", status="success")
     pending_run = make_run(project_id, version.id, run_id="run-pending", status="pending_approval")
     other_version_run = make_run(project_id, uuid4(), run_id="run-other-version", status="success")
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -518,7 +609,7 @@ def test_workflow_runtime_api_lists_runtime_events_for_run() -> None:
             ),
         ]
     )
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -543,7 +634,7 @@ def test_workflow_runtime_api_rejects_unknown_run_list_status() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -558,13 +649,100 @@ def test_workflow_runtime_api_rejects_unknown_run_list_status() -> None:
     assert response.status_code == 422
 
 
+def test_checkpoint_governance_api_requires_audit_view_permission() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    client, _, _, _ = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:run"]),
+        version=version,
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{project_id}/workflows/checkpoints/governance",
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing required project permission"}
+
+
+def test_checkpoint_governance_api_returns_aggregates_and_audits_without_raw_state() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    client, _, audit_store, checkpoint_lifecycle = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["audit:view"]),
+        version=version,
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{project_id}/workflows/checkpoints/governance",
+        params={"retention_days": 7, "limit": 20},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["health"]["ready"] is True
+    assert payload["project"]["expired_terminal_threads"] == 1
+    assert payload["candidates"][0]["run_id"] == "run-expired"
+    assert "raw-token" not in str(payload)
+    assert checkpoint_lifecycle.summary_requests == [
+        {"project_id": project_id, "retention_days": 7, "limit": 20}
+    ]
+    assert audit_store.events[-1]["action"] == "workflow.checkpoint.governance.view"
+    metadata = audit_store.events[-1]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata == {
+        "retention_days": 7,
+        "limit": 20,
+        "candidate_count": 1,
+        "alert_count": 1,
+        "ready": True,
+    }
+
+
+def test_checkpoint_retention_api_runs_dry_run_and_records_audit() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    client, _, audit_store, checkpoint_lifecycle = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["audit:view"]),
+        version=version,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/workflows/checkpoints/retention-runs",
+        json={"retention_days": 14, "limit": 50, "dry_run": True, "reason": "monthly cleanup"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dry_run"] is True
+    assert payload["candidates"][0]["run_id"] == "run-expired"
+    assert payload["deleted_threads"] == []
+    assert checkpoint_lifecycle.retention_requests == [
+        {"project_id": project_id, "retention_days": 14, "limit": 50, "dry_run": True}
+    ]
+    assert audit_store.events[-1]["action"] == "workflow.checkpoint.retention_run"
+    metadata = audit_store.events[-1]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["dry_run"] is True
+    assert metadata["candidate_count"] == 1
+    assert metadata["deleted_count"] == 0
+    assert metadata["failed_count"] == 0
+    assert "monthly cleanup" not in str(metadata)
+
+
 def test_workflow_runtime_api_cancel_pending_run_and_audits() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     run = make_run(project_id, version.id, status="pending_approval")
     run_store = InMemoryRunStore(run=run)
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -592,7 +770,7 @@ def test_workflow_runtime_api_cancel_rejects_non_pending_run() -> None:
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     run = make_run(project_id, version.id, status="success")
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -615,7 +793,7 @@ def test_workflow_runtime_api_requests_running_cancel_and_audits() -> None:
     run = make_run(project_id, version.id, status="running")
     run_store = InMemoryRunStore(run=run)
     event_store = InMemoryRunEventStore()
-    client, _, audit_store = build_client(
+    client, _, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -654,7 +832,7 @@ def test_workflow_runtime_api_retries_terminal_run_with_checkpoint_inputs_and_au
         status="success",
         state={"inputs": {"change_id": "CHG-123", "token": "[redacted]"}},
     )
-    client, runner, audit_store = build_client(
+    client, runner, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -683,7 +861,7 @@ def test_workflow_runtime_api_retry_rejects_active_run() -> None:
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     run = make_run(project_id, version.id, status="pending_approval")
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -703,7 +881,7 @@ def test_workflow_runtime_api_resume_requires_workflow_run_permission() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
-    client, _, _ = build_client(
+    client, _, _, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:view"]),
         version=version,
@@ -723,7 +901,7 @@ def test_workflow_runtime_api_resumes_run_and_audits() -> None:
     account = AccountPrincipal(account_id=uuid4(), status="active")
     version = make_version(project_id)
     approval_task_id = uuid4()
-    client, runner, audit_store = build_client(
+    client, runner, audit_store, _ = build_client(
         account=account,
         project=make_project(project_id, permissions=["workflow:run"]),
         version=version,
@@ -757,10 +935,11 @@ def build_client(
     run_store: InMemoryRunStore | None = None,
     event_store: InMemoryRunEventStore | None = None,
     scheduler: RecordingWorkflowRunScheduler | None = None,
-) -> tuple[TestClient, RecordingRuntimeRunner, RecordingAuditStore]:
+) -> tuple[TestClient, RecordingRuntimeRunner, RecordingAuditStore, RecordingCheckpointLifecycle]:
     app = create_app()
     runner = RecordingRuntimeRunner()
     audit_store = RecordingAuditStore()
+    checkpoint_lifecycle = RecordingCheckpointLifecycle(project_id=project.id)
     app.dependency_overrides[get_current_account] = lambda: account
     app.dependency_overrides[get_project_access_provider] = lambda: PermissionAwareProjectProvider(
         [project]
@@ -775,7 +954,8 @@ def build_client(
     )
     app.dependency_overrides[get_workflow_runtime_runner] = lambda: runner
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
-    return TestClient(app), runner, audit_store
+    app.dependency_overrides[get_checkpoint_lifecycle_service] = lambda: checkpoint_lifecycle
+    return TestClient(app), runner, audit_store, checkpoint_lifecycle
 
 
 def make_project(project_id: UUID, *, permissions: list[str]) -> ProjectSummary:
