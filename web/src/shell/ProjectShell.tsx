@@ -10,14 +10,10 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useRouter } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 
-import { ProjectCommandCenter } from "../modules/project-command-center/ProjectCommandCenter";
-import { ProjectModelGatewaySettings } from "../modules/model-gateway/ProjectModelGatewaySettings";
-import { ProjectPromptLibrary } from "../modules/prompt-library/ProjectPromptLibrary";
-import { RunObservatory } from "../modules/run-observatory/RunObservatory";
-import { WorkflowStudio } from "../modules/workflow-studio/WorkflowStudio";
 import type { AegisRuntime } from "../app/runtime";
+import { PROJECT_FEATURE_LOADERS, type ProjectFeatureView } from "./projectFeatureLoaders";
 import type { ProjectContext } from "./projectContext";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 
@@ -36,7 +32,15 @@ const navItems = [
 type ProjectShellProps = {
   project: ProjectContext;
   runtime: AegisRuntime;
-  view?: "command" | "workflows" | "model-gateway-settings" | "prompt-library" | "runs";
+  view?: ProjectFeatureView;
+};
+
+const ProjectFeatureComponents = {
+  command: lazy(PROJECT_FEATURE_LOADERS.command),
+  workflows: lazy(PROJECT_FEATURE_LOADERS.workflows),
+  "model-gateway-settings": lazy(PROJECT_FEATURE_LOADERS["model-gateway-settings"]),
+  "prompt-library": lazy(PROJECT_FEATURE_LOADERS["prompt-library"]),
+  runs: lazy(PROJECT_FEATURE_LOADERS.runs),
 };
 
 export function ProjectShell({ project, runtime, view = "command" }: ProjectShellProps) {
@@ -128,17 +132,40 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
         <ProjectSwitcher currentProject={project} runtime={runtime} />
       </header>
 
-      {view === "model-gateway-settings" ? (
-        <ProjectModelGatewaySettings project={project} />
-      ) : view === "prompt-library" ? (
-        <ProjectPromptLibrary project={project} />
-      ) : view === "runs" ? (
-        <RunObservatory project={project} />
-      ) : view === "command" ? (
-        <ProjectCommandCenter project={project} />
-      ) : (
-        <WorkflowStudio project={project} />
-      )}
+      <Suspense fallback={<ProjectFeatureFallback view={view} />}>
+        <ProjectFeatureContent project={project} view={view} />
+      </Suspense>
     </div>
   );
+}
+
+function ProjectFeatureContent({ project, view }: { project: ProjectContext; view: ProjectFeatureView }) {
+  const Feature = ProjectFeatureComponents[view];
+  return <Feature project={project} />;
+}
+
+function ProjectFeatureFallback({ view }: { view: ProjectFeatureView }) {
+  return (
+    <main className="aegis-main" aria-busy="true" aria-label="Loading project feature">
+      <section className="panel-block">
+        <div className="telemetry">LOADING MODULE</div>
+        <h2>{getFeatureLabel(view)}</h2>
+      </section>
+    </main>
+  );
+}
+
+function getFeatureLabel(view: ProjectFeatureView) {
+  switch (view) {
+    case "command":
+      return "Project Command Center";
+    case "workflows":
+      return "Workflow Studio";
+    case "model-gateway-settings":
+      return "Model Gateway";
+    case "prompt-library":
+      return "Prompt Library";
+    case "runs":
+      return "Run Observatory";
+  }
 }

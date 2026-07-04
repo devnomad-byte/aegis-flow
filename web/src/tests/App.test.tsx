@@ -22,8 +22,8 @@ describe("App", () => {
 
     expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
     expect(screen.getByText("运维排障项目")).toBeInTheDocument();
-    expect(screen.getByText("Workflow Studio")).toBeInTheDocument();
-    expect(screen.getByText("Workflow Canvas")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Workflow Studio" })).toBeInTheDocument();
+    expect(await screen.findByText("Workflow Canvas")).toBeInTheDocument();
     expect(screen.getByText("导入预览")).toBeInTheDocument();
     expect(screen.getByText("Harness Loop Timeline")).toBeInTheDocument();
   });
@@ -69,7 +69,7 @@ describe("App", () => {
 
     expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Model Gateway" })).toBeInTheDocument();
-    expect(screen.getByText("POLICY EDITOR")).toBeInTheDocument();
+    expect(await screen.findByText("POLICY EDITOR")).toBeInTheDocument();
   });
 
   it("renders prompt library settings for the project prompt route", async () => {
