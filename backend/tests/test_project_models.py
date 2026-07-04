@@ -34,10 +34,12 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "retrieval_query_logs",
         "agent_memories",
         "run_lessons",
+        "shell_runner_invocations",
         "tool_gateway_invocations",
         "tool_gateway_approval_tasks",
         "model_gateway_policies",
         "model_gateway_invocations",
+        "policy_gate_events",
         "prompt_templates",
         "prompt_template_releases",
         "prompt_template_versions",
@@ -74,10 +76,12 @@ def test_project_scoped_tables_have_project_id() -> None:
         "retrieval_query_logs",
         "agent_memories",
         "run_lessons",
+        "shell_runner_invocations",
         "tool_gateway_invocations",
         "tool_gateway_approval_tasks",
         "model_gateway_policies",
         "model_gateway_invocations",
+        "policy_gate_events",
         "prompt_templates",
         "prompt_template_releases",
         "prompt_template_versions",
@@ -120,11 +124,13 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         ("retrieval_eval_cases", ("project_id", "dataset_id", "case_ref")),
         ("agent_memories", ("project_id", "memory_scope", "namespace", "memory_key")),
         ("run_lessons", ("project_id", "lesson_ref")),
+        ("shell_runner_invocations", ("project_id", "invocation_ref")),
         ("tool_gateway_invocations", ("project_id", "tool_call_id")),
         ("tool_gateway_approval_tasks", ("project_id", "invocation_id")),
         ("tool_gateway_approval_tasks", ("project_id", "tool_call_id")),
         ("model_gateway_policies", ("project_id", "policy_ref")),
         ("model_gateway_invocations", ("project_id", "invocation_ref")),
+        ("policy_gate_events", ("project_id", "event_ref")),
         ("prompt_templates", ("project_id", "template_ref")),
         (
             "prompt_template_releases",
@@ -201,3 +207,26 @@ def test_runtime_trace_spans_have_project_query_indexes() -> None:
     )
     assert isinstance(trace_table.columns["start_time_unix_nano"].type, BigInteger)
     assert isinstance(trace_table.columns["end_time_unix_nano"].type, BigInteger)
+
+
+def test_shell_and_policy_runtime_event_tables_have_project_trace_indexes() -> None:
+    shell_table = Base.metadata.tables["shell_runner_invocations"]
+    policy_table = Base.metadata.tables["policy_gate_events"]
+    indexes = {
+        str(index.name): tuple(column.name for column in index.columns)
+        for table in (shell_table, policy_table)
+        for index in table.indexes
+    }
+
+    assert indexes["ix_shell_runner_invocations_project_run_node_trace"] == (
+        "project_id",
+        "run_id",
+        "node_id",
+        "trace_id",
+    )
+    assert indexes["ix_policy_gate_events_project_run_node_trace"] == (
+        "project_id",
+        "run_id",
+        "node_id",
+        "trace_id",
+    )

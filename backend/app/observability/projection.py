@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend.app.execution.models import ShellRunnerInvocation
 from backend.app.knowledge.models import RetrievalQueryLog
 from backend.app.model_gateway.models import ModelGatewayInvocation
 from backend.app.observability.schemas import RuntimeSpanStatus, RuntimeTraceSpanCreate
 from backend.app.observability.sqlalchemy_store import sanitize_trace_value
+from backend.app.policy_gate.models import PolicyGateEvent
 from backend.app.tool_gateway.models import ToolGatewayInvocation
 
 
@@ -132,6 +134,92 @@ def retrieval_query_log_to_span(query_log: RetrievalQueryLog) -> RuntimeTraceSpa
     )
 
 
+def shell_invocation_to_span(invocation: ShellRunnerInvocation) -> RuntimeTraceSpanCreate:
+    start_nano, end_nano = _time_window_to_nanos(invocation.created_at, invocation.duration_ms)
+    attributes = {
+        "shell.template_ref": invocation.template_ref,
+        "shell.template_version": invocation.template_version,
+        "shell.command_hash": invocation.command_hash,
+        "shell.sandbox_image": invocation.sandbox_image,
+        "shell.sandbox_image_digest": invocation.sandbox_image_digest,
+        "shell.exit_code": invocation.exit_code,
+        "shell.egress_profile_ref": invocation.egress_profile_ref,
+        "shell.egress_proxy_mode": invocation.egress_proxy_mode,
+        "shell.network_mode": invocation.network_mode,
+        "stdout_summary": invocation.stdout_summary,
+        "stderr_summary": invocation.stderr_summary,
+        "error.type": invocation.error_type,
+        "error.message": invocation.error_message,
+        **_flatten_shell_resource_usage(invocation.resource_usage or {}),
+    }
+    return RuntimeTraceSpanCreate(
+        project_id=invocation.project_id,
+        actor_id=invocation.actor_id,
+        trace_id=_trace_id_or_fallback(invocation.trace_id, invocation.invocation_ref),
+        run_id=invocation.run_id,
+        workflow_ref=invocation.workflow_ref,
+        node_id=invocation.node_id,
+        parent_span_id="",
+        span_id=f"shell:{invocation.invocation_ref}",
+        span_name="shell.execute",
+        span_kind="tool",
+        component="shell_runner",
+        status=_map_shell_status(invocation.status),
+        start_time_unix_nano=start_nano,
+        end_time_unix_nano=end_nano,
+        duration_ms=invocation.duration_ms,
+        attributes=sanitize_trace_value(_drop_empty(attributes)),
+        events=[],
+        links=[],
+        resource={"service.name": "aegis-flow-runtime"},
+        source_type="shell_runner_invocation",
+        source_id=str(invocation.id or invocation.invocation_ref),
+        created_by=invocation.created_by,
+        updated_by=invocation.updated_by,
+    )
+
+
+def policy_gate_event_to_span(event: PolicyGateEvent) -> RuntimeTraceSpanCreate:
+    start_nano, end_nano = _time_window_to_nanos(event.created_at, event.duration_ms)
+    attributes = {
+        "policy.gate_ref": event.gate_ref,
+        "policy.policy_ref": event.policy_ref,
+        "policy.rule_ref": event.rule_ref,
+        "policy.target_type": event.target_type,
+        "policy.target_ref": event.target_ref,
+        "policy.decision": event.decision,
+        "policy.risk_level": event.risk_level,
+        "policy.approval_required": event.approval_required,
+        "policy.approval_task_ref": event.approval_task_ref,
+        "reason_summary": event.reason_summary,
+    }
+    return RuntimeTraceSpanCreate(
+        project_id=event.project_id,
+        actor_id=event.actor_id,
+        trace_id=_trace_id_or_fallback(event.trace_id, event.event_ref),
+        run_id=event.run_id,
+        workflow_ref=event.workflow_ref,
+        node_id=event.node_id,
+        parent_span_id="",
+        span_id=f"policy:{event.event_ref}",
+        span_name="policy.gate",
+        span_kind="internal",
+        component="policy_engine",
+        status=_map_policy_decision(event.decision),
+        start_time_unix_nano=start_nano,
+        end_time_unix_nano=end_nano,
+        duration_ms=event.duration_ms,
+        attributes=sanitize_trace_value(_drop_empty(attributes)),
+        events=[],
+        links=[],
+        resource={"service.name": "aegis-flow-runtime"},
+        source_type="policy_gate_event",
+        source_id=str(event.id or event.event_ref),
+        created_by=event.created_by,
+        updated_by=event.updated_by,
+    )
+
+
 def _time_window_to_nanos(created_at: datetime | None, duration_ms: int) -> tuple[int, int]:
     end_at = created_at or datetime.now(UTC)
     if end_at.tzinfo is None:
@@ -152,8 +240,41 @@ def _map_status(status: str) -> RuntimeSpanStatus:
     return "failed"
 
 
+def _map_shell_status(status: str) -> RuntimeSpanStatus:
+    if status == "success":
+        return "success"
+    if status == "denied":
+        return "denied"
+    if status == "cancelled":
+        return "cancelled"
+    return "failed"
+
+
+def _map_policy_decision(decision: str) -> RuntimeSpanStatus:
+    if decision == "allowed":
+        return "success"
+    if decision == "approval_required":
+        return "pending"
+    return "denied"
+
+
 def _flatten_usage(usage: dict[str, Any]) -> dict[str, Any]:
     return {f"llm.usage.{key}": value for key, value in usage.items()}
+
+
+def _flatten_shell_resource_usage(resource_usage: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "cpu_seconds",
+        "memory_peak_bytes",
+        "pids_peak",
+        "io_read_bytes",
+        "io_write_bytes",
+    }
+    return {
+        f"shell.resource.{key}": value
+        for key, value in resource_usage.items()
+        if key in allowed_keys
+    }
 
 
 def _drop_empty(attributes: dict[str, Any]) -> dict[str, Any]:
