@@ -237,6 +237,47 @@ async def delete_workflow_draft(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/drafts/{draft_id}/publish-check", response_model=WorkflowImportAnalysis)
+async def check_workflow_draft_publish(
+    project_id: UUID,
+    draft_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    draft_store: WorkflowDraftStore = DraftStore,
+    audit_store: AuditEventStore = AuditStore,
+    registry_store: ToolRegistryStore = RegistryStore,
+) -> WorkflowImportAnalysis:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:write",
+    )
+    draft = await draft_store.get_project_draft(project_id, draft_id)
+    if draft is None:
+        raise _draft_not_found()
+
+    analysis = analyze_workflow_import(
+        draft.definition,
+        catalog=await registry_store.build_project_resource_catalog(project_id),
+        existing_workflow=draft.definition,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.draft.publish_check",
+        target_type="workflow_draft",
+        target_id=str(draft.id),
+        metadata={
+            "workflow_id": draft.workflow_id,
+            "workflow_version": draft.version,
+            "can_publish_or_run": analysis.can_publish_or_run,
+            "missing_reference_count": len(analysis.missing_references),
+        },
+    )
+    return analysis
+
+
 @router.get("/drafts/{draft_id}/export-yaml", response_model=WorkflowYamlExportResponse)
 async def export_workflow_draft_yaml(
     project_id: UUID,

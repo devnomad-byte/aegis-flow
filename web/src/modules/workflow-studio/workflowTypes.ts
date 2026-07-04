@@ -16,6 +16,8 @@ export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type ResourceState = "ready" | "missing" | "neutral";
 
 export type WorkflowStatus = "draft" | "published" | "archived";
+export type WorkflowSchemaVersion = "workflow.dsl/v0.1" | "workflow.dsl/v0.2";
+export type EdgeKind = "sequence" | "condition" | "parallel" | "loop" | "resume";
 
 export type WorkflowMetadata = {
   id: string;
@@ -45,6 +47,16 @@ export type NodeDefinition = {
   risk_level?: RiskLevel;
   position?: NodePosition;
   data?: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+  tool_group_refs?: string[];
+  input_schema?: Record<string, unknown>;
+  output_schema?: Record<string, unknown>;
+  retry_policy?: {
+    max_attempts?: number;
+    backoff_seconds?: number;
+  };
+  timeout_seconds?: number;
+  approval_policy_ref?: string;
 };
 
 export type LlmNodeData = {
@@ -65,6 +77,14 @@ export type EdgeDefinition = {
   target: string;
   source_handle?: string | null;
   target_handle?: string | null;
+  kind?: EdgeKind;
+  label?: string;
+  condition?: string;
+  loop?: {
+    max_iterations: number;
+    while_expression?: string;
+    item_path?: string;
+  };
 };
 
 export type WorkflowPolicies = {
@@ -74,7 +94,7 @@ export type WorkflowPolicies = {
 };
 
 export type WorkflowDefinition = {
-  schema_version: "workflow.dsl/v0.1";
+  schema_version: WorkflowSchemaVersion;
   workflow: WorkflowMetadata;
   inputs?: WorkflowInputDefinition[];
   nodes: NodeDefinition[];
@@ -99,8 +119,19 @@ export type MissingResourceReference = {
 export type WorkflowImportAnalysis = {
   permission_impact: PermissionImpact;
   missing_references: MissingResourceReference[];
+  import_diff: WorkflowImportDiff;
   can_create_draft: boolean;
   can_publish_or_run: boolean;
+};
+
+export type WorkflowImportDiff = {
+  added_nodes: string[];
+  modified_nodes: string[];
+  removed_nodes: string[];
+  added_edges: string[];
+  removed_edges: string[];
+  changed_tool_groups: string[];
+  has_breaking_changes: boolean;
 };
 
 export type WorkflowImportPreview = {
@@ -145,4 +176,5 @@ export type ImportPreviewSummary = {
   mcpServers: string[];
   shellTemplates: string[];
   environments: string[];
+  diffLabels: string[];
 };

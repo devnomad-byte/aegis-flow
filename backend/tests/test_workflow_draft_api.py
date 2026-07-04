@@ -474,3 +474,60 @@ def test_update_and_delete_workflow_draft_require_write_and_record_audit() -> No
         "workflow.draft.update",
         "workflow.draft.delete",
     ]
+
+
+def test_publish_check_reanalyzes_draft_against_live_project_catalog_and_records_audit() -> None:
+    project = make_project(permissions=["workflow:view", "workflow:write"])
+    draft_store = InMemoryWorkflowDraftStore()
+    audit_store = InMemoryAuditEventStore()
+    registry_store = InMemoryToolRegistryStore(
+        {
+            project.id: ProjectResourceCatalog(
+                tool_groups=frozenset({"k8s.readonly"}),
+                mcp_servers=frozenset({"mcp-k8s-test"}),
+                shell_templates=frozenset(),
+                environments=frozenset({"test"}),
+            )
+        }
+    )
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        draft_store=draft_store,
+        audit_store=audit_store,
+        registry_store=registry_store,
+    )
+    import_response = client.post(
+        f"/api/v1/projects/{project.id}/workflows/import-yaml",
+        json={"yaml_text": workflow_yaml(project.id)},
+    )
+    draft_id = import_response.json()["id"]
+
+    check_response = client.post(
+        f"/api/v1/projects/{project.id}/workflows/drafts/{draft_id}/publish-check"
+    )
+
+    assert check_response.status_code == 200
+    body = check_response.json()
+    assert body["missing_references"] == []
+    assert body["can_publish_or_run"] is True
+    assert [event["action"] for event in audit_store.events] == [
+        "workflow.import_draft",
+        "workflow.draft.publish_check",
+    ]
+
+    registry_store.catalogs[project.id] = ProjectResourceCatalog()
+    blocked_response = client.post(
+        f"/api/v1/projects/{project.id}/workflows/drafts/{draft_id}/publish-check"
+    )
+
+    assert blocked_response.status_code == 200
+    assert blocked_response.json()["can_publish_or_run"] is False
+    assert {
+        (item["reference_type"], item["reference"])
+        for item in blocked_response.json()["missing_references"]
+    } == {
+        ("environment", "test"),
+        ("mcp_server", "mcp-k8s-test"),
+        ("tool_group", "k8s.readonly"),
+    }

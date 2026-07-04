@@ -5,8 +5,10 @@ from backend.app.workflows.dsl import (
     EdgeDefinition,
     HttpNodeData,
     LlmNodeData,
+    LoopEdgeData,
     McpToolNodeData,
     NodeDefinition,
+    RetryPolicy,
     ShellNodeData,
     WorkflowDefinition,
     WorkflowMetadata,
@@ -162,6 +164,77 @@ def test_condition_edges_must_use_declared_case_handles() -> None:
                 EdgeDefinition(source="condition_1", target="end_1", source_handle="case:missing"),
             ],
         )
+
+
+def test_v2_node_metadata_and_loop_edges_are_validated_and_affect_permission_impact() -> None:
+    condition = NodeDefinition(
+        id="router_1",
+        name="Route",
+        type="condition",
+        data=ConditionNodeData(expression="risk", cases=["retry", "done"]),
+    )
+    tool_node = NodeDefinition(
+        id="tool_1",
+        name="Query Pod",
+        type="mcp_tool",
+        data=McpToolNodeData(
+            mcp_server_ref="mcp-k8s-test",
+            tool_group_ref="k8s.readonly",
+            tool_name="k8s.get_pod",
+            environment="test",
+        ),
+        parameters={"namespace": "ops", "dry_run": True},
+        tool_group_refs=["incident.write"],
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        retry_policy=RetryPolicy(max_attempts=2, backoff_seconds=3),
+        timeout_seconds=120,
+        approval_policy_ref="ops-medium-risk",
+    )
+    workflow = WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="ops_502_diagnosis",
+            name="502 鎺掗殰鍔╂墜",
+            project_id="project_ops",
+            version=2,
+        ),
+        nodes=[start_node(), condition, tool_node, end_node()],
+        edges=[
+            EdgeDefinition(source="start_1", target="router_1"),
+            EdgeDefinition(
+                source="router_1",
+                target="tool_1",
+                source_handle="case:retry",
+                kind="condition",
+            ),
+            EdgeDefinition(
+                source="tool_1",
+                target="router_1",
+                kind="loop",
+                loop=LoopEdgeData(max_iterations=3, while_expression="needs_more_context"),
+            ),
+            EdgeDefinition(
+                source="router_1",
+                target="end_1",
+                source_handle="case:done",
+                kind="condition",
+            ),
+        ],
+    )
+
+    impact = workflow.permission_impact()
+
+    assert workflow.schema_version == "workflow.dsl/v0.2"
+    assert workflow.nodes[2].parameters == {"namespace": "ops", "dry_run": True}
+    assert workflow.edges[2].loop is not None
+    assert workflow.edges[2].loop.max_iterations == 3
+    assert impact.tool_groups == ["incident.write", "k8s.readonly"]
+
+
+def test_loop_edge_requires_loop_configuration() -> None:
+    with pytest.raises(ValidationError, match="loop edge requires loop config"):
+        EdgeDefinition(source="tool_1", target="router_1", kind="loop")
 
 
 def test_rejects_unreachable_nodes() -> None:

@@ -3,6 +3,7 @@ import { parse, stringify } from "yaml";
 import { analyzeWorkflowImport } from "./workflowDsl";
 import type {
   EdgeDefinition,
+  EdgeKind,
   NodeDefinition,
   NodeType,
   ProjectResourceCatalog,
@@ -26,6 +27,8 @@ const NODE_TYPES: NodeType[] = [
 ];
 const RISK_LEVELS: RiskLevel[] = ["low", "medium", "high", "critical"];
 const WORKFLOW_STATUSES: WorkflowStatus[] = ["draft", "published", "archived"];
+const WORKFLOW_SCHEMA_VERSIONS = ["workflow.dsl/v0.1", "workflow.dsl/v0.2"] as const;
+const EDGE_KINDS: EdgeKind[] = ["sequence", "condition", "parallel", "loop", "resume"];
 
 export function parseWorkflowYaml(yamlText: string): WorkflowDefinition {
   const parsed = parse(yamlText);
@@ -44,19 +47,18 @@ export function exportWorkflowYaml(workflow: WorkflowDefinition): string {
 export function previewWorkflowImportFromYaml(
   yamlText: string,
   catalog: ProjectResourceCatalog,
+  existingWorkflow?: WorkflowDefinition,
 ): WorkflowImportPreview {
   const workflow = parseWorkflowYaml(yamlText);
 
   return {
     workflow,
-    analysis: analyzeWorkflowImport(workflow, catalog),
+    analysis: analyzeWorkflowImport(workflow, catalog, existingWorkflow),
   };
 }
 
 function normalizeWorkflowDefinition(value: Record<string, unknown>): WorkflowDefinition {
-  if (value.schema_version !== "workflow.dsl/v0.1") {
-    throw new Error("仅支持 workflow.dsl/v0.1。");
-  }
+  const schemaVersion = asEnum(value.schema_version, WORKFLOW_SCHEMA_VERSIONS, "schema_version");
 
   const workflow = value.workflow;
   if (!isRecord(workflow)) {
@@ -76,7 +78,7 @@ function normalizeWorkflowDefinition(value: Record<string, unknown>): WorkflowDe
   }
 
   return {
-    schema_version: "workflow.dsl/v0.1",
+    schema_version: schemaVersion,
     workflow: {
       id: asRequiredString(workflow.id, "workflow.id"),
       project_id: asRequiredString(workflow.project_id, "workflow.project_id"),
@@ -124,7 +126,7 @@ function normalizeNode(value: unknown): NodeDefinition {
       }
     : undefined;
 
-  return {
+  const normalized: NodeDefinition = {
     id: asRequiredString(value.id, "node.id"),
     type: nodeType,
     name: asRequiredString(value.name, "node.name"),
@@ -133,6 +135,41 @@ function normalizeNode(value: unknown): NodeDefinition {
     position,
     data: isRecord(value.data) ? { ...value.data } : undefined,
   };
+
+  if (isRecord(value.parameters)) {
+    normalized.parameters = { ...value.parameters };
+  }
+  if (Array.isArray(value.tool_group_refs)) {
+    normalized.tool_group_refs = value.tool_group_refs.filter(
+      (reference): reference is string => typeof reference === "string",
+    );
+  }
+  if (isRecord(value.input_schema)) {
+    normalized.input_schema = { ...value.input_schema };
+  }
+  if (isRecord(value.output_schema)) {
+    normalized.output_schema = { ...value.output_schema };
+  }
+  if (isRecord(value.retry_policy)) {
+    normalized.retry_policy = {
+      max_attempts:
+        typeof value.retry_policy.max_attempts === "number"
+          ? value.retry_policy.max_attempts
+          : undefined,
+      backoff_seconds:
+        typeof value.retry_policy.backoff_seconds === "number"
+          ? value.retry_policy.backoff_seconds
+          : undefined,
+    };
+  }
+  if (typeof value.timeout_seconds === "number") {
+    normalized.timeout_seconds = value.timeout_seconds;
+  }
+  if (typeof value.approval_policy_ref === "string") {
+    normalized.approval_policy_ref = value.approval_policy_ref;
+  }
+
+  return normalized;
 }
 
 function normalizeEdge(value: unknown): EdgeDefinition {
@@ -140,12 +177,30 @@ function normalizeEdge(value: unknown): EdgeDefinition {
     throw new Error("edge 必须是对象。");
   }
 
-  return {
+  const kind = value.kind ? asEnum(value.kind, EDGE_KINDS, "edge.kind") : "sequence";
+  const edge: EdgeDefinition = {
     source: asRequiredString(value.source, "edge.source"),
     target: asRequiredString(value.target, "edge.target"),
     source_handle: typeof value.source_handle === "string" ? value.source_handle : null,
     target_handle: typeof value.target_handle === "string" ? value.target_handle : null,
+    kind,
+    label: typeof value.label === "string" ? value.label : undefined,
+    condition: typeof value.condition === "string" ? value.condition : undefined,
   };
+
+  if (kind === "loop") {
+    if (!isRecord(value.loop)) {
+      throw new Error("edge.loop 必须是对象。");
+    }
+    edge.loop = {
+      max_iterations: asRequiredNumber(value.loop.max_iterations, "edge.loop.max_iterations"),
+      while_expression:
+        typeof value.loop.while_expression === "string" ? value.loop.while_expression : undefined,
+      item_path: typeof value.loop.item_path === "string" ? value.loop.item_path : undefined,
+    };
+  }
+
+  return edge;
 }
 
 function asRequiredString(value: unknown, fieldName: string) {
@@ -164,7 +219,7 @@ function asRequiredNumber(value: unknown, fieldName: string) {
   return value;
 }
 
-function asEnum<T extends string>(value: unknown, allowedValues: T[], fieldName: string): T {
+function asEnum<T extends string>(value: unknown, allowedValues: readonly T[], fieldName: string): T {
   if (typeof value !== "string" || !allowedValues.includes(value as T)) {
     throw new Error(`${fieldName} 不在允许范围内。`);
   }

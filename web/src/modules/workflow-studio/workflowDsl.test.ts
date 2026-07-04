@@ -9,6 +9,99 @@ import {
   workflowToFlow,
 } from "./workflowDsl";
 import { previewWorkflowImportFromYaml } from "./workflowYaml";
+import type { WorkflowDefinition } from "./workflowTypes";
+
+const WORKFLOW_V2_YAML = `
+schema_version: workflow.dsl/v0.2
+workflow:
+  id: wf_yaml_ops_triage
+  project_id: ops-command
+  name: 运维排障导入样例 v2
+  version: 2
+  status: draft
+nodes:
+  - id: start_1
+    type: start
+    name: 接收告警
+    position:
+      x: 72
+      y: 180
+  - id: router_1
+    type: condition
+    name: 风险路由
+    position:
+      x: 320
+      y: 180
+    data:
+      expression: alert.severity
+      cases:
+        - collect
+        - finish
+  - id: tool_1
+    type: mcp_tool
+    name: 查询 Pod 状态
+    risk_level: medium
+    position:
+      x: 610
+      y: 80
+    parameters:
+      namespace: ops
+      dry_run: true
+    tool_group_refs:
+      - incident.write
+    input_schema:
+      type: object
+    output_schema:
+      type: object
+    retry_policy:
+      max_attempts: 2
+      backoff_seconds: 3
+    timeout_seconds: 120
+    data:
+      mcp_server_ref: cluster-observability
+      tool_group_ref: kubernetes-readonly
+      environment: staging
+  - id: llm_1
+    type: llm
+    name: 汇总闭环
+    risk_level: medium
+    position:
+      x: 880
+      y: 180
+    data:
+      model_policy_ref: default
+      prompt_template_ref: incident-summary
+      prompt_version: v2
+  - id: end_1
+    type: end
+    name: 输出报告
+    position:
+      x: 1160
+      y: 180
+edges:
+  - source: start_1
+    target: router_1
+    kind: sequence
+  - source: router_1
+    target: tool_1
+    source_handle: case:collect
+    kind: condition
+  - source: tool_1
+    target: llm_1
+    kind: parallel
+    label: evidence
+  - source: llm_1
+    target: router_1
+    kind: loop
+    label: refine
+    loop:
+      max_iterations: 3
+      while_expression: needs_more_context
+  - source: router_1
+    target: end_1
+    source_handle: case:finish
+    kind: condition
+`;
 
 describe("workflow DSL adapters", () => {
   it("maps workflow DSL nodes and edges to React Flow with stable ids", () => {
@@ -26,7 +119,43 @@ describe("workflow DSL adapters", () => {
     expect(flow.nodes[1].data.name).toBe("根因分析 Agent");
     expect(flow.nodes[1].data.nodeType).toBe("agent");
     expect(flow.nodes[3].data.resourceState).toBe("missing");
-    expect(flow.edges[0].id).toBe("start_1->agent_1:default");
+    expect(flow.edges[0].id).toBe("start_1->agent_1:sequence:default");
+  });
+
+  it("keeps parallel edge kinds distinct for the same node pair", () => {
+    const workflow: WorkflowDefinition = {
+      ...SAMPLE_WORKFLOW,
+      schema_version: "workflow.dsl/v0.2",
+      nodes: SAMPLE_WORKFLOW.nodes.filter((node) =>
+        ["start_1", "agent_1", "end_1"].includes(node.id),
+      ),
+      edges: [
+        {
+          source: "agent_1",
+          target: "end_1",
+          kind: "sequence",
+        },
+        {
+          source: "agent_1",
+          target: "end_1",
+          kind: "loop",
+          label: "retry",
+          loop: {
+            max_iterations: 2,
+          },
+        },
+      ],
+    };
+
+    const flow = workflowToFlow(workflow);
+    const converted = flowToWorkflow(workflow, flow.nodes, flow.edges);
+
+    expect(flow.edges.map((edge) => edge.id)).toEqual([
+      "agent_1->end_1:sequence:default",
+      "agent_1->end_1:loop:default",
+    ]);
+    expect(converted.edges.map((edge) => edge.kind)).toEqual(["sequence", "loop"]);
+    expect(converted.edges.find((edge) => edge.kind === "loop")?.loop?.max_iterations).toBe(2);
   });
 
   it("renames a node without changing the stable node id", () => {
@@ -79,5 +208,57 @@ describe("workflow DSL adapters", () => {
     expect(summary.missingLabels).toContain("shell_template: collect-pod-logs@1.0.0");
     expect(summary.riskLabels).toEqual(["medium", "high"]);
     expect(summary.canPublishOrRun).toBe(false);
+  });
+
+  it("parses workflow DSL v2 and reports import diff against the current canvas", () => {
+    const preview = previewWorkflowImportFromYaml(
+      WORKFLOW_V2_YAML,
+      SAMPLE_CATALOG,
+      SAMPLE_WORKFLOW,
+    );
+    const summary = buildImportPreviewSummary(preview.analysis);
+
+    expect(preview.workflow.schema_version).toBe("workflow.dsl/v0.2");
+    expect(preview.workflow.nodes.find((node) => node.id === "tool_1")?.parameters).toEqual({
+      namespace: "ops",
+      dry_run: true,
+    });
+    expect(preview.workflow.nodes.find((node) => node.id === "tool_1")?.tool_group_refs).toEqual([
+      "incident.write",
+    ]);
+    expect(preview.workflow.edges.map((edge) => edge.kind)).toEqual([
+      "sequence",
+      "condition",
+      "parallel",
+      "loop",
+      "condition",
+    ]);
+    expect(summary.diffLabels).toContain("added node: router_1");
+    expect(summary.diffLabels).toContain("removed node: agent_1");
+    expect(summary.diffLabels).toContain("changed tool group: incident.write");
+    expect(summary.missingLabels).toContain("tool_group: incident.write");
+  });
+
+  it("preserves edge metadata and layout when converting React Flow changes back to DSL", () => {
+    const workflow = previewWorkflowImportFromYaml(WORKFLOW_V2_YAML, SAMPLE_CATALOG).workflow;
+    const flow = workflowToFlow(workflow);
+    const movedNodes = flow.nodes.map((node) =>
+      node.id === "tool_1"
+        ? {
+            ...node,
+            position: { x: 700, y: 140 },
+          }
+        : node,
+    );
+
+    const converted = flowToWorkflow(workflow, movedNodes, flow.edges) as WorkflowDefinition;
+    const loopEdge = converted.edges.find((edge) => edge.kind === "loop");
+
+    expect(converted.nodes.find((node) => node.id === "tool_1")?.position).toEqual({
+      x: 700,
+      y: 140,
+    });
+    expect(loopEdge?.label).toBe("refine");
+    expect(loopEdge?.loop?.max_iterations).toBe(3);
   });
 });

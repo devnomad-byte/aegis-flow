@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -68,5 +68,107 @@ describe("WorkflowStudio", () => {
     expect(screen.getByText(/tokens 32/)).toBeInTheDocument();
     expect(screen.getByText(/42ms/)).toBeInTheDocument();
     expect(screen.getByText(/sha256:sample-llm/)).toBeInTheDocument();
+  });
+
+  it("shows YAML v2 import diff and exports preserved loop metadata", async () => {
+    const user = userEvent.setup();
+
+    render(<WorkflowStudio project={defaultProjectContext} />);
+
+    const yamlEditor = screen.getByLabelText("Workflow YAML");
+    await user.clear(yamlEditor);
+    fireEvent.change(
+      yamlEditor,
+      {
+        target: {
+          value: `schema_version: workflow.dsl/v0.2
+workflow:
+  id: wf_yaml_ops_triage
+  project_id: ops-command
+  name: 运维排障导入样例 v2
+  version: 2
+  status: draft
+nodes:
+  - id: start_1
+    type: start
+    name: 接收告警
+    position: { x: 72, y: 180 }
+  - id: router_1
+    type: condition
+    name: 风险路由
+    position: { x: 320, y: 180 }
+    data:
+      expression: alert.severity
+      cases: [collect, finish]
+  - id: tool_1
+    type: mcp_tool
+    name: 查询 Pod 状态
+    risk_level: medium
+    position: { x: 610, y: 80 }
+    parameters:
+      namespace: ops
+      dry_run: true
+    tool_group_refs:
+      - incident.write
+    data:
+      mcp_server_ref: cluster-observability
+      tool_group_ref: kubernetes-readonly
+      environment: staging
+  - id: llm_1
+    type: llm
+    name: 汇总闭环
+    risk_level: medium
+    position: { x: 880, y: 180 }
+    data:
+      model_policy_ref: default
+      prompt_template_ref: incident-summary
+      prompt_version: v2
+  - id: end_1
+    type: end
+    name: 输出报告
+    position: { x: 1160, y: 180 }
+edges:
+  - source: start_1
+    target: router_1
+    kind: sequence
+  - source: router_1
+    target: tool_1
+    source_handle: case:collect
+    kind: condition
+  - source: tool_1
+    target: llm_1
+    kind: parallel
+    label: evidence
+  - source: llm_1
+    target: router_1
+    kind: loop
+    label: refine
+    loop:
+      max_iterations: 3
+      while_expression: needs_more_context
+  - source: router_1
+    target: end_1
+    source_handle: case:finish
+    kind: condition
+`,
+        },
+      },
+    );
+
+    await user.click(screen.getAllByRole("button", { name: /预览|棰勮/ })[0]);
+
+    expect(screen.getByText(/added node: router_1/)).toBeInTheDocument();
+    expect(screen.getByText(/removed node: agent_1/)).toBeInTheDocument();
+    expect(screen.getByText(/changed tool group: incident.write/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /应用|搴旂敤/ }));
+    await user.click(screen.getByRole("button", { name: /YAML/ }));
+
+    const exportedYaml = screen
+      .getAllByLabelText(/Workflow YAML/)
+      .find((element) => element.hasAttribute("readonly")) as HTMLTextAreaElement;
+    expect(exportedYaml.value).toContain("schema_version: workflow.dsl/v0.2");
+    expect(exportedYaml.value).toContain("kind: loop");
+    expect(exportedYaml.value).toContain("parameters:");
   });
 });

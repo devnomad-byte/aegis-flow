@@ -11,6 +11,7 @@ import type {
   WorkflowFlowModel,
   WorkflowFlowNode,
   WorkflowImportAnalysis,
+  WorkflowImportDiff,
 } from "./workflowTypes";
 
 const DEFAULT_RISK_LEVEL: RiskLevel = "low";
@@ -45,6 +46,12 @@ export function flowToWorkflow(
   edges: WorkflowFlowEdge[],
 ): WorkflowDefinition {
   const flowNodesById = new Map(nodes.map((node) => [node.id, node]));
+  const existingEdgesById = new Map(
+    workflow.edges.map((edge) => [buildEdgeIdentity(edge), edge]),
+  );
+  const existingEdgesByLooseIdentity = new Map(
+    workflow.edges.map((edge) => [buildLooseEdgeIdentity(edge), edge]),
+  );
 
   return {
     ...workflow,
@@ -64,12 +71,24 @@ export function flowToWorkflow(
         },
       };
     }),
-    edges: edges.map((edge) => ({
-      source: edge.source,
-      target: edge.target,
-      source_handle: edge.sourceHandle ?? null,
-      target_handle: edge.targetHandle ?? null,
-    })),
+    edges: edges.map((edge) => {
+      const looseIdentity = buildLooseEdgeIdentity({
+        source: edge.source,
+        target: edge.target,
+        source_handle: edge.sourceHandle ?? null,
+        target_handle: edge.targetHandle ?? null,
+      });
+      const existingEdge =
+        existingEdgesById.get(edge.id) ?? existingEdgesByLooseIdentity.get(looseIdentity);
+
+      return {
+        ...(existingEdge ?? {}),
+        source: edge.source,
+        target: edge.target,
+        source_handle: edge.sourceHandle ?? null,
+        target_handle: edge.targetHandle ?? null,
+      };
+    }),
   };
 }
 
@@ -127,6 +146,7 @@ export function getLlmNodeData(node: NodeDefinition): LlmNodeData {
 export function analyzeWorkflowImport(
   workflow: WorkflowDefinition,
   catalog: ProjectResourceCatalog,
+  existingWorkflow?: WorkflowDefinition,
 ): WorkflowImportAnalysis {
   const toolGroups = new Set<string>();
   const mcpServers = new Set<string>();
@@ -140,6 +160,11 @@ export function analyzeWorkflowImport(
     if (riskLevel) {
       riskLevels.add(riskLevel);
     }
+
+    collectStringArray(node.tool_group_refs).forEach((toolGroup) => {
+      toolGroups.add(toolGroup);
+      addMissing(missingReferences, "tool_group", toolGroup, catalog.toolGroups);
+    });
 
     collectStringArray(node.data?.tool_groups).forEach((toolGroup) => {
       toolGroups.add(toolGroup);
@@ -190,6 +215,7 @@ export function analyzeWorkflowImport(
       approval_required: approvalRequired,
     },
     missing_references: missingReferences,
+    import_diff: buildWorkflowImportDiff(workflow, existingWorkflow),
     can_create_draft: true,
     can_publish_or_run: canPublishOrRun,
   };
@@ -209,17 +235,22 @@ export function buildImportPreviewSummary(analysis: WorkflowImportAnalysis): Imp
     mcpServers: analysis.permission_impact.mcp_servers,
     shellTemplates: analysis.permission_impact.shell_templates,
     environments: analysis.permission_impact.environments,
+    diffLabels: buildDiffLabels(analysis.import_diff),
   };
 }
 
 function toFlowEdge(edge: EdgeDefinition): WorkflowFlowEdge {
+  const kind = edge.kind ?? "sequence";
+  const label = edge.label ?? (kind === "sequence" ? undefined : kind);
+
   return {
-    id: `${edge.source}->${edge.target}:${edge.source_handle ?? "default"}`,
+    id: buildEdgeIdentity(edge),
     source: edge.source,
     target: edge.target,
     sourceHandle: edge.source_handle ?? undefined,
     targetHandle: edge.target_handle ?? undefined,
-    animated: true,
+    animated: kind !== "sequence",
+    label,
   };
 }
 
@@ -261,6 +292,10 @@ function requiresProjectResource(node: NodeDefinition) {
 
 function collectNodeReferences(node: NodeDefinition) {
   const references = new Set<string>();
+
+  collectStringArray(node.tool_group_refs).forEach((toolGroup) => {
+    references.add(`tool_group:${toolGroup}`);
+  });
 
   collectStringArray(node.data?.tool_groups).forEach((toolGroup) => {
     references.add(`tool_group:${toolGroup}`);
@@ -354,4 +389,88 @@ function sortRiskLevels(riskLevels: RiskLevel[]) {
   };
 
   return riskLevels.sort((left, right) => order[left] - order[right]);
+}
+
+function buildWorkflowImportDiff(
+  workflow: WorkflowDefinition,
+  existingWorkflow?: WorkflowDefinition,
+): WorkflowImportDiff {
+  if (!existingWorkflow) {
+    return {
+      added_nodes: workflow.nodes.map((node) => node.id).sort(),
+      modified_nodes: [],
+      removed_nodes: [],
+      added_edges: workflow.edges.map(buildEdgeIdentity).sort(),
+      removed_edges: [],
+      changed_tool_groups: collectWorkflowToolGroups(workflow),
+      has_breaking_changes: false,
+    };
+  }
+
+  const oldNodes = new Map(existingWorkflow.nodes.map((node) => [node.id, node]));
+  const newNodes = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const oldNodeIds = new Set(oldNodes.keys());
+  const newNodeIds = new Set(newNodes.keys());
+  const oldEdges = new Set(existingWorkflow.edges.map(buildEdgeIdentity));
+  const newEdges = new Set(workflow.edges.map(buildEdgeIdentity));
+  const oldToolGroups = new Set(collectWorkflowToolGroups(existingWorkflow));
+  const newToolGroups = new Set(collectWorkflowToolGroups(workflow));
+
+  const addedNodes = [...newNodeIds].filter((nodeId) => !oldNodeIds.has(nodeId)).sort();
+  const removedNodes = [...oldNodeIds].filter((nodeId) => !newNodeIds.has(nodeId)).sort();
+  const modifiedNodes = [...newNodeIds]
+    .filter((nodeId) => oldNodes.has(nodeId))
+    .filter((nodeId) => JSON.stringify(newNodes.get(nodeId)) !== JSON.stringify(oldNodes.get(nodeId)))
+    .sort();
+
+  return {
+    added_nodes: addedNodes,
+    modified_nodes: modifiedNodes,
+    removed_nodes: removedNodes,
+    added_edges: [...newEdges].filter((edgeId) => !oldEdges.has(edgeId)).sort(),
+    removed_edges: [...oldEdges].filter((edgeId) => !newEdges.has(edgeId)).sort(),
+    changed_tool_groups: [...newToolGroups]
+      .filter((toolGroup) => !oldToolGroups.has(toolGroup))
+      .sort(),
+    has_breaking_changes: removedNodes.length > 0 || [...oldEdges].some((edgeId) => !newEdges.has(edgeId)),
+  };
+}
+
+function collectWorkflowToolGroups(workflow: WorkflowDefinition) {
+  const toolGroups = new Set<string>();
+
+  workflow.nodes.forEach((node) => {
+    collectStringArray(node.tool_group_refs).forEach((toolGroup) => toolGroups.add(toolGroup));
+    collectStringArray(node.data?.tool_groups).forEach((toolGroup) => toolGroups.add(toolGroup));
+    const toolGroupRef = asString(node.data?.tool_group_ref);
+    if (toolGroupRef) {
+      toolGroups.add(toolGroupRef);
+    }
+  });
+
+  return [...toolGroups].sort();
+}
+
+function buildDiffLabels(diff: WorkflowImportDiff) {
+  return [
+    ...diff.added_nodes.map((nodeId) => `added node: ${nodeId}`),
+    ...diff.modified_nodes.map((nodeId) => `modified node: ${nodeId}`),
+    ...diff.removed_nodes.map((nodeId) => `removed node: ${nodeId}`),
+    ...diff.added_edges.map((edgeId) => `added edge: ${edgeId}`),
+    ...diff.removed_edges.map((edgeId) => `removed edge: ${edgeId}`),
+    ...diff.changed_tool_groups.map((toolGroup) => `changed tool group: ${toolGroup}`),
+  ];
+}
+
+function buildEdgeIdentity(edge: Pick<EdgeDefinition, "source" | "target" | "source_handle" | "target_handle" | "kind">) {
+  const kind = edge.kind ?? "sequence";
+  const sourceHandle = edge.source_handle ?? "default";
+  const targetHandle = edge.target_handle ? `:${edge.target_handle}` : "";
+  return `${edge.source}->${edge.target}:${kind}:${sourceHandle}${targetHandle}`;
+}
+
+function buildLooseEdgeIdentity(edge: Pick<EdgeDefinition, "source" | "target" | "source_handle" | "target_handle">) {
+  const sourceHandle = edge.source_handle ?? "default";
+  const targetHandle = edge.target_handle ? `:${edge.target_handle}` : "";
+  return `${edge.source}->${edge.target}:${sourceHandle}${targetHandle}`;
 }

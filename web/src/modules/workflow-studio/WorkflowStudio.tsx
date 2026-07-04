@@ -96,7 +96,7 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
 
   const handlePreviewImport = useCallback(() => {
     try {
-      const nextPreview = previewWorkflowImportFromYaml(yamlText, SAMPLE_CATALOG);
+      const nextPreview = previewWorkflowImportFromYaml(yamlText, SAMPLE_CATALOG, workflow);
       setPreview(nextPreview);
       setPreviewError(null);
       setTimelineEvents((events) => [
@@ -110,7 +110,7 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
         ...events.slice(0, 4),
       ]);
     }
-  }, [yamlText]);
+  }, [workflow, yamlText]);
 
   const handleApplyPreview = useCallback(() => {
     if (!preview) {
@@ -140,6 +140,26 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const handleNodeClick = useCallback<NodeMouseHandler>(
     (_event, node: Node) => {
       setSelectedNodeId(node.id);
+    },
+    [],
+  );
+
+  const handleNodeDragStop = useCallback(
+    (_event: unknown, node: Node) => {
+      setWorkflow((currentWorkflow) => ({
+        ...currentWorkflow,
+        nodes: currentWorkflow.nodes.map((workflowNode) =>
+          workflowNode.id === node.id
+            ? {
+                ...workflowNode,
+                position: {
+                  x: node.position.x,
+                  y: node.position.y,
+                },
+              }
+            : workflowNode,
+        ),
+      }));
     },
     [],
   );
@@ -205,8 +225,8 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
               minZoom={0.45}
               nodes={flow.nodes}
               nodeTypes={nodeTypes}
-              nodesDraggable={false}
               onNodeClick={handleNodeClick}
+              onNodeDragStop={handleNodeDragStop}
               proOptions={{ hideAttribution: true }}
             >
               <Background color="#2b3b36" gap={24} />
@@ -458,6 +478,7 @@ function PreviewPanel({
       <PreviewList label="Shell Templates" values={summary.shellTemplates} />
       <PreviewList label="Environments" values={summary.environments} />
       <PreviewList label="Missing" values={summary.missingLabels} />
+      <PreviewList label="Import Diff" values={summary.diffLabels} />
     </div>
   );
 }

@@ -18,6 +18,8 @@ RiskLevel = Literal["low", "medium", "high", "critical"]
 WorkflowStatus = Literal["draft", "published", "archived"]
 WorkflowInputType = Literal["string", "number", "integer", "boolean", "object", "array"]
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+WorkflowSchemaVersion = Literal["workflow.dsl/v0.1", "workflow.dsl/v0.2"]
+EdgeKind = Literal["sequence", "condition", "parallel", "loop", "resume"]
 
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 STRICT_MODEL_CONFIG = ConfigDict(frozen=True, extra="forbid")
@@ -150,6 +152,13 @@ class NodePosition(BaseModel):
     y: float
 
 
+class RetryPolicy(BaseModel):
+    model_config = STRICT_MODEL_CONFIG
+
+    max_attempts: int = Field(default=1, ge=1, le=10)
+    backoff_seconds: int = Field(default=0, ge=0, le=3600)
+
+
 class NodeDefinition(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
@@ -160,6 +169,13 @@ class NodeDefinition(BaseModel):
     position: NodePosition | None = None
     description: str = ""
     risk_level: RiskLevel = "low"
+    parameters: dict[str, object] = Field(default_factory=dict)
+    tool_group_refs: list[str] = Field(default_factory=list)
+    input_schema: dict[str, object] = Field(default_factory=dict)
+    output_schema: dict[str, object] = Field(default_factory=dict)
+    retry_policy: RetryPolicy | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+    approval_policy_ref: str = Field(default="", max_length=160)
 
     @model_validator(mode="after")
     def validate_node_id_and_data(self) -> "NodeDefinition":
@@ -180,6 +196,14 @@ class NodeDefinition(BaseModel):
         return self
 
 
+class LoopEdgeData(BaseModel):
+    model_config = STRICT_MODEL_CONFIG
+
+    max_iterations: int = Field(ge=1, le=100)
+    while_expression: str = ""
+    item_path: str = ""
+
+
 class EdgeDefinition(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
@@ -187,6 +211,20 @@ class EdgeDefinition(BaseModel):
     target: str
     source_handle: str | None = None
     target_handle: str | None = None
+    kind: EdgeKind = "sequence"
+    label: str = ""
+    condition: str = ""
+    loop: LoopEdgeData | None = None
+
+    @model_validator(mode="after")
+    def validate_edge_metadata(self) -> "EdgeDefinition":
+        if self.kind == "loop" and self.loop is None:
+            raise ValueError("loop edge requires loop config")
+        if self.kind != "loop" and self.loop is not None:
+            raise ValueError("loop config is only allowed for loop edges")
+        if self.kind == "condition" and self.source_handle is None:
+            raise ValueError("condition edge requires source_handle")
+        return self
 
 
 class WorkflowPolicies(BaseModel):
@@ -219,7 +257,7 @@ class TraceSpanPlan(BaseModel):
 class WorkflowDefinition(BaseModel):
     model_config = STRICT_MODEL_CONFIG
 
-    schema_version: Literal["workflow.dsl/v0.1"] = "workflow.dsl/v0.1"
+    schema_version: WorkflowSchemaVersion = "workflow.dsl/v0.1"
     workflow: WorkflowMetadata
     inputs: list[WorkflowInputDefinition] = Field(default_factory=list)
     nodes: list[NodeDefinition]
@@ -290,6 +328,7 @@ class WorkflowDefinition(BaseModel):
         approval_required = False
 
         for node in self.nodes:
+            tool_groups.update(node.tool_group_refs)
             if node.type not in {"start", "end", "condition"}:
                 risk_levels.add(node.risk_level)
             if node.risk_level in {"high", "critical"}:
