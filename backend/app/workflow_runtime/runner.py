@@ -2,11 +2,14 @@ import json
 import re
 import time
 from collections.abc import Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
+from langgraph.errors import GraphInterrupt
+from langgraph.func import task
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from backend.app.execution.gateway import (
     HttpExecutionRequest,
@@ -20,6 +23,11 @@ from backend.app.policy_gate.schemas import PolicyGateEventCreate
 from backend.app.tool_gateway.schemas import ToolInvocationRequest, ToolInvocationResponse
 from backend.app.tool_gateway.service import ToolGatewayServiceError
 from backend.app.workflow_runtime.agent import AgentNodeSubgraphRunner, build_agent_resume_output
+from backend.app.workflow_runtime.checkpointing import (
+    InMemoryWorkflowCheckpointerProvider,
+    WorkflowCheckpointerProvider,
+    close_workflow_checkpointer,
+)
 from backend.app.workflow_runtime.compiler import (
     WorkflowRuntimeState,
     _condition_path_map,
@@ -110,6 +118,9 @@ class WorkflowRuntimeRunner:
     tool_gateway: ToolGatewayRuntimeClient
     execution_gateway: ShellExecutionRuntimeClient | None = None
     http_execution_gateway: HttpExecutionRuntimeClient | None = None
+    checkpointer_provider: WorkflowCheckpointerProvider = field(
+        default_factory=InMemoryWorkflowCheckpointerProvider
+    )
 
     async def run(self, request: WorkflowRunRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -131,27 +142,31 @@ class WorkflowRuntimeRunner:
             execution_gateway=self.execution_gateway,
             http_execution_gateway=self.http_execution_gateway,
         )
-        run_record = await self.run_store.create_run(
-            WorkflowRunCreate(
-                project_id=request.project_id,
-                actor_id=request.actor_id,
-                workflow_version_id=request.version.id,
-                workflow_id=workflow.workflow.id,
-                workflow_ref=workflow_ref,
-                definition_hash=request.version.definition_hash,
-                run_id=run_id,
-                trace_id=trace_id,
-                status="running",
-                inputs_summary=_summarize_json(request.inputs),
-                outputs_summary="",
-                created_by=request.actor_id,
-                updated_by=request.actor_id,
-            )
-        )
-        runtime.workflow_run_id = run_record.id
-
+        checkpointer_handle = await self.checkpointer_provider.for_run(run_id)
         try:
-            graph = runtime.build_graph()
+            run_record = await self.run_store.create_run(
+                WorkflowRunCreate(
+                    project_id=request.project_id,
+                    actor_id=request.actor_id,
+                    workflow_version_id=request.version.id,
+                    workflow_id=workflow.workflow.id,
+                    workflow_ref=workflow_ref,
+                    definition_hash=request.version.definition_hash,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status="running",
+                    inputs_summary=_summarize_json(request.inputs),
+                    outputs_summary="",
+                    created_by=request.actor_id,
+                    updated_by=request.actor_id,
+                )
+            )
+            runtime.workflow_run_id = run_record.id
+        except Exception:
+            await close_workflow_checkpointer(checkpointer_handle)
+            raise
+        try:
+            graph = runtime.build_graph(checkpointer=checkpointer_handle.checkpointer)
             state = await graph.ainvoke(
                 {
                     "inputs": request.inputs,
@@ -161,6 +176,24 @@ class WorkflowRuntimeRunner:
                 },
                 config={"configurable": {"thread_id": run_id}},
             )
+            if pending_approval := _pending_approval_from_graph_state(state):
+                updated_run = await self.run_store.update_run(
+                    WorkflowRunUpdate(
+                        project_id=request.project_id,
+                        run_id=run_id,
+                        actor_id=request.actor_id,
+                        status="pending_approval",
+                        outputs_summary="",
+                        pending_approval=pending_approval.model_dump(mode="json"),
+                    )
+                )
+                return _result_from_run(
+                    updated_run,
+                    workflow_version_id=request.version.id,
+                    outputs={},
+                    node_results=runtime.node_results,
+                    pending_approval=pending_approval,
+                )
             outputs = dict(state.get("outputs", {}))
             updated_run = await self.run_store.update_run(
                 WorkflowRunUpdate(
@@ -215,6 +248,8 @@ class WorkflowRuntimeRunner:
                 error_type=exc.__class__.__name__,
                 error_message=str(exc),
             )
+        finally:
+            await close_workflow_checkpointer(checkpointer_handle)
 
     async def resume(self, request: WorkflowRunResumeRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -264,19 +299,48 @@ class WorkflowRuntimeRunner:
             workflow_run_id=run_record.id,
         )
 
+        checkpointer_handle = await self.checkpointer_provider.for_run(request.run_id)
         try:
-            state = await runtime.resume_pending_node(
-                node=pending_node,
-                state=cast(WorkflowRuntimeState, dict(pending_checkpoint.state)),
-                pending_approval=pending_approval,
-                resume_request=request,
-            )
-            next_node_ids = _successor_node_ids(workflow, pending_node.id)
-            if next_node_ids:
-                graph = runtime.build_graph(start_node_ids=next_node_ids)
+            if pending_approval.approval_kind == "human":
+                graph = runtime.build_graph(checkpointer=checkpointer_handle.checkpointer)
                 state = await graph.ainvoke(
-                    state,
+                    Command(resume=_resume_payload(request)),
                     config={"configurable": {"thread_id": request.run_id}},
+                )
+            else:
+                state = await runtime.resume_pending_node(
+                    node=pending_node,
+                    state=cast(WorkflowRuntimeState, dict(pending_checkpoint.state)),
+                    pending_approval=pending_approval,
+                    resume_request=request,
+                )
+                next_node_ids = _successor_node_ids(workflow, pending_node.id)
+                if next_node_ids:
+                    graph = runtime.build_graph(
+                        start_node_ids=next_node_ids,
+                        checkpointer=checkpointer_handle.checkpointer,
+                    )
+                    state = await graph.ainvoke(
+                        state,
+                        config={"configurable": {"thread_id": request.run_id}},
+                    )
+            if next_pending_approval := _pending_approval_from_graph_state(state):
+                updated_run = await self.run_store.update_run(
+                    WorkflowRunUpdate(
+                        project_id=request.project_id,
+                        run_id=request.run_id,
+                        actor_id=request.actor_id,
+                        status="pending_approval",
+                        outputs_summary="",
+                        pending_approval=next_pending_approval.model_dump(mode="json"),
+                    )
+                )
+                return _result_from_run(
+                    updated_run,
+                    workflow_version_id=request.version.id,
+                    outputs={},
+                    node_results=runtime.node_results,
+                    pending_approval=next_pending_approval,
                 )
             outputs = dict(state.get("outputs", {})) or _final_outputs_from_state(state)
             updated_run = await self.run_store.update_run(
@@ -354,6 +418,8 @@ class WorkflowRuntimeRunner:
                 error_type=exc.__class__.__name__,
                 error_message=str(exc),
             )
+        finally:
+            await close_workflow_checkpointer(checkpointer_handle)
 
 
 @dataclass
@@ -376,7 +442,12 @@ class _RuntimeExecution:
     def __post_init__(self) -> None:
         self.node_results = []
 
-    def build_graph(self, *, start_node_ids: list[str] | None = None) -> Any:
+    def build_graph(
+        self,
+        *,
+        start_node_ids: list[str] | None = None,
+        checkpointer: Any | None = None,
+    ) -> Any:
         nodes_by_id = {node.id: node for node in self.workflow.nodes}
         builder = StateGraph(WorkflowRuntimeState)
         for node in self.workflow.nodes:
@@ -411,7 +482,7 @@ class _RuntimeExecution:
                     builder.add_edge(node.id, edge.target)
         for end_node in [node for node in self.workflow.nodes if node.type == "end"]:
             builder.add_edge(end_node.id, END)
-        return builder.compile()
+        return builder.compile(checkpointer=checkpointer)
 
     async def resume_pending_node(
         self,
@@ -477,9 +548,17 @@ class _RuntimeExecution:
     def _node_callable(self, node: NodeDefinition) -> Any:
         async def run_node(state: WorkflowRuntimeState) -> WorkflowRuntimeState:
             started = time.perf_counter()
-            await self._record_policy_event(node=node, decision="allowed", started=started)
+            if node.type != "human_approval":
+                await self._record_policy_event(node=node, decision="allowed", started=started)
             try:
-                output = await self._execute_node(node, state)
+                if node.type == "human_approval":
+                    output = await self._run_human_approval_node(
+                        node=node,
+                        state=state,
+                        started=started,
+                    )
+                else:
+                    output = await self._execute_node(node, state)
                 pending_approval = _pending_approval_from_output(output)
                 status = "pending_approval" if pending_approval is not None else "success"
                 next_state = _merge_node_output(state, node, output)
@@ -499,11 +578,17 @@ class _RuntimeExecution:
                     state=next_state,
                     output=output,
                 )
+                trace_attributes: dict[str, Any] = {"output_summary": _summarize_json(output)}
+                if node.type == "human_approval" and status == "success":
+                    trace_attributes["langgraph.command_resume"] = True
                 await self._record_trace_span(
                     node=node,
                     status="pending" if status == "pending_approval" else "success",
                     started=started,
-                    attributes={"output_summary": _summarize_json(output)},
+                    attributes=trace_attributes,
+                    span_suffix="command-resume"
+                    if node.type == "human_approval" and status == "success"
+                    else "",
                 )
                 self.node_results.append(
                     WorkflowNodeRunResult(
@@ -516,7 +601,7 @@ class _RuntimeExecution:
                 if pending_approval is not None:
                     raise WorkflowRuntimePendingApproval(pending_approval)
                 return next_state
-            except WorkflowRuntimePendingApproval:
+            except (WorkflowRuntimePendingApproval, GraphInterrupt):
                 raise
             except Exception as exc:
                 await self._record_checkpoint(
@@ -571,8 +656,38 @@ class _RuntimeExecution:
         if node.type == "shell":
             return await self._run_shell_node(node, state)
         if node.type == "human_approval":
-            return _build_pending_approval(node, state)
+            raise WorkflowRuntimeError("human approval node requires LangGraph interrupt runtime")
         raise WorkflowRuntimeError(f"unsupported workflow node type: {node.type}")
+
+    async def _run_human_approval_node(
+        self,
+        *,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+        started: float,
+    ) -> dict[str, Any]:
+        pending = _build_pending_approval_model(node, state)
+        await _record_human_approval_pending_once(
+            runtime=self,
+            node=node,
+            state=state,
+            pending=pending,
+            started=started,
+        )
+        resume_payload = interrupt(pending.model_dump(mode="json"))
+        output = {
+            "status": "approved",
+            "decision": resume_payload.get("decision", "approved")
+            if isinstance(resume_payload, dict)
+            else "approved",
+            "payload": resume_payload.get("payload", {})
+            if isinstance(resume_payload, dict)
+            else {},
+            "approved_by": resume_payload.get("approved_by", "")
+            if isinstance(resume_payload, dict)
+            else "",
+        }
+        return output
 
     async def _run_agent_node(
         self,
@@ -1076,6 +1191,27 @@ def _pending_approval_from_output(output: dict[str, Any]) -> WorkflowPendingAppr
     return WorkflowPendingApproval.model_validate(pending)
 
 
+def _pending_approval_from_graph_state(state: Any) -> WorkflowPendingApproval | None:
+    if not isinstance(state, dict):
+        return None
+    interrupts = state.get("__interrupt__")
+    if not isinstance(interrupts, list) or not interrupts:
+        return None
+    value = getattr(interrupts[0], "value", None)
+    if not isinstance(value, dict):
+        return None
+    return WorkflowPendingApproval.model_validate(value)
+
+
+def _resume_payload(request: WorkflowRunResumeRequest) -> dict[str, Any]:
+    return {
+        "decision": request.decision,
+        "payload": request.payload,
+        "approved_by": str(request.actor_id),
+        "approval_task_id": str(request.approval_task_id) if request.approval_task_id else "",
+    }
+
+
 def _approval_task_id_from_payload(payload: dict[str, Any]) -> UUID | None:
     raw_value = payload.get("approval_task_id")
     if not raw_value:
@@ -1130,9 +1266,17 @@ def _build_pending_approval(
     node: NodeDefinition,
     state: WorkflowRuntimeState,
 ) -> dict[str, Any]:
+    pending = _build_pending_approval_model(node, state)
+    return {"pending_approval": pending.model_dump(mode="json")}
+
+
+def _build_pending_approval_model(
+    node: NodeDefinition,
+    state: WorkflowRuntimeState,
+) -> WorkflowPendingApproval:
     if not isinstance(node.data, HumanApprovalNodeData):
         raise WorkflowRuntimeError(f"human approval node data is invalid: {node.id}")
-    pending = WorkflowPendingApproval(
+    return WorkflowPendingApproval(
         node_id=node.id,
         node_name=node.name,
         approval_policy_ref=node.data.approval_policy_ref,
@@ -1142,6 +1286,50 @@ def _build_pending_approval(
             "workflow_ref": state.get("workflow_ref", ""),
             "node_id": node.id,
         },
+    )
+
+
+@task
+async def _record_human_approval_pending_once(
+    *,
+    runtime: _RuntimeExecution,
+    node: NodeDefinition,
+    state: WorkflowRuntimeState,
+    pending: WorkflowPendingApproval,
+    started: float,
+) -> dict[str, Any]:
+    await runtime._record_policy_event(node=node, decision="allowed", started=started)
+    next_state = _merge_node_output(
+        state,
+        node,
+        {"pending_approval": pending.model_dump(mode="json")},
+    )
+    next_state["pending_approval"] = pending.model_dump(mode="json")
+    await runtime._record_checkpoint(
+        node=node,
+        status="pending_approval",
+        state=next_state,
+        output={"pending_approval": pending.model_dump(mode="json")},
+    )
+    await runtime._record_trace_span(
+        node=node,
+        status="pending",
+        started=started,
+        attributes={
+            "output_summary": _summarize_json(
+                {"pending_approval": pending.model_dump(mode="json")}
+            ),
+            "langgraph.interrupt": True,
+        },
+        span_suffix="interrupt",
+    )
+    runtime.node_results.append(
+        WorkflowNodeRunResult(
+            node_id=node.id,
+            node_type=node.type,
+            status="pending_approval",
+            output={"pending_approval": pending.model_dump(mode="json")},
+        )
     )
     return {"pending_approval": pending.model_dump(mode="json")}
 

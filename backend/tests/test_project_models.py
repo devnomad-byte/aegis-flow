@@ -1,3 +1,4 @@
+from backend.app.db.alembic_filters import LANGGRAPH_CHECKPOINT_TABLES, include_name
 from backend.app.db.base import Base
 from sqlalchemy import BigInteger, Index, UniqueConstraint
 
@@ -230,3 +231,15 @@ def test_shell_and_policy_runtime_event_tables_have_project_trace_indexes() -> N
         "node_id",
         "trace_id",
     )
+
+
+def test_alembic_ignores_external_langgraph_checkpoint_tables() -> None:
+    assert {
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+    } == LANGGRAPH_CHECKPOINT_TABLES
+    assert include_name("checkpoints", "table", {}) is False
+    assert include_name("workflow_runs", "table", {}) is True
+    assert include_name("ix_workflow_runs_project_trace", "index", {}) is True

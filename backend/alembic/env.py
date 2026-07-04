@@ -1,6 +1,7 @@
 from logging.config import fileConfig
 
 from backend.app.core.settings import AppSettings
+from backend.app.db.alembic_filters import include_name
 from backend.app.db.base import Base
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -24,6 +25,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=get_url(),
         target_metadata=target_metadata,
+        include_name=include_name,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -33,7 +35,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_name=include_name,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

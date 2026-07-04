@@ -15,6 +15,7 @@ from backend.app.tool_gateway.schemas import (
     ToolInvocationRequest,
     ToolInvocationResponse,
 )
+from backend.app.workflow_runtime.checkpointing import InMemoryWorkflowCheckpointerProvider
 from backend.app.workflow_runtime.compiler import compile_workflow_version
 from backend.app.workflow_runtime.runner import WorkflowRuntimeRunner
 from backend.app.workflow_runtime.schemas import (
@@ -243,6 +244,108 @@ async def test_runtime_resumes_human_approval_from_pending_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_uses_langgraph_command_resume_for_multiple_human_interrupts() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_two_human_approvals())
+    store = InMemoryWorkflowRunStore()
+    policy_store = InMemoryPolicyGateStore()
+    trace_store = InMemoryTraceStore()
+    checkpointer_provider = RecordingCheckpointerProvider()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=policy_store,
+        trace_store=trace_store,
+        llm_runner=RecordingLlmRunner(content="unused"),
+        tool_gateway=RecordingToolGateway(),
+        checkpointer_provider=checkpointer_provider,
+    )
+
+    first_pending = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"change_id": "CHG-456"},
+            run_id="run-two-approvals",
+            trace_id="trace-two-approvals",
+        )
+    )
+
+    assert first_pending.status == "pending_approval"
+    assert first_pending.pending_approval is not None
+    assert first_pending.pending_approval.node_id == "approval_1"
+    assert checkpointer_provider.requested_run_ids == ["run-two-approvals"]
+
+    second_pending = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id="run-two-approvals",
+            decision="approved",
+            payload={"reason": "first approval"},
+        )
+    )
+
+    assert second_pending.status == "pending_approval"
+    assert second_pending.pending_approval is not None
+    assert second_pending.pending_approval.node_id == "approval_2"
+    assert second_pending.outputs == {}
+
+    completed = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id="run-two-approvals",
+            decision="approved",
+            payload={"reason": "second approval"},
+        )
+    )
+
+    assert completed.status == "success"
+    assert completed.outputs["nodes"]["approval_1"]["payload"] == {"reason": "first approval"}
+    assert completed.outputs["nodes"]["approval_2"]["payload"] == {"reason": "second approval"}
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "approval_1",
+        "approval_1",
+        "approval_2",
+        "approval_2",
+        "end_1",
+    ]
+    assert [checkpoint.status for checkpoint in store.checkpoints] == [
+        "success",
+        "pending_approval",
+        "success",
+        "pending_approval",
+        "success",
+        "success",
+    ]
+    assert checkpointer_provider.requested_run_ids == [
+        "run-two-approvals",
+        "run-two-approvals",
+        "run-two-approvals",
+    ]
+    assert [
+        event["node_id"]
+        for event in policy_store.events
+        if event["node_id"] in {"approval_1", "approval_2"}
+    ] == ["approval_1", "approval_2"]
+    assert any(
+        span["node_id"] == "approval_1"
+        and cast(dict[str, object], span["attributes"]).get("langgraph.interrupt") is True
+        for span in trace_store.spans
+    )
+    assert any(
+        span["node_id"] == "approval_1"
+        and cast(dict[str, object], span["attributes"]).get("langgraph.command_resume") is True
+        for span in trace_store.spans
+    )
+
+
+@pytest.mark.asyncio
 async def test_runtime_resumes_tool_approval_without_second_invoke() -> None:
     project_id = uuid4()
     actor_id = uuid4()
@@ -290,6 +393,56 @@ async def test_runtime_resumes_tool_approval_without_second_invoke() -> None:
         "tool_1",
         "tool_1",
         "end_1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_pending_resume_uses_checkpointer_without_reinvoking_tool() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    approval_task_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_llm_condition_tool())
+    store = InMemoryWorkflowRunStore()
+    tool_gateway = RecordingToolGateway(
+        pending_approval=True,
+        approval_task_id=approval_task_id,
+    )
+    checkpointer_provider = RecordingCheckpointerProvider()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(content='{"route":"tool","message":"hello runtime"}'),
+        tool_gateway=tool_gateway,
+        checkpointer_provider=checkpointer_provider,
+    )
+    pending = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"route": "tool", "message": "hello runtime"},
+            run_id="run-tool-checkpoint",
+            trace_id="trace-tool-checkpoint",
+        )
+    )
+
+    result = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id=pending.run_id,
+            approval_task_id=approval_task_id,
+        )
+    )
+
+    assert result.status == "success"
+    assert len(tool_gateway.calls) == 1
+    assert tool_gateway.resume_calls == [approval_task_id]
+    assert checkpointer_provider.requested_run_ids == [
+        "run-tool-checkpoint",
+        "run-tool-checkpoint",
     ]
 
 
@@ -813,6 +966,16 @@ class InMemoryTraceStore:
         return request
 
 
+class RecordingCheckpointerProvider(InMemoryWorkflowCheckpointerProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_run_ids: list[str] = []
+
+    async def for_run(self, run_id: str) -> Any:
+        self.requested_run_ids.append(run_id)
+        return await super().for_run(run_id)
+
+
 class RecordingLlmRunner:
     def __init__(
         self,
@@ -1145,6 +1308,46 @@ def workflow_with_human_approval() -> WorkflowDefinition:
         edges=[
             EdgeDefinition(source="start_1", target="approval_1"),
             EdgeDefinition(source="approval_1", target="end_1"),
+        ],
+    )
+
+
+def workflow_with_two_human_approvals() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="approval_flow",
+            name="Approval Flow",
+            project_id="runtime-project",
+            version=1,
+            status="published",
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="approval_1",
+                name="First Approve",
+                type="human_approval",
+                data=HumanApprovalNodeData(
+                    approval_policy_ref="ops-change",
+                    message_template="First approve change {{change_id}}?",
+                ),
+            ),
+            NodeDefinition(
+                id="approval_2",
+                name="Second Approve",
+                type="human_approval",
+                data=HumanApprovalNodeData(
+                    approval_policy_ref="ops-change",
+                    message_template="Second approve change {{change_id}}?",
+                ),
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="approval_1"),
+            EdgeDefinition(source="approval_1", target="approval_2"),
+            EdgeDefinition(source="approval_2", target="end_1"),
         ],
     )
 

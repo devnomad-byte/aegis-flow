@@ -38,6 +38,10 @@ from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.mcp_client import HttpMcpToolsClient, McpToolsClient
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryStore
+from backend.app.workflow_runtime.checkpointing import (
+    PostgresWorkflowCheckpointerProvider,
+    WorkflowCheckpointerProvider,
+)
 from backend.app.workflow_runtime.runner import WorkflowRuntimeRunner
 from backend.app.workflow_runtime.sqlalchemy_store import SqlAlchemyWorkflowRunStore
 from backend.app.workflow_runtime.store import WorkflowRunStore
@@ -191,6 +195,13 @@ PolicyGateEventStoreDependency = Depends(get_policy_gate_event_store)
 RuntimeTraceStoreDependency = Depends(get_runtime_trace_store)
 
 
+def get_workflow_checkpointer_provider() -> WorkflowCheckpointerProvider:
+    return PostgresWorkflowCheckpointerProvider(AppSettings().database, setup=True)
+
+
+WorkflowCheckpointerProviderDependency = Depends(get_workflow_checkpointer_provider)
+
+
 def get_tool_gateway_service(
     registry_store: ToolRegistryStore = ToolRegistryStoreDependency,
     invocation_store: ToolInvocationStore = ToolInvocationStoreDependency,
@@ -260,6 +271,7 @@ def get_workflow_runtime_runner(
     tool_gateway: ToolGatewayService = ToolGatewayServiceDependency,
     execution_gateway: ShellExecutionGatewayService = ShellExecutionGatewayServiceDependency,
     http_execution_gateway: HttpExecutionGatewayService = HttpExecutionGatewayServiceDependency,
+    checkpointer_provider: WorkflowCheckpointerProvider = WorkflowCheckpointerProviderDependency,
 ) -> WorkflowRuntimeRunner:
     return WorkflowRuntimeRunner(
         run_store=run_store,
@@ -269,6 +281,7 @@ def get_workflow_runtime_runner(
         tool_gateway=tool_gateway,
         execution_gateway=execution_gateway,
         http_execution_gateway=http_execution_gateway,
+        checkpointer_provider=checkpointer_provider,
     )
 
 

@@ -36,10 +36,23 @@ def test_secret_values_are_not_shown_in_repr() -> None:
 
 
 def test_database_url_escapes_secret_characters(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PASSWORD", "Postgres@2026")
+    monkeypatch.setenv("DB_PASSWORD", "not-a-secret@2026!")
 
     settings = AppSettings()
     url = make_url(settings.database.sqlalchemy_url)
 
     assert url.host == "localhost"
-    assert url.password == "Postgres@2026"
+    assert url.password == "not-a-secret@2026!"
+
+
+def test_database_settings_build_psycopg_url_for_langgraph_checkpointer(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB_PASSWORD", "not-a-secret@2026!")
+
+    settings = AppSettings()
+    url = make_url(settings.database.psycopg_url)
+
+    assert url.drivername == "postgresql"
+    assert url.host == "localhost"
+    assert url.password == "not-a-secret@2026!"

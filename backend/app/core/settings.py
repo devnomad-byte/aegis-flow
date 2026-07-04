@@ -30,6 +30,17 @@ class DatabaseSettings(BaseSettings):
             database=self.name,
         ).render_as_string(hide_password=False)
 
+    @property
+    def psycopg_url(self) -> str:
+        return URL.create(
+            drivername="postgresql",
+            username=self.username,
+            password=self.password.get_secret_value(),
+            host=self.host,
+            port=self.port,
+            database=self.name,
+        ).render_as_string(hide_password=False)
+
 
 class RedisSettings(BaseSettings):
     model_config = SettingsConfigDict(

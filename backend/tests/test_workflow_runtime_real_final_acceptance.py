@@ -53,7 +53,7 @@ from backend.app.tool_registry.models import (
 from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
 from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -812,6 +812,199 @@ def test_real_workflow_runtime_resumes_high_risk_tool_approval() -> None:
         asyncio.run(engine.dispose())
 
 
+def test_real_workflow_runtime_resumes_human_interrupts_with_postgres_checkpointer() -> None:
+    settings = require_real_workflow_runtime_final_acceptance()
+    project_id = uuid4()
+    actor_id = uuid4()
+    run_id = "run-runtime-human-resume-final"
+    trace_id = "trace-runtime-human-resume-final"
+    cleanup_ids = _CleanupIds(
+        project_id=project_id,
+        actor_id=actor_id,
+        run_ids=(run_id,),
+    )
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def seed() -> None:
+        async with session_factory() as session:
+            role_id = uuid4()
+            member_id = uuid4()
+            session.add(
+                Account(
+                    id=actor_id,
+                    email=f"runtime-human-{actor_id.hex[:12]}@example.com",
+                    display_name="Workflow Runtime Human Resume Final Acceptance",
+                )
+            )
+            session.add(
+                Project(
+                    id=project_id,
+                    slug=f"runtime-human-{project_id.hex[:12]}",
+                    name="Workflow Runtime Human Resume Final Acceptance",
+                )
+            )
+            session.add(ProjectMember(id=member_id, project_id=project_id, account_id=actor_id))
+            session.add(
+                ProjectRole(
+                    id=role_id,
+                    project_id=project_id,
+                    code="runtime_human_admin",
+                    name="Runtime Human Admin",
+                    description="Workflow runtime human resume final acceptance role",
+                )
+            )
+            session.add(ProjectMemberRole(member_id=member_id, role_id=role_id))
+            for code in {
+                "project:view",
+                "workflow:view",
+                "workflow:write",
+                "workflow:run",
+                "audit:view",
+            }:
+                permission = await _ensure_permission(session, code)
+                session.add(ProjectRolePermission(role_id=role_id, permission_id=permission.id))
+            await session.commit()
+
+    asyncio.run(seed())
+    try:
+        app = create_app(settings)
+
+        async def override_async_session() -> AsyncIterator[AsyncSession]:
+            async with session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_current_account] = lambda: AccountPrincipal(
+            account_id=actor_id,
+            status="active",
+        )
+        app.dependency_overrides[get_async_session] = override_async_session
+        with TestClient(app) as client:
+            import_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/import-yaml",
+                json={"yaml_text": workflow_human_resume_yaml(project_id)},
+            )
+            assert import_response.status_code == 201
+            draft_id = import_response.json()["id"]
+
+            publish_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/drafts/{draft_id}/publish",
+                json={"release_note": "workflow runtime human resume final acceptance"},
+            )
+            assert publish_response.status_code == 201
+            version_id = publish_response.json()["id"]
+
+            run_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs",
+                json={
+                    "inputs": {"change_id": "CHG-789"},
+                    "run_ref": run_id,
+                    "trace_id": trace_id,
+                },
+            )
+            assert run_response.status_code == 201
+            first_pending = run_response.json()
+            assert first_pending["status"] == "pending_approval"
+            assert first_pending["pending_approval"]["approval_kind"] == "human"
+            assert first_pending["pending_approval"]["node_id"] == "approval_1"
+
+            first_resume = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{run_id}/resume",
+                json={"payload": {"reason": "first approval"}},
+            )
+            assert first_resume.status_code == 200
+            second_pending = first_resume.json()
+            assert second_pending["status"] == "pending_approval"
+            assert second_pending["pending_approval"]["node_id"] == "approval_2"
+            assert second_pending["outputs"] == {}
+
+            second_resume = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{run_id}/resume",
+                json={"payload": {"reason": "second approval"}},
+            )
+            assert second_resume.status_code == 200
+            completed = second_resume.json()
+            assert completed["status"] == "success"
+            assert completed["outputs"]["nodes"]["approval_1"]["payload"] == {
+                "reason": "first approval"
+            }
+            assert completed["outputs"]["nodes"]["approval_2"]["payload"] == {
+                "reason": "second approval"
+            }
+
+            detail_response = client.get(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{run_id}"
+            )
+            assert detail_response.status_code == 200
+            checkpoints = detail_response.json()["checkpoints"]
+            assert [checkpoint["node_id"] for checkpoint in checkpoints] == [
+                "start_1",
+                "approval_1",
+                "approval_1",
+                "approval_2",
+                "approval_2",
+                "end_1",
+            ]
+            assert [checkpoint["status"] for checkpoint in checkpoints] == [
+                "success",
+                "pending_approval",
+                "success",
+                "pending_approval",
+                "success",
+                "success",
+            ]
+
+            trace_response = client.get(
+                f"/api/v1/projects/{project_id}/runtime-traces/spans",
+                params={"run_id": run_id, "trace_id": trace_id},
+            )
+            assert trace_response.status_code == 200
+            spans = trace_response.json()["spans"]
+            assert any(
+                span["node_id"] == "approval_1"
+                and span["attributes"].get("langgraph.interrupt") is True
+                for span in spans
+            )
+            assert any(
+                span["node_id"] == "approval_1"
+                and span["attributes"].get("langgraph.command_resume") is True
+                for span in spans
+            )
+
+        async def assert_persisted() -> None:
+            async with session_factory() as session:
+                aegis_checkpoint_count = await session.scalar(
+                    select(func.count())
+                    .select_from(WorkflowRunCheckpoint)
+                    .where(
+                        WorkflowRunCheckpoint.project_id == project_id,
+                        WorkflowRunCheckpoint.run_id == run_id,
+                    )
+                )
+                langgraph_checkpoint_count = await session.scalar(
+                    text("select count(*) from checkpoints where thread_id = :run_id"),
+                    {"run_id": run_id},
+                )
+                policy_event_count = await session.scalar(
+                    select(func.count())
+                    .select_from(PolicyGateEvent)
+                    .where(
+                        PolicyGateEvent.project_id == project_id,
+                        PolicyGateEvent.run_id == run_id,
+                        PolicyGateEvent.node_id.in_(("approval_1", "approval_2")),
+                    )
+                )
+                assert aegis_checkpoint_count == 6
+                assert langgraph_checkpoint_count is not None
+                assert langgraph_checkpoint_count >= 3
+                assert policy_event_count == 2
+
+        asyncio.run(assert_persisted())
+    finally:
+        asyncio.run(_cleanup(session_factory, cleanup_ids))
+        asyncio.run(engine.dispose())
+
+
 @pytest.mark.real_docker
 def test_real_workflow_runtime_runs_shell_node_through_docker_sandbox() -> None:
     settings = require_real_workflow_runtime_final_acceptance()
@@ -1196,6 +1389,52 @@ policies:
 """
 
 
+def workflow_human_resume_yaml(project_id: UUID) -> str:
+    return f"""
+schema_version: workflow.dsl/v0.2
+workflow:
+  id: runtime_human_resume_final
+  name: Runtime Human Resume Final
+  project_id: "{project_id}"
+  version: 1
+  status: draft
+inputs:
+  - key: change_id
+    type: string
+    required: true
+nodes:
+  - id: start_1
+    name: Start
+    type: start
+  - id: approval_1
+    name: First Approval
+    type: human_approval
+    data:
+      approval_policy_ref: ops-change
+      message_template: "First approve change {{{{change_id}}}}?"
+  - id: approval_2
+    name: Second Approval
+    type: human_approval
+    data:
+      approval_policy_ref: ops-change
+      message_template: "Second approve change {{{{change_id}}}}?"
+  - id: end_1
+    name: End
+    type: end
+edges:
+  - source: start_1
+    target: approval_1
+  - source: approval_1
+    target: approval_2
+  - source: approval_2
+    target: end_1
+policies:
+  default_environment: test
+  max_runtime_seconds: 900
+  max_tool_calls: 20
+"""
+
+
 def workflow_agent_yaml(project_id: UUID) -> str:
     return f"""
 schema_version: workflow.dsl/v0.2
@@ -1299,6 +1538,7 @@ async def _ensure_permission(session: AsyncSession, code: str) -> ProjectPermiss
 class _CleanupIds:
     project_id: UUID
     actor_id: UUID
+    run_ids: tuple[str, ...] = ()
 
 
 async def _cleanup(
@@ -1306,6 +1546,7 @@ async def _cleanup(
     cleanup_ids: _CleanupIds,
 ) -> None:
     async with session_factory() as session:
+        await _cleanup_langgraph_checkpoints(session, cleanup_ids.run_ids)
         await session.execute(
             delete(RuntimeTraceSpan).where(RuntimeTraceSpan.project_id == cleanup_ids.project_id)
         )
@@ -1429,3 +1670,23 @@ async def _cleanup(
         await session.execute(delete(Project).where(Project.id == cleanup_ids.project_id))
         await session.execute(delete(Account).where(Account.id == cleanup_ids.actor_id))
         await session.commit()
+
+
+async def _cleanup_langgraph_checkpoints(
+    session: AsyncSession,
+    run_ids: tuple[str, ...],
+) -> None:
+    if not run_ids:
+        return
+    for table_name in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+        exists = await session.scalar(
+            text("select to_regclass(:table_name)"),
+            {"table_name": f"public.{table_name}"},
+        )
+        if exists is None:
+            continue
+        for run_id in run_ids:
+            await session.execute(
+                text(f"delete from {table_name} where thread_id = :run_id"),
+                {"run_id": run_id},
+            )
