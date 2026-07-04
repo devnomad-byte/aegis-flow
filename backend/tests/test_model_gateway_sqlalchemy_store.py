@@ -8,6 +8,8 @@ from backend.app.model_gateway.schemas import (
     ModelGatewayPolicyCreate,
 )
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
+from backend.app.observability.models import RuntimeTraceSpan
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -75,6 +77,9 @@ async def test_sqlalchemy_model_gateway_store_persists_project_policy_and_invoca
             node_id="llm_1",
             trace_id="trace-llm",
         )
+        trace_spans = list(
+            await session.scalars(select(RuntimeTraceSpan).order_by(RuntimeTraceSpan.created_at))
+        )
 
     await engine.dispose()
 
@@ -85,6 +90,11 @@ async def test_sqlalchemy_model_gateway_store_persists_project_policy_and_invoca
     assert invocation.usage["total_tokens"] == 16
     assert invocations == [invocation]
     assert filtered_invocations == [invocation]
+    assert len(trace_spans) == 1
+    assert trace_spans[0].span_id == "model:model_call_test"
+    assert trace_spans[0].trace_id == "trace-llm"
+    assert trace_spans[0].component == "model_gateway"
+    assert trace_spans[0].attributes["llm.usage.total_tokens"] == 16
     assert "Incident: real customer text" not in invocation.model_dump_json()
 
 

@@ -14,6 +14,7 @@ from backend.app.knowledge.object_store import build_knowledge_object_store
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from backend.app.knowledge.store import KnowledgeIngestionStore
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
+from backend.app.observability.sqlalchemy_store import SqlAlchemyRuntimeTraceStore
 from backend.app.project_command.sqlalchemy_store import SqlAlchemyProjectCommandCenterStore
 from backend.app.project_command.store import ProjectCommandCenterStore
 from backend.app.retrieval.eval_store import RetrievalEvalStore
@@ -105,6 +106,12 @@ def get_model_gateway_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> SqlAlchemyModelGatewayStore:
     return SqlAlchemyModelGatewayStore(session)
+
+
+def get_runtime_trace_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> SqlAlchemyRuntimeTraceStore:
+    return SqlAlchemyRuntimeTraceStore(session)
 
 
 def get_tool_registry_store(

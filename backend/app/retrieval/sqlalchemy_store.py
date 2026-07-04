@@ -14,6 +14,8 @@ from backend.app.knowledge.models import (
     KnowledgeDocumentVersion,
     RetrievalQueryLog,
 )
+from backend.app.observability.models import RuntimeTraceSpan
+from backend.app.observability.projection import retrieval_query_log_to_span
 from backend.app.retrieval.milvus_client import MilvusRetrievalClient, NoopMilvusRetrievalClient
 from backend.app.retrieval.ranking import (
     NoopRetrievalReranker,
@@ -262,6 +264,8 @@ class SqlAlchemyRetrievalGatewayStore:
             updated_by=actor_id,
         )
         self._session.add(query_log)
+        await self._session.flush()
+        self._session.add(RuntimeTraceSpan(**retrieval_query_log_to_span(query_log).model_dump()))
         await self._session.commit()
 
 

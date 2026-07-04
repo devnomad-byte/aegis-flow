@@ -28,6 +28,7 @@ from backend.app.iam.models import (
     ProjectRolePermission,
 )
 from backend.app.main import create_app
+from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient
 from backend.app.tool_gateway.models import ToolGatewayApprovalTask, ToolGatewayInvocation
@@ -353,6 +354,19 @@ def test_real_postgres_and_real_http_mcp_tool_gateway_final_acceptance() -> None
                 assert any(
                     event["action"] == "tool_gateway.resume" for event in audit_body["events"]
                 )
+
+                span_response = client.get(
+                    f"/api/v1/projects/{project_id}/runtime-traces/spans",
+                    params={"run_id": "run-real-mcp", "trace_id": "trace-real-mcp"},
+                )
+                assert span_response.status_code == 200
+                span_body = span_response.json()
+                assert span_body["count"] == 1
+                assert span_body["spans"][0]["component"] == "tool_gateway"
+                assert span_body["spans"][0]["status"] == "success"
+                assert span_body["spans"][0]["attributes"]["tool.policy_decision"] == "allowed"
+                assert "lease_" not in str(span_body)
+                assert "vault://real-mcp/test" not in str(span_body)
     finally:
         asyncio.run(_cleanup(settings, cleanup_ids))
 
@@ -396,6 +410,7 @@ async def _cleanup(settings: AppSettings, cleanup_ids: _CleanupIds) -> None:
                 delete(ProjectRolePermission).where(ProjectRolePermission.role_id.in_(role_ids))
             )
         for model in (
+            RuntimeTraceSpan,
             AuditLog,
             ToolGatewayApprovalTask,
             ToolGatewayInvocation,

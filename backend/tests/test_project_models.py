@@ -1,5 +1,5 @@
 from backend.app.db.base import Base
-from sqlalchemy import Index, UniqueConstraint
+from sqlalchemy import BigInteger, Index, UniqueConstraint
 
 
 def test_rbac_tables_are_registered_in_metadata() -> None:
@@ -41,6 +41,7 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "prompt_templates",
         "prompt_template_releases",
         "prompt_template_versions",
+        "runtime_trace_spans",
     }
 
     assert expected_tables.issubset(Base.metadata.tables)
@@ -80,6 +81,7 @@ def test_project_scoped_tables_have_project_id() -> None:
         "prompt_templates",
         "prompt_template_releases",
         "prompt_template_versions",
+        "runtime_trace_spans",
     }
 
     for table_name in project_scoped_tables:
@@ -129,6 +131,7 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
             ("project_id", "template_id", "version_id", "label", "environment", "created_at"),
         ),
         ("prompt_template_versions", ("project_id", "template_id", "version")),
+        ("runtime_trace_spans", ("project_id", "span_id")),
     }
 
     actual: set[tuple[str, tuple[str, ...]]] = set()
@@ -176,3 +179,25 @@ def test_prompt_template_releases_have_one_active_release_index() -> None:
         "status = 'active'",
         "status = 'active'",
     )
+
+
+def test_runtime_trace_spans_have_project_query_indexes() -> None:
+    trace_table = Base.metadata.tables["runtime_trace_spans"]
+    indexes = {
+        str(index.name): tuple(column.name for column in index.columns)
+        for index in trace_table.indexes
+    }
+
+    assert indexes["ix_runtime_trace_spans_project_run_node_trace"] == (
+        "project_id",
+        "run_id",
+        "node_id",
+        "trace_id",
+    )
+    assert indexes["ix_runtime_trace_spans_project_source"] == (
+        "project_id",
+        "source_type",
+        "source_id",
+    )
+    assert isinstance(trace_table.columns["start_time_unix_nano"].type, BigInteger)
+    assert isinstance(trace_table.columns["end_time_unix_nano"].type, BigInteger)

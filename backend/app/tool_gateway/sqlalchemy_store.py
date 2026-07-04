@@ -4,6 +4,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.observability.models import RuntimeTraceSpan
+from backend.app.observability.projection import tool_invocation_to_span
 from backend.app.tool_gateway.models import ToolGatewayApprovalTask, ToolGatewayInvocation
 from backend.app.tool_gateway.schemas import (
     ToolApprovalDecisionRead,
@@ -23,6 +25,8 @@ class SqlAlchemyToolInvocationStore:
     async def record_invocation(self, request: ToolInvocationCreate) -> ToolInvocationRead:
         invocation = ToolGatewayInvocation(**request.model_dump())
         self._session.add(invocation)
+        await self._session.flush()
+        self._session.add(RuntimeTraceSpan(**tool_invocation_to_span(invocation).model_dump()))
         await self._session.commit()
         await self._session.refresh(invocation)
         return ToolInvocationRead.model_validate(invocation)
@@ -140,6 +144,7 @@ class SqlAlchemyToolInvocationStore:
         if secret_lease_ref:
             invocation.secret_lease_ref = secret_lease_ref
         invocation.updated_by = actor_id
+        await self._upsert_invocation_span(invocation)
         await self._session.commit()
         await self._session.refresh(invocation)
         return ToolInvocationRead.model_validate(invocation)
@@ -170,3 +175,18 @@ class SqlAlchemyToolInvocationStore:
         )
         result = await self._session.execute(statement)
         return result.scalar_one()
+
+    async def _upsert_invocation_span(self, invocation: ToolGatewayInvocation) -> None:
+        existing_span = await self._session.scalar(
+            select(RuntimeTraceSpan).where(
+                RuntimeTraceSpan.project_id == invocation.project_id,
+                RuntimeTraceSpan.span_id == f"tool:{invocation.tool_call_id}",
+            )
+        )
+        projected_span = tool_invocation_to_span(invocation)
+        if existing_span is None:
+            self._session.add(RuntimeTraceSpan(**projected_span.model_dump()))
+            return
+        projected_data = projected_span.model_dump(exclude={"id", "created_at", "updated_at"})
+        for field, value in projected_data.items():
+            setattr(existing_span, field, value)

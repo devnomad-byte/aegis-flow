@@ -23,6 +23,8 @@ from backend.app.model_gateway.schemas import (
     PromptTemplateVersionCreate,
     PromptTemplateVersionRead,
 )
+from backend.app.observability.models import RuntimeTraceSpan
+from backend.app.observability.projection import model_invocation_to_span
 
 PROTECTED_PROMPT_LABELS = frozenset({"production", "staging", "latest"})
 RELEASE_EVAL_GATE_THRESHOLDS = {
@@ -334,6 +336,9 @@ class SqlAlchemyModelGatewayStore:
     ) -> ModelGatewayInvocationRead:
         invocation = ModelGatewayInvocation(**request.model_dump())
         self._session.add(invocation)
+        await self._session.flush()
+        trace_span = RuntimeTraceSpan(**model_invocation_to_span(invocation).model_dump())
+        self._session.add(trace_span)
         await self._session.commit()
         await self._session.refresh(invocation)
         return ModelGatewayInvocationRead.model_validate(invocation)

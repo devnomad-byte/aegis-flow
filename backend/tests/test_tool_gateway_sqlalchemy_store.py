@@ -3,8 +3,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from backend.app.db.base import Base
+from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.tool_gateway.schemas import ToolApprovalTaskCreate, ToolInvocationCreate
 from backend.app.tool_gateway.sqlalchemy_store import SqlAlchemyToolInvocationStore
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -58,6 +60,13 @@ async def test_sqlalchemy_tool_invocation_store_lists_project_run_node_trace_sco
             node_id="mcp_tool_1",
             trace_id="trace-1",
         )
+        trace_spans = list(
+            await session.scalars(
+                select(RuntimeTraceSpan)
+                .where(RuntimeTraceSpan.project_id == project_id)
+                .order_by(RuntimeTraceSpan.created_at)
+            )
+        )
 
     await engine.dispose()
 
@@ -67,6 +76,9 @@ async def test_sqlalchemy_tool_invocation_store_lists_project_run_node_trace_sco
     assert invocations[0].node_id == "mcp_tool_1"
     assert invocations[0].trace_id == "trace-1"
     assert invocations[0].tool_call_id == "call-1"
+    assert [span.span_id for span in trace_spans] == ["tool:call-1", "tool:call-2"]
+    assert trace_spans[0].component == "tool_gateway"
+    assert trace_spans[0].attributes["tool.ref"] == "mcp-k8s-test.kubectl_get_pods"
 
 
 @pytest.mark.asyncio
@@ -151,6 +163,12 @@ async def test_sqlalchemy_tool_invocation_store_manages_approval_lifecycle() -> 
             approval_task_id=approval_task.id,
             actor_id=actor_id,
         )
+        trace_span = await session.scalar(
+            select(RuntimeTraceSpan).where(
+                RuntimeTraceSpan.project_id == project_id,
+                RuntimeTraceSpan.span_id == "tool:call-approval",
+            )
+        )
 
     await engine.dispose()
 
@@ -161,6 +179,10 @@ async def test_sqlalchemy_tool_invocation_store_manages_approval_lifecycle() -> 
     assert updated_invocation.policy_decision == "allowed"
     assert resumed_task.status == "resumed"
     assert resumed_task.resumed_at is not None
+    assert trace_span is not None
+    assert trace_span.status == "success"
+    assert trace_span.attributes["tool.policy_decision"] == "allowed"
+    assert trace_span.attributes["output_summary"] == "tool call completed"
 
 
 def make_invocation(

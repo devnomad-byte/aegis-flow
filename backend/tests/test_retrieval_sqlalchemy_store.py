@@ -10,6 +10,7 @@ from backend.app.knowledge.models import (
     KnowledgeDocumentVersion,
     RetrievalQueryLog,
 )
+from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.retrieval.milvus_client import MilvusSearchHit
 from backend.app.retrieval.schemas import RetrievalQueryRequest, RetrievalSubject
 from backend.app.retrieval.sqlalchemy_store import SqlAlchemyRetrievalGatewayStore
@@ -64,6 +65,7 @@ async def test_retrieval_store_fuses_keyword_and_milvus_hits_with_citations() ->
             ),
         )
         logs = (await session.scalars(select(RetrievalQueryLog))).all()
+        trace_spans = (await session.scalars(select(RuntimeTraceSpan))).all()
 
     await engine.dispose()
 
@@ -80,6 +82,12 @@ async def test_retrieval_store_fuses_keyword_and_milvus_hits_with_citations() ->
     assert len(logs) == 1
     assert logs[0].query_hash == response.query_hash
     assert logs[0].query_summary != "502 ingress pod 日志"
+    assert len(trace_spans) == 1
+    assert trace_spans[0].span_name == "retrieval.query"
+    assert trace_spans[0].component == "retrieval_gateway"
+    assert trace_spans[0].trace_id == "trace-rag"
+    assert trace_spans[0].attributes["retrieval.result_count"] == len(response.results)
+    assert "502 ingress pod 日志" not in str(trace_spans[0].attributes)
 
 
 @pytest.mark.asyncio
