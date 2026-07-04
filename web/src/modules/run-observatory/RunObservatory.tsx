@@ -14,6 +14,14 @@ import {
   type RuntimeTraceSpanFilters,
 } from "../runtime-trace/runtimeTraceApi";
 import {
+  getWorkflowRunDetail,
+  workflowRunDetailQueryKey,
+  type WorkflowPendingApproval,
+  type WorkflowRunCheckpointRead,
+  type WorkflowRunDetailResponse,
+  type WorkflowRunStatus,
+} from "../workflow-runtime/workflowRuntimeApi";
+import {
   listToolGatewayInvocations,
   requestRawTraceAccess,
   toolGatewayInvocationsQueryKey,
@@ -40,10 +48,11 @@ type TraceEvent = {
 
 type LedgerDrilldown = "model" | "tool" | null;
 
-const defaultRunScope = {
-  modelNodeId: "llm_1",
-  runId: "run-real-llm",
-  traceId: "trace-real-llm",
+type RunScope = {
+  nodeId: string;
+  runId: string;
+  traceId: string;
+  versionId: string;
 };
 
 const EMPTY_RUNTIME_SPANS: RuntimeTraceSpan[] = [];
@@ -80,24 +89,34 @@ const SAFE_ATTRIBUTE_LABELS: Record<string, string> = {
 export function RunObservatory({ project }: RunObservatoryProps) {
   const [accessReason, setAccessReason] = useState("Need to inspect sanitized run trace");
   const [ledgerDrilldown, setLedgerDrilldown] = useState<LedgerDrilldown>(null);
+  const [runScope, setRunScope] = useState<RunScope>(() => readInitialRunScope());
 
+  const hasTraceScope = Boolean(runScope.runId && runScope.traceId);
+  const hasRunDetailScope = Boolean(runScope.versionId && runScope.runId);
   const runtimeTraceFilters: RuntimeTraceSpanFilters = {
-    run_id: defaultRunScope.runId,
-    trace_id: defaultRunScope.traceId,
+    run_id: runScope.runId,
+    trace_id: runScope.traceId,
     limit: SPAN_LIMIT,
   };
   const ledgerFilters = {
-    run_id: defaultRunScope.runId,
-    trace_id: defaultRunScope.traceId,
+    run_id: runScope.runId,
+    trace_id: runScope.traceId,
   };
 
   const runtimeSpansQuery = useQuery({
+    enabled: hasTraceScope,
     queryFn: () => listRuntimeTraceSpans(project.projectId, runtimeTraceFilters),
     queryKey: runtimeTraceSpansQueryKey(project.projectId, runtimeTraceFilters),
     retry: false,
   });
+  const runDetailQuery = useQuery({
+    enabled: hasRunDetailScope,
+    queryFn: () => getWorkflowRunDetail(project.projectId, runScope.versionId, runScope.runId),
+    queryKey: workflowRunDetailQueryKey(project.projectId, runScope.versionId, runScope.runId),
+    retry: false,
+  });
   const modelInvocationsQuery = useQuery({
-    enabled: ledgerDrilldown === "model",
+    enabled: ledgerDrilldown === "model" && hasTraceScope,
     queryFn: () => listModelGatewayInvocations(project.projectId, ledgerFilters),
     queryKey: [
       "project",
@@ -109,7 +128,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
     retry: false,
   });
   const toolInvocationsQuery = useQuery({
-    enabled: ledgerDrilldown === "tool",
+    enabled: ledgerDrilldown === "tool" && hasTraceScope,
     queryFn: () => listToolGatewayInvocations(project.projectId, ledgerFilters),
     queryKey: toolGatewayInvocationsQueryKey(project.projectId, ledgerFilters),
     retry: false,
@@ -121,10 +140,10 @@ export function RunObservatory({ project }: RunObservatoryProps) {
     mutationFn: () =>
       requestRawTraceAccess(project.projectId, {
         reason: accessReason,
-        run_id: defaultRunScope.runId,
-        trace_id: defaultRunScope.traceId,
+        run_id: runScope.runId,
+        trace_id: runScope.traceId,
         target_type: "run_trace",
-        target_id: defaultRunScope.traceId,
+        target_id: runScope.traceId,
       }),
   });
 
@@ -146,33 +165,27 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         </div>
 
         <div className="run-observatory-layout">
-          <section className="global-panel">
-            <div className="global-panel-header">
-              <div>
-                <div className="telemetry">RUN SCOPE</div>
-                <h3>{defaultRunScope.runId}</h3>
-              </div>
-              <span className="global-source-pill">{defaultRunScope.traceId}</span>
-            </div>
-            <div className="node-detail-grid">
-              <Detail label="Project" value={project.projectId} />
-              <Detail label="Trace" value={defaultRunScope.traceId} />
-              <Detail label="Model Anchor" value={defaultRunScope.modelNodeId} />
-              <Detail label="Sources" value="Runtime Trace Span + Ledger Drilldown" />
-            </div>
-          </section>
+          <RunScopePanel projectId={project.projectId} scope={runScope} onScopeChange={setRunScope} />
+
+          {hasRunDetailScope ? (
+            <WorkflowRunDetailPanel
+              detail={runDetailQuery.data}
+              error={runDetailQuery.error}
+              isLoading={runDetailQuery.isLoading}
+            />
+          ) : null}
 
           <section className="global-panel run-otlp-panel">
             <PanelHeader label="EXTERNAL TRACE" title="OTLP Export" />
             <div className="model-trace-metrics">
-              <Detail label="Run" value={defaultRunScope.runId} />
-              <Detail label="Trace" value={defaultRunScope.traceId} />
+              <Detail label="Run" value={runScope.runId || "not selected"} />
+              <Detail label="Trace" value={runScope.traceId || "not selected"} />
               <Detail label="Limit" value={String(SPAN_LIMIT)} />
               <Detail label="Audit" value="runtime_trace.span.otlp_export" />
             </div>
             <button
               className="toolbar-button"
-              disabled={otlpExportMutation.isPending}
+              disabled={otlpExportMutation.isPending || !hasTraceScope}
               onClick={() => otlpExportMutation.mutate()}
               type="button"
             >
@@ -193,7 +206,9 @@ export function RunObservatory({ project }: RunObservatoryProps) {
           <section className="global-panel run-replay-panel" aria-label="Graph Replay">
             <PanelHeader count={traceEvents.length} label="GRAPH REPLAY" title="Graph Replay" />
             {renderRuntimeQueryAlert(runtimeSpansQuery.error)}
-            {hasEvents ? (
+            {!hasTraceScope ? (
+              <div className="preview-alert">Select a run scope to load trace data</div>
+            ) : hasEvents ? (
               <div className="run-graph-strip">
                 {traceEvents.map((event, index) => (
                   <GraphNode event={event} index={index} key={event.id} />
@@ -210,7 +225,9 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               {traceEvents.map((event) => (
                 <TimelineRow event={event} key={event.id} />
               ))}
-              {!hasEvents && !runtimeSpansQuery.isError ? (
+              {!hasTraceScope ? (
+                <div className="preview-alert">Timeline waits for a selected run scope</div>
+              ) : !hasEvents && !runtimeSpansQuery.isError ? (
                 <div className="preview-alert">Timeline will appear after runtime spans arrive</div>
               ) : null}
             </div>
@@ -226,7 +243,9 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               {runtimeSpans.map((span) => (
                 <SpanEvidence key={span.id} span={span} />
               ))}
-              {!hasEvents && !runtimeSpansQuery.isError ? (
+              {!hasTraceScope ? (
+                <div className="preview-alert">Sanitized evidence waits for a selected run scope</div>
+              ) : !hasEvents && !runtimeSpansQuery.isError ? (
                 <div className="preview-alert">No sanitized span attributes available</div>
               ) : null}
             </div>
@@ -237,6 +256,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
             <div className="run-ledger-actions">
               <button
                 className="toolbar-button"
+                disabled={!hasTraceScope}
                 onClick={() => setLedgerDrilldown("model")}
                 type="button"
               >
@@ -244,6 +264,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               </button>
               <button
                 className="toolbar-button"
+                disabled={!hasTraceScope}
                 onClick={() => setLedgerDrilldown("tool")}
                 type="button"
               >
@@ -286,7 +307,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               </label>
               <button
                 className="toolbar-button"
-                disabled={rawTraceMutation.isPending || !accessReason.trim()}
+                disabled={rawTraceMutation.isPending || !accessReason.trim() || !hasTraceScope}
                 type="submit"
               >
                 Request raw trace access
@@ -329,6 +350,160 @@ function PanelHeader({
       </div>
       {typeof count === "number" ? <span className="global-panel-count">{count}</span> : null}
     </div>
+  );
+}
+
+function RunScopePanel({
+  onScopeChange,
+  projectId,
+  scope,
+}: {
+  onScopeChange: (scope: RunScope) => void;
+  projectId: string;
+  scope: RunScope;
+}) {
+  return (
+    <section className="global-panel">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">RUN SCOPE</div>
+          <h3>{scope.runId || "No run selected"}</h3>
+        </div>
+        <span className="global-source-pill">{scope.traceId || "trace pending"}</span>
+      </div>
+      <div className="run-scope-form">
+        <ScopeField
+          label="Run ID"
+          onChange={(value) => onScopeChange({ ...scope, runId: value })}
+          value={scope.runId}
+        />
+        <ScopeField
+          label="Trace ID"
+          onChange={(value) => onScopeChange({ ...scope, traceId: value })}
+          value={scope.traceId}
+        />
+        <ScopeField
+          label="Version ID"
+          onChange={(value) => onScopeChange({ ...scope, versionId: value })}
+          value={scope.versionId}
+        />
+        <ScopeField
+          label="Node ID"
+          onChange={(value) => onScopeChange({ ...scope, nodeId: value })}
+          value={scope.nodeId}
+        />
+      </div>
+      <div className="node-detail-grid">
+        <Detail label="Project" value={projectId} />
+        <Detail label="Trace" value={scope.traceId || "not selected"} />
+        <Detail label="Node Anchor" value={scope.nodeId || "all nodes"} />
+        <Detail label="Sources" value="Runtime Trace Span + Ledger Drilldown" />
+      </div>
+    </section>
+  );
+}
+
+function ScopeField({
+  label,
+  onChange,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  const id = `run-scope-${label.toLowerCase().replaceAll(" ", "-")}`;
+  return (
+    <label className="field-label" htmlFor={id}>
+      {label}
+      <input
+        className="text-field"
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      />
+    </label>
+  );
+}
+
+function WorkflowRunDetailPanel({
+  detail,
+  error,
+  isLoading,
+}: {
+  detail: WorkflowRunDetailResponse | undefined;
+  error: unknown;
+  isLoading: boolean;
+}) {
+  const pendingApproval = readPendingApproval(detail?.run.pending_approval);
+
+  return (
+    <section className="global-panel run-detail-panel" aria-label="Workflow Run Detail">
+      <PanelHeader
+        count={detail?.checkpoints.length ?? 0}
+        label="WORKFLOW RUN"
+        title="Workflow Run Detail"
+      />
+      {isLoading ? <div className="preview-alert">Loading workflow run detail</div> : null}
+      {error ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(error as Error).message}
+        </div>
+      ) : null}
+      {detail ? (
+        <>
+          <div className="model-trace-metrics">
+            <Detail label="Run" value={detail.run.run_id} />
+            <Detail label="Trace" value={detail.run.trace_id} />
+            <Detail label="Status" value={detail.run.status} />
+            <Detail label="Workflow" value={detail.run.workflow_ref} />
+          </div>
+          {detail.run.outputs_summary ? (
+            <EvidenceCode label="OUTPUT SUMMARY" value={detail.run.outputs_summary} />
+          ) : null}
+          {detail.run.error_message ? (
+            <div className="preview-alert preview-alert-danger">{detail.run.error_message}</div>
+          ) : null}
+          {pendingApproval ? <PendingApprovalBanner approval={pendingApproval} /> : null}
+          <div className="workflow-run-checkpoints">
+            {detail.checkpoints.map((checkpoint) => (
+              <CheckpointSummary checkpoint={checkpoint} key={checkpoint.id} />
+            ))}
+          </div>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function PendingApprovalBanner({ approval }: { approval: WorkflowPendingApproval }) {
+  return (
+    <div className="preview-alert workflow-pending-approval">
+      <strong>{approval.message || "Human approval required"}</strong>
+      <div className="node-detail-grid">
+        <Detail label="Node" value={approval.node_id || "unknown"} />
+        <Detail label="Name" value={approval.node_name || "approval"} />
+        <Detail label="Policy" value={approval.approval_policy_ref || "unscoped"} />
+        <Detail label="Task" value={approval.approval_task_id || "pending"} />
+      </div>
+    </div>
+  );
+}
+
+function CheckpointSummary({ checkpoint }: { checkpoint: WorkflowRunCheckpointRead }) {
+  return (
+    <article className="workflow-run-checkpoint">
+      <div>
+        <strong>{checkpoint.node_id}</strong>
+        <span className="telemetry">{checkpoint.node_type}</span>
+      </div>
+      <span className={`status-pill ${runStatusClass(checkpoint.status)}`}>
+        {checkpoint.status}
+      </span>
+      {checkpoint.error_message ? (
+        <div className="preview-alert preview-alert-danger">{checkpoint.error_message}</div>
+      ) : null}
+    </article>
   );
 }
 
@@ -605,6 +780,51 @@ function getTotalTokens(invocation: ModelGatewayInvocation): number {
     return totalTokens;
   }
   return 0;
+}
+
+function readInitialRunScope(): RunScope {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    nodeId: params.get("node_id") ?? "",
+    runId: params.get("run_id") ?? "",
+    traceId: params.get("trace_id") ?? "",
+    versionId: params.get("version_id") ?? "",
+  };
+}
+
+function readPendingApproval(value: Record<string, unknown> | undefined): WorkflowPendingApproval | null {
+  if (!value || !Object.keys(value).length) {
+    return null;
+  }
+
+  return {
+    approval_kind: value.approval_kind === "tool" ? "tool" : "human",
+    approval_policy_ref: readString(value.approval_policy_ref),
+    approval_task_id: readString(value.approval_task_id) || null,
+    message: readString(value.message),
+    node_id: readString(value.node_id),
+    node_name: readString(value.node_name),
+    payload: {},
+  };
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function runStatusClass(status: WorkflowRunStatus | "success" | "failed" | "pending_approval" | "skipped") {
+  switch (status) {
+    case "success":
+      return "model-trace-status-success";
+    case "failed":
+    case "cancelled":
+      return "model-trace-status-failed";
+    case "pending_approval":
+    case "running":
+      return "model-trace-status-pending";
+    default:
+      return "status-warning";
+  }
 }
 
 function formatUnixNano(value: number, fallback: string): string {

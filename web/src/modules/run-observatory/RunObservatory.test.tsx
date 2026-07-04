@@ -10,13 +10,26 @@ import { RunObservatory } from "./RunObservatory";
 
 describe("RunObservatory", () => {
   afterEach(() => {
+    window.history.pushState({}, "", "/");
     vi.restoreAllMocks();
   });
 
   it("renders graph replay, unified timeline, sanitized span evidence, OTLP export, and ledger drilldown from runtime spans", async () => {
     const user = userEvent.setup();
+    window.history.pushState(
+      {},
+      "",
+      "/projects/ops-command/runs?run_id=run-ui&trace_id=trace-ui&version_id=44444444-4444-4444-8444-444444444444",
+    );
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
+      if (
+        url.includes(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui",
+        )
+      ) {
+        return new Response(JSON.stringify(workflowRunDetailFixture()), { status: 200 });
+      }
       if (url.includes("/runtime-traces/spans/otlp-export")) {
         return new Response(
           JSON.stringify({
@@ -36,10 +49,10 @@ describe("RunObservatory", () => {
                   "llm.provider": "openai-compatible",
                   "llm.request_hash": "sha256:real-run",
                   "llm.usage.total_tokens": 18,
-                  output_summary: "safe model summary",
-                  prompt: "raw-secret-token",
-                  token: "raw-secret-token",
-                },
+                output_summary: "safe model summary",
+                prompt: "raw-secret-token",
+                token: "raw-secret-token",
+              },
                 component: "model_gateway",
                 duration_ms: 73,
                 id: "span-row-model",
@@ -112,9 +125,9 @@ describe("RunObservatory", () => {
                 provider: "openai-compatible",
                 model_name: "gpt-5.5",
                 prompt_version: "v1",
-                run_id: "run-real-llm",
+              run_id: "run-real-llm",
                 node_id: "llm_1",
-                trace_id: "trace-real-llm",
+              trace_id: "trace-real-llm",
                 status: "success",
                 request_hash: "sha256:real-run",
                 output_summary: "safe model summary",
@@ -150,9 +163,9 @@ describe("RunObservatory", () => {
                 workflow_ref: "incident-response",
                 agent_ref: "ops-agent",
                 role_refs: ["oncall"],
-                run_id: "run-real-llm",
+              run_id: "run-real-llm",
                 node_id: "mcp_tool_1",
-                trace_id: "trace-real-llm",
+              trace_id: "trace-real-llm",
                 tool_call_id: "call-1",
                 effective_risk_level: "low",
                 approval_required: false,
@@ -192,7 +205,10 @@ describe("RunObservatory", () => {
     );
 
     expect(screen.getByText("Run Trace Detail")).toBeInTheDocument();
-    expect(screen.getAllByText("trace-real-llm").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("trace-ui").length).toBeGreaterThan(0);
+    expect(await screen.findByText("Workflow Run Detail")).toBeInTheDocument();
+    expect((await screen.findAllByText("pending_approval")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("human_approval_1").length).toBeGreaterThan(0);
     expect(await screen.findByText("Graph Replay")).toBeInTheDocument();
     expect(screen.getByText("Unified Timeline")).toBeInTheDocument();
     expect(screen.getByText("Sanitized Span Evidence")).toBeInTheDocument();
@@ -207,7 +223,7 @@ describe("RunObservatory", () => {
     expect(screen.queryByText("lease_should_not_render")).not.toBeInTheDocument();
     expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/projects/ops-command/runtime-traces/spans?run_id=run-real-llm&trace_id=trace-real-llm&limit=500",
+      "/api/v1/projects/ops-command/runtime-traces/spans?run_id=run-ui&trace_id=trace-ui&limit=500",
     );
     expect(
       fetchSpy.mock.calls.some(([input]) => String(input).includes("/model-gateway/invocations")),
@@ -220,20 +236,20 @@ describe("RunObservatory", () => {
     expect(await screen.findByText("Model Ledger Drilldown")).toBeInTheDocument();
     expect(screen.getAllByText("sha256:real-run").length).toBeGreaterThan(0);
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/projects/ops-command/model-gateway/invocations?run_id=run-real-llm&trace_id=trace-real-llm",
+      "/api/v1/projects/ops-command/model-gateway/invocations?run_id=run-ui&trace_id=trace-ui",
     );
 
     await user.click(screen.getByRole("button", { name: "Open Tool Ledger" }));
     expect(await screen.findByText("Tool Ledger Drilldown")).toBeInTheDocument();
     expect(screen.getAllByText("mcp-k8s-test.kubectl_get_pods").length).toBeGreaterThan(0);
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/projects/ops-command/tool-gateway/invocations?run_id=run-real-llm&trace_id=trace-real-llm",
+      "/api/v1/projects/ops-command/tool-gateway/invocations?run_id=run-ui&trace_id=trace-ui",
     );
 
     await user.click(screen.getByRole("button", { name: "Request OTLP export" }));
     expect(await screen.findByText("OTLP export recorded for 3 spans")).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/projects/ops-command/runtime-traces/spans/otlp-export?run_id=run-real-llm&trace_id=trace-real-llm&limit=500",
+      "/api/v1/projects/ops-command/runtime-traces/spans/otlp-export?run_id=run-ui&trace_id=trace-ui&limit=500",
     );
 
     await user.clear(screen.getByLabelText("Access reason"));
@@ -246,10 +262,10 @@ describe("RunObservatory", () => {
       expect.objectContaining({
         body: JSON.stringify({
           reason: "Need to debug a failed tool call",
-          run_id: "run-real-llm",
-          trace_id: "trace-real-llm",
+          run_id: "run-ui",
+          trace_id: "trace-ui",
           target_type: "run_trace",
-          target_id: "trace-real-llm",
+          target_id: "trace-ui",
         }),
         method: "POST",
       }),
@@ -257,6 +273,11 @@ describe("RunObservatory", () => {
   });
 
   it("renders the runtime span empty state", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/projects/ops-command/runs?run_id=run-empty&trace_id=trace-empty",
+    );
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ spans: [], count: 0 }), { status: 200 }),
     );
@@ -271,7 +292,30 @@ describe("RunObservatory", () => {
     expect(await screen.findByText("No runtime spans for this run scope")).toBeInTheDocument();
   });
 
+  it("does not request the old default run scope when no run scope is selected", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ spans: [], count: 0 }), { status: 200 }),
+    );
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+
+    render(
+      <AppProviders runtime={runtime}>
+        <RunObservatory project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    expect(screen.getByText("Select a run scope to load trace data")).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("run-real-llm"))).toBe(
+      false,
+    );
+  });
+
   it("renders forbidden runtime span errors without falling back to ledger data", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/projects/ops-command/runs?run_id=run-forbidden&trace_id=trace-forbidden",
+    );
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ detail: "Missing required project permission" }), {
         status: 403,
@@ -344,3 +388,58 @@ type RuntimeSpanFixture = {
   start_time_unix_nano: number;
   status: string;
 };
+
+function workflowRunDetailFixture() {
+  return {
+    run: {
+      actor_id: "acct-1",
+      created_at: "2026-07-04T00:00:00Z",
+      created_by: "acct-1",
+      definition_hash: "sha256:published-v1",
+      error_message: "",
+      error_type: "",
+      id: "run-row-1",
+      inputs_summary: "change_id",
+      outputs_summary: "awaiting approval",
+      pending_approval: {
+        approval_policy_ref: "ops.approval",
+        approval_task_id: "approval-ui",
+        message: "Human approval required",
+        node_id: "human_approval_1",
+        node_name: "Approve rollout",
+      },
+      project_id: "ops-command",
+      run_id: "run-ui",
+      status: "pending_approval",
+      trace_id: "trace-ui",
+      updated_at: "2026-07-04T00:00:01Z",
+      updated_by: "acct-1",
+      workflow_id: "ops_incident_triage",
+      workflow_ref: "ops_incident_triage:1",
+      workflow_version_id: "44444444-4444-4444-8444-444444444444",
+    },
+    checkpoints: [
+      {
+        actor_id: "acct-1",
+        created_at: "2026-07-04T00:00:00Z",
+        created_by: "acct-1",
+        error_message: "",
+        error_type: "",
+        id: "checkpoint-1",
+        node_id: "human_approval_1",
+        node_type: "human_approval",
+        output: { summary: "awaiting approval", token: "raw-secret-token" },
+        project_id: "ops-command",
+        run_id: "run-ui",
+        state: {},
+        status: "pending_approval",
+        trace_id: "trace-ui",
+        updated_at: "2026-07-04T00:00:01Z",
+        updated_by: "acct-1",
+        workflow_ref: "ops_incident_triage:1",
+        workflow_run_id: "run-row-1",
+        workflow_version_id: "44444444-4444-4444-8444-444444444444",
+      },
+    ],
+  };
+}

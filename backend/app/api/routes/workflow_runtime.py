@@ -6,6 +6,7 @@ from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
     get_project_access_provider,
+    get_workflow_run_store,
     get_workflow_runtime_runner,
     get_workflow_version_store,
 )
@@ -15,11 +16,13 @@ from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.workflow_runtime.runner import WorkflowRuntimeError, WorkflowRuntimeRunner
 from backend.app.workflow_runtime.schemas import (
     WorkflowRunApiRequest,
+    WorkflowRunDetailResponse,
     WorkflowRunRequest,
     WorkflowRunResult,
     WorkflowRunResumeApiRequest,
     WorkflowRunResumeRequest,
 )
+from backend.app.workflow_runtime.store import WorkflowRunStore
 from backend.app.workflows.store import WorkflowVersionStore
 
 router = APIRouter(
@@ -31,6 +34,7 @@ ProjectAccess = Depends(get_project_access_provider)
 VersionStore = Depends(get_workflow_version_store)
 AuditStore = Depends(get_audit_event_store)
 RuntimeRunner = Depends(get_workflow_runtime_runner)
+RunStore = Depends(get_workflow_run_store)
 
 
 @router.post("", response_model=WorkflowRunResult, status_code=status.HTTP_201_CREATED)
@@ -98,6 +102,53 @@ async def run_workflow_version(
             },
         )
     return result
+
+
+@router.get("/{run_id}", response_model=WorkflowRunDetailResponse)
+async def get_workflow_run_detail(
+    project_id: UUID,
+    version_id: UUID,
+    run_id: str,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    run_store: WorkflowRunStore = RunStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowRunDetailResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:run",
+    )
+    version = await version_store.get_project_version(project_id, version_id)
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found"
+        )
+
+    run = await run_store.get_run(project_id=project_id, run_id=run_id)
+    if run is None or run.workflow_version_id != version.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found")
+
+    checkpoints = await run_store.list_checkpoints(project_id=project_id, run_id=run_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.run.view",
+        target_type="workflow_run",
+        target_id=run.run_id,
+        result="success",
+        risk_level="low",
+        metadata={
+            "workflow_ref": run.workflow_ref,
+            "run_id": run.run_id,
+            "trace_id": run.trace_id,
+            "status": run.status,
+            "checkpoint_count": len(checkpoints),
+        },
+    )
+    return WorkflowRunDetailResponse(run=run, checkpoints=checkpoints)
 
 
 @router.post("/{run_id}/resume", response_model=WorkflowRunResult)

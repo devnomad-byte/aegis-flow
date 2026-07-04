@@ -151,9 +151,9 @@ describe("App", () => {
     render(<App initialPath="/projects/ops-command/runs" />);
 
     expect(await screen.findByText("Run Trace Detail")).toBeInTheDocument();
-    expect(screen.getAllByText("run-real-llm").length).toBeGreaterThan(0);
+    expect(screen.getByText("No run selected")).toBeInTheDocument();
     expect(screen.getByText("Graph Replay")).toBeInTheDocument();
-    expect(await screen.findByText("No runtime spans for this run scope")).toBeInTheDocument();
+    expect(await screen.findByText("Select a run scope to load trace data")).toBeInTheDocument();
   });
 
   it("shows forbidden instead of global data for regular project members", async () => {

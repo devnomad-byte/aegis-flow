@@ -162,3 +162,10 @@ class WorkflowRunResult(BaseModel):
     error_message: str = ""
     created_at: datetime
     updated_at: datetime
+
+
+class WorkflowRunDetailResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    run: WorkflowRunRead
+    checkpoints: list[WorkflowRunCheckpointRead] = Field(default_factory=list)

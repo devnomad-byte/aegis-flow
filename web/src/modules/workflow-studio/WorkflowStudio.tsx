@@ -29,6 +29,17 @@ import {
 
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
+  getWorkflowRunDetail,
+  runWorkflowVersion,
+  workflowRunDetailQueryKey,
+  type WorkflowNodeStatus,
+  type WorkflowPendingApproval,
+  type WorkflowRunCheckpointRead,
+  type WorkflowRunDetailResponse,
+  type WorkflowRunResult,
+  type WorkflowRunStatus,
+} from "../workflow-runtime/workflowRuntimeApi";
+import {
   WorkflowPublishGateError,
   archiveWorkflowVersion,
   listWorkflowDrafts,
@@ -108,6 +119,12 @@ type EdgeComposerState = {
 type PublishStatus = {
   kind: "idle" | "checked" | "published" | "restored" | "archived" | "error";
   message: string;
+};
+
+type RunTarget = {
+  runId: string;
+  traceId: string;
+  versionId: string;
 };
 
 const nodeTypes = {
@@ -197,6 +214,9 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     kind: "idle",
     message: "",
   });
+  const [runInputsText, setRunInputsText] = useState("{\n}");
+  const [runInputsError, setRunInputsError] = useState("");
+  const [latestRunTarget, setLatestRunTarget] = useState<RunTarget | null>(null);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([
     { time: "00:00.000", label: "Workflow DSL loaded", state: "ok" },
     { time: "00:00.146", label: "Project catalog analyzed", state: "ok" },
@@ -415,6 +435,58 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     onError: (error) => {
       setPublishStatus({ kind: "error", message: getErrorMessage(error) });
     },
+  });
+  const runMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedVersion || selectedVersion.status !== "published") {
+        throw new Error("No published workflow version is selected.");
+      }
+      const inputs = parseRunInputs(runInputsText);
+      return runWorkflowVersion(project.projectId, selectedVersion.id, { inputs });
+    },
+    onSuccess: (run) => {
+      setRunInputsError("");
+      setLatestRunTarget({
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      });
+      setTimelineEvents((events) => [
+        {
+          time: "00:02.000",
+          label: `Workflow run ${run.run_id} ${run.status}`,
+          state: run.status === "success" ? "ok" : run.status === "failed" ? "blocked" : "pending",
+        },
+        ...events.slice(0, 4),
+      ]);
+      void queryClient.invalidateQueries({
+        queryKey: workflowRunDetailQueryKey(
+          project.projectId,
+          run.workflow_version_id,
+          run.run_id,
+        ),
+      });
+    },
+    onError: (error) => {
+      setRunInputsError(getErrorMessage(error));
+    },
+  });
+  const runDetailQuery = useQuery({
+    enabled: Boolean(latestRunTarget),
+    queryFn: () =>
+      getWorkflowRunDetail(
+        project.projectId,
+        latestRunTarget?.versionId ?? "",
+        latestRunTarget?.runId ?? "",
+      ),
+    queryKey: latestRunTarget
+      ? workflowRunDetailQueryKey(
+          project.projectId,
+          latestRunTarget.versionId,
+          latestRunTarget.runId,
+        )
+      : ["project", project.projectId, "workflows", "runs", "none"],
+    retry: false,
   });
 
   const handlePreviewImport = useCallback(() => {
@@ -750,6 +822,22 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
           versions={versions}
           versionsError={versionsQuery.error}
           workflow={workflow}
+        />
+        <WorkflowRunPanel
+          detail={runDetailQuery.data}
+          detailError={runDetailQuery.error}
+          inputsError={runInputsError}
+          inputsText={runInputsText}
+          isDetailLoading={runDetailQuery.isLoading}
+          isRunning={runMutation.isPending}
+          latestRun={runMutation.data}
+          onInputsTextChange={(value) => {
+            setRunInputsText(value);
+            setRunInputsError("");
+          }}
+          onRun={() => runMutation.mutate()}
+          projectId={project.projectId}
+          selectedVersion={selectedVersion}
         />
         <PreviewPanel error={previewError} summary={previewSummary} />
 
@@ -1306,6 +1394,148 @@ function PublishPanel({
   );
 }
 
+function WorkflowRunPanel({
+  detail,
+  detailError,
+  inputsError,
+  inputsText,
+  isDetailLoading,
+  isRunning,
+  latestRun,
+  onInputsTextChange,
+  onRun,
+  projectId,
+  selectedVersion,
+}: {
+  detail: WorkflowRunDetailResponse | undefined;
+  detailError: Error | null;
+  inputsError: string;
+  inputsText: string;
+  isDetailLoading: boolean;
+  isRunning: boolean;
+  latestRun: WorkflowRunResult | undefined;
+  onInputsTextChange: (value: string) => void;
+  onRun: () => void;
+  projectId: string;
+  selectedVersion: WorkflowVersionRead | null;
+}) {
+  const canRun = selectedVersion?.status === "published";
+  const status = detail?.run.status ?? latestRun?.status ?? "idle";
+  const runId = detail?.run.run_id ?? latestRun?.run_id ?? "";
+  const traceId = detail?.run.trace_id ?? latestRun?.trace_id ?? "";
+  const versionId = selectedVersion?.id ?? latestRun?.workflow_version_id ?? "";
+  const pendingApproval =
+    latestRun?.pending_approval ?? readPendingApproval(detail?.run.pending_approval);
+  const traceUrl = runId && traceId && versionId
+    ? buildRunObservatoryUrl(projectId, versionId, runId, traceId)
+    : "";
+
+  return (
+    <section className="inspector-section workflow-run-panel" aria-label="Workflow Run">
+      <div className="telemetry">Workflow Run</div>
+      <div className="release-state-grid">
+        <DetailItem label="target" value={canRun ? `v${selectedVersion.version}` : "none"} />
+        <DetailItem label="status" value={status} />
+        <DetailItem label="checkpoints" value={String(detail?.checkpoints.length ?? 0)} />
+      </div>
+      <label className="field-label" htmlFor="workflow-run-inputs">
+        Run inputs JSON
+        <textarea
+          aria-label="Run inputs JSON"
+          className="yaml-field workflow-run-inputs"
+          id="workflow-run-inputs"
+          onChange={(event) => onInputsTextChange(event.target.value)}
+          rows={6}
+          value={inputsText}
+        />
+      </label>
+      {inputsError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {inputsError}
+        </div>
+      ) : null}
+      {!canRun ? (
+        <div className="preview-alert preview-alert-danger">
+          Select a published version before running this workflow.
+        </div>
+      ) : null}
+      <button
+        className="toolbar-button"
+        disabled={!canRun || isRunning}
+        onClick={onRun}
+        type="button"
+      >
+        <GitBranch aria-hidden="true" size={16} />
+        Run published version
+      </button>
+      {latestRun || detail ? (
+        <div className="workflow-run-result">
+          <div className="node-detail-grid">
+            <DetailItem label="run" value={runId || "pending"} />
+            <DetailItem label="trace" value={traceId || "pending"} />
+            <DetailItem label="workflow" value={detail?.run.workflow_ref ?? latestRun?.workflow_ref ?? ""} />
+            <DetailItem label="updated" value={formatDateTime(detail?.run.updated_at ?? latestRun?.updated_at ?? "")} />
+          </div>
+          <span className={`status-pill ${workflowRunStatusClass(status)}`}>{status}</span>
+          {pendingApproval ? <PendingApprovalBanner approval={pendingApproval} /> : null}
+          {traceUrl ? (
+            <a className="toolbar-button workflow-run-link" href={traceUrl}>
+              Open Run Observatory
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+      {isDetailLoading ? <div className="preview-alert">Loading workflow run checkpoints</div> : null}
+      {detailError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {getErrorMessage(detailError)}
+        </div>
+      ) : null}
+      {detail?.checkpoints.length ? (
+        <div className="workflow-run-checkpoints">
+          <strong>Checkpoint Summary</strong>
+          {detail.checkpoints.map((checkpoint) => (
+            <CheckpointSummary checkpoint={checkpoint} key={checkpoint.id} />
+          ))}
+        </div>
+      ) : latestRun ? (
+        <div className="preview-alert">Checkpoint summary will appear after run detail is recorded.</div>
+      ) : null}
+    </section>
+  );
+}
+
+function PendingApprovalBanner({ approval }: { approval: WorkflowPendingApproval }) {
+  return (
+    <div className="preview-alert workflow-pending-approval">
+      <strong>{approval.message || "Human approval required"}</strong>
+      <div className="node-detail-grid">
+        <DetailItem label="node" value={approval.node_id || "unknown"} />
+        <DetailItem label="name" value={approval.node_name || "approval"} />
+        <DetailItem label="policy" value={approval.approval_policy_ref || "unscoped"} />
+        <DetailItem label="task" value={approval.approval_task_id || "pending"} />
+      </div>
+    </div>
+  );
+}
+
+function CheckpointSummary({ checkpoint }: { checkpoint: WorkflowRunCheckpointRead }) {
+  return (
+    <article className="workflow-run-checkpoint">
+      <div>
+        <strong>{checkpoint.node_id}</strong>
+        <span className="telemetry">{checkpoint.node_type}</span>
+      </div>
+      <span className={`status-pill ${workflowRunStatusClass(checkpoint.status)}`}>
+        {checkpoint.status}
+      </span>
+      {checkpoint.error_message ? (
+        <div className="preview-alert preview-alert-danger">{checkpoint.error_message}</div>
+      ) : null}
+    </article>
+  );
+}
+
 function SelectControl({
   label,
   onChange,
@@ -1423,6 +1653,70 @@ function getErrorMessage(error: unknown) {
     return error.message;
   }
   return "Unknown workflow error";
+}
+
+function parseRunInputs(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Run inputs JSON must be an object.");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Invalid run inputs JSON: ${error.message}`);
+    }
+    throw new Error("Invalid run inputs JSON.");
+  }
+}
+
+function readPendingApproval(value: Record<string, unknown> | undefined): WorkflowPendingApproval | null {
+  if (!value || !Object.keys(value).length) {
+    return null;
+  }
+
+  return {
+    approval_kind: value.approval_kind === "tool" ? "tool" : "human",
+    approval_policy_ref: readString(value.approval_policy_ref),
+    approval_task_id: readString(value.approval_task_id) || null,
+    message: readString(value.message),
+    node_id: readString(value.node_id),
+    node_name: readString(value.node_name),
+    payload: {},
+  };
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function workflowRunStatusClass(status: WorkflowRunStatus | WorkflowNodeStatus | "idle") {
+  switch (status) {
+    case "success":
+      return "model-trace-status-success";
+    case "failed":
+    case "cancelled":
+      return "model-trace-status-failed";
+    case "pending_approval":
+    case "running":
+      return "model-trace-status-pending";
+    default:
+      return "status-warning";
+  }
+}
+
+function buildRunObservatoryUrl(
+  projectId: string,
+  versionId: string,
+  runId: string,
+  traceId: string,
+) {
+  const params = new URLSearchParams({
+    run_id: runId,
+    trace_id: traceId,
+    version_id: versionId,
+  });
+  return `/projects/${encodeURIComponent(projectId)}/runs?${params.toString()}`;
 }
 
 function shortHash(hash: string) {

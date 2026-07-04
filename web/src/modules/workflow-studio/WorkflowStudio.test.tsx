@@ -407,6 +407,101 @@ edges:
       release_note: "Ship guarded workflow",
     });
   });
+
+  it("runs the selected published version and links checkpoints to Run Observatory", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+
+      if (url.endsWith("/workflows/drafts") && !init) {
+        return jsonResponse({
+          drafts: [
+            makeDraft({
+              id: "33333333-3333-4333-8333-333333333333",
+              status: "draft",
+              version: 1,
+            }),
+          ],
+        });
+      }
+      if (url.endsWith("/workflows/versions?workflow_id=ops_incident_triage") && !init) {
+        return jsonResponse({
+          count: 1,
+          versions: [
+            makeVersion({
+              definitionHash: "sha256:published-v1",
+              id: "44444444-4444-4444-8444-444444444444",
+              releaseNote: "Initial guarded release",
+              status: "published",
+              version: 1,
+            }),
+          ],
+        });
+      }
+      if (
+        url.endsWith("/workflows/versions/44444444-4444-4444-8444-444444444444/runs") &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse(
+          {
+            id: "run-row-1",
+            project_id: "ops-command",
+            workflow_version_id: "44444444-4444-4444-8444-444444444444",
+            workflow_ref: "ops_incident_triage:1",
+            run_id: "run-ui",
+            trace_id: "trace-ui",
+            status: "pending_approval",
+            outputs: {},
+            node_results: [],
+            pending_approval: {
+              approval_kind: "human",
+              approval_policy_ref: "ops.approval",
+              approval_task_id: "approval-ui",
+              message: "Human approval required",
+              node_id: "human_approval_1",
+              node_name: "Approve rollout",
+              payload: {},
+            },
+            error_type: "",
+            error_message: "",
+            created_at: "2026-07-04T00:00:00Z",
+            updated_at: "2026-07-04T00:00:01Z",
+          },
+          { status: 201 },
+        );
+      }
+      if (
+        url.endsWith(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui",
+        ) &&
+        !init
+      ) {
+        return jsonResponse(workflowRunDetailFixture());
+      }
+
+      return jsonResponse({ detail: `Unexpected request ${url}` }, { status: 500 });
+    });
+
+    renderWorkflowStudio();
+
+    expect(await screen.findByText("Workflow Release")).toBeInTheDocument();
+    expect(await screen.findByText(/Run binds to version 1/)).toBeInTheDocument();
+    expect(screen.getByText("Workflow Run")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Run inputs JSON"), {
+      target: { value: '{ "change_id": "CHG-123" }' },
+    });
+    await user.click(screen.getByRole("button", { name: "Run published version" }));
+
+    expect((await screen.findAllByText("pending_approval")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Human approval required")).toBeInTheDocument();
+    expect(screen.getAllByText("human_approval_1").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "Open Run Observatory" })).toHaveAttribute(
+      "href",
+      "/projects/ops-command/runs?run_id=run-ui&trace_id=trace-ui&version_id=44444444-4444-4444-8444-444444444444",
+    );
+    expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
+  });
 });
 
 function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }) {
@@ -508,5 +603,60 @@ function makeVersion({
     published_by: accountUuid,
     release_note: releaseNote,
     status,
+  };
+}
+
+function workflowRunDetailFixture() {
+  return {
+    run: {
+      actor_id: accountUuid,
+      created_at: "2026-07-04T00:00:00Z",
+      created_by: accountUuid,
+      definition_hash: "sha256:published-v1",
+      error_message: "",
+      error_type: "",
+      id: "run-row-1",
+      inputs_summary: "change_id",
+      outputs_summary: "awaiting approval",
+      pending_approval: {
+        approval_policy_ref: "ops.approval",
+        approval_task_id: "approval-ui",
+        message: "Human approval required",
+        node_id: "human_approval_1",
+        node_name: "Approve rollout",
+      },
+      project_id: projectUuid,
+      run_id: "run-ui",
+      status: "pending_approval",
+      trace_id: "trace-ui",
+      updated_at: "2026-07-04T00:00:01Z",
+      updated_by: accountUuid,
+      workflow_id: "ops_incident_triage",
+      workflow_ref: "ops_incident_triage:1",
+      workflow_version_id: "44444444-4444-4444-8444-444444444444",
+    },
+    checkpoints: [
+      {
+        actor_id: accountUuid,
+        created_at: "2026-07-04T00:00:00Z",
+        created_by: accountUuid,
+        error_message: "",
+        error_type: "",
+        id: "checkpoint-1",
+        node_id: "human_approval_1",
+        node_type: "human_approval",
+        output: { summary: "awaiting approval", token: "raw-secret-token" },
+        project_id: projectUuid,
+        run_id: "run-ui",
+        state: {},
+        status: "pending_approval",
+        trace_id: "trace-ui",
+        updated_at: "2026-07-04T00:00:01Z",
+        updated_by: accountUuid,
+        workflow_ref: "ops_incident_triage:1",
+        workflow_run_id: "run-row-1",
+        workflow_version_id: "44444444-4444-4444-8444-444444444444",
+      },
+    ],
   };
 }

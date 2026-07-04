@@ -1,0 +1,190 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  getWorkflowRunDetail,
+  resumeWorkflowRun,
+  runWorkflowVersion,
+  workflowRunDetailQueryKey,
+} from "./workflowRuntimeApi";
+
+describe("workflowRuntimeApi", () => {
+  it("builds stable run detail query keys", () => {
+    expect(workflowRunDetailQueryKey("ops-command", "version-1", "run-1")).toEqual([
+      "project",
+      "ops-command",
+      "workflows",
+      "versions",
+      "version-1",
+      "runs",
+      "run-1",
+    ]);
+  });
+
+  it("starts a workflow version run with inputs, run ref, and trace id", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(workflowRunResult()), { status: 201 }),
+    );
+
+    const response = await runWorkflowVersion(
+      "ops-command",
+      "version-1",
+      {
+        inputs: { change_id: "CHG-123" },
+        run_ref: "run-1",
+        trace_id: "trace-1",
+      },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs",
+      {
+        body: JSON.stringify({
+          inputs: { change_id: "CHG-123" },
+          run_ref: "run-1",
+          trace_id: "trace-1",
+        }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(response.run_id).toBe("run-1");
+  });
+
+  it("loads workflow run detail with checkpoints", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(workflowRunDetail()), { status: 200 }),
+    );
+
+    const response = await getWorkflowRunDetail("ops-command", "version-1", "run-1", fetcher);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1",
+    );
+    expect(response.run.status).toBe("pending_approval");
+    expect(response.checkpoints[0].node_id).toBe("human_approval_1");
+  });
+
+  it("resumes a pending workflow run", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(workflowRunResult({ status: "success" })), { status: 200 }),
+    );
+
+    const response = await resumeWorkflowRun(
+      "ops-command",
+      "version-1",
+      "run-1",
+      { decision: "approved", payload: { reason: "ok" } },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1/resume",
+      {
+        body: JSON.stringify({ decision: "approved", payload: { reason: "ok" } }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(response.status).toBe("success");
+  });
+
+  it("throws useful backend details for failed run requests", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Workflow run not found" }), { status: 404 }),
+    );
+
+    await expect(getWorkflowRunDetail("ops-command", "version-1", "missing", fetcher)).rejects.toThrow(
+      "Workflow run not found",
+    );
+  });
+});
+
+function workflowRunResult(overrides: Partial<ReturnType<typeof workflowRunResultBase>> = {}) {
+  return {
+    ...workflowRunResultBase(),
+    ...overrides,
+  };
+}
+
+function workflowRunResultBase() {
+  return {
+    id: "run-row-1",
+    project_id: "ops-command",
+    workflow_version_id: "version-1",
+    workflow_ref: "ops_incident_triage:1",
+    run_id: "run-1",
+    trace_id: "trace-1",
+    status: "pending_approval",
+    outputs: {},
+    node_results: [],
+    pending_approval: {
+      node_id: "human_approval_1",
+      node_name: "Approve rollout",
+      approval_policy_ref: "ops.approval",
+      message: "Human approval required",
+      approval_kind: "human",
+      approval_task_id: "approval-1",
+      payload: {},
+    },
+    error_type: "",
+    error_message: "",
+    created_at: "2026-07-04T00:00:00Z",
+    updated_at: "2026-07-04T00:00:00Z",
+  };
+}
+
+function workflowRunDetail() {
+  return {
+    run: {
+      actor_id: "acct-1",
+      created_by: "acct-1",
+      definition_hash: "sha256:published-v1",
+      error_message: "",
+      error_type: "",
+      id: "run-row-1",
+      inputs_summary: "change_id",
+      outputs_summary: "awaiting approval",
+      pending_approval: {
+        approval_policy_ref: "ops.approval",
+        approval_task_id: "approval-1",
+        message: "Human approval required",
+        node_id: "human_approval_1",
+        node_name: "Approve rollout",
+      },
+      project_id: "ops-command",
+      run_id: "run-1",
+      status: "pending_approval",
+      trace_id: "trace-1",
+      updated_by: "acct-1",
+      workflow_id: "ops_incident_triage",
+      workflow_ref: "ops_incident_triage:1",
+      workflow_version_id: "version-1",
+      created_at: "2026-07-04T00:00:00Z",
+      updated_at: "2026-07-04T00:00:01Z",
+    },
+    checkpoints: [
+      {
+        actor_id: "acct-1",
+        created_by: "acct-1",
+        error_message: "",
+        error_type: "",
+        id: "checkpoint-1",
+        node_id: "human_approval_1",
+        node_type: "human_approval",
+        output: { summary: "awaiting approval" },
+        project_id: "ops-command",
+        run_id: "run-1",
+        state: {},
+        status: "pending_approval",
+        trace_id: "trace-1",
+        updated_by: "acct-1",
+        workflow_ref: "ops_incident_triage:1",
+        workflow_run_id: "run-row-1",
+        workflow_version_id: "version-1",
+        created_at: "2026-07-04T00:00:00Z",
+        updated_at: "2026-07-04T00:00:01Z",
+      },
+    ],
+  };
+}
