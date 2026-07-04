@@ -80,14 +80,21 @@ describe("ProjectToolRegistry", () => {
             registry_url: "https://registry.example/v2/aegis/runtime/manifests/7-alpine",
             registry_digest: validDigest,
             digest_match: true,
-            signature_status: "not_checked",
-            sbom_status: "not_checked",
-            vulnerability_status: "not_checked",
+            signature_status: "passed",
+            sbom_status: "passed",
+            vulnerability_status: "failed",
             policy_decision: "approved",
             decision_reason:
-              "registry digest matches requested digest; signature, SBOM, and vulnerability evidence not checked",
+              "registry digest, signature, SBOM, and vulnerability evidence checked",
             checked_at: "2026-07-05T00:00:00Z",
-            evidence: { manifest_size_bytes: 128 },
+            evidence: {
+              sbom: { tool: "trivy", format: "CycloneDX", component_count: 42 },
+              vulnerabilities: {
+                tool: "trivy",
+                severity_counts: { HIGH: 2, CRITICAL: 0 },
+                blocked_count: 2,
+              },
+            },
           }),
           { status: 200 },
         );
@@ -146,7 +153,10 @@ describe("ProjectToolRegistry", () => {
 
     expect(await screen.findByText("sha256:preview")).toBeInTheDocument();
     expect(screen.getByText("approved")).toBeInTheDocument();
-    expect(screen.getAllByText("not_checked").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getAllByText("passed").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("failed")).toBeInTheDocument();
+    expect(screen.getByText("Components: 42")).toBeInTheDocument();
+    expect(screen.getByText("Blocked vulnerabilities: 2")).toBeInTheDocument();
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute(
       "href",

@@ -259,6 +259,8 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
 }
 
 function SupplyChainPanel({ admission }: { admission: ShellImageAdmission | null }) {
+  const evidenceSummaries = buildEvidenceSummaries(admission?.evidence);
+
   return (
     <div className="shell-preview-grid">
       <Detail label="Image admission" value={admission?.policy_decision ?? "not_checked"} />
@@ -266,6 +268,11 @@ function SupplyChainPanel({ admission }: { admission: ShellImageAdmission | null
       <Detail label="Signature" value={admission?.signature_status ?? "not_checked"} />
       <Detail label="SBOM" value={admission?.sbom_status ?? "not_checked"} />
       <Detail label="Vulnerability" value={admission?.vulnerability_status ?? "not_checked"} />
+      {evidenceSummaries.map((summary) => (
+        <div className="preview-alert" key={summary}>
+          {summary}
+        </div>
+      ))}
       {admission ? <EvidenceCode label="ADMISSION REASON" value={admission.decision_reason} /> : null}
     </div>
   );
@@ -452,4 +459,32 @@ function updateForm<K extends keyof ShellTemplateCreateRequest>(
 
 function fieldId(label: string) {
   return label.toLowerCase().replaceAll(" ", "-");
+}
+
+function buildEvidenceSummaries(evidence?: Record<string, unknown>) {
+  const summaries: string[] = [];
+  const sbom = objectValue(evidence?.sbom);
+  const vulnerabilities = objectValue(evidence?.vulnerabilities);
+  const componentCount = numberValue(sbom?.component_count);
+  const blockedCount = numberValue(vulnerabilities?.blocked_count);
+
+  if (componentCount !== null) {
+    summaries.push(`Components: ${componentCount}`);
+  }
+  if (blockedCount !== null) {
+    summaries.push(`Blocked vulnerabilities: ${blockedCount}`);
+  }
+
+  return summaries;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  if (!value || Array.isArray(value) || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

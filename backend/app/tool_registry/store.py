@@ -147,6 +147,10 @@ class ToolRegistryStore(Protocol):
         digest_match: bool,
         policy_decision: str,
         decision_reason: str,
+        signature_status: str,
+        sbom_status: str,
+        vulnerability_status: str,
+        evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
         raise NotImplementedError
 

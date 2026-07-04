@@ -26,6 +26,43 @@ def test_settings_read_environment(monkeypatch: MonkeyPatch) -> None:
     assert settings.s3.bucket == "private-bucket"
 
 
+def test_shell_image_supply_chain_settings_parse_blocked_severities(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SHELL_IMAGE_SUPPLY_CHAIN_TRIVY_ENABLED", "true")
+    monkeypatch.setenv(
+        "SHELL_IMAGE_SUPPLY_CHAIN_TRIVY_CACHE_DIR",
+        r"D:\agent-platform-cache\trivy-test",
+    )
+    monkeypatch.setenv("SHELL_IMAGE_SUPPLY_CHAIN_COSIGN_ENABLED", "true")
+    monkeypatch.setenv(
+        "SHELL_IMAGE_SUPPLY_CHAIN_COSIGN_CERTIFICATE_IDENTITY",
+        "workflow@aegis-flow.internal",
+    )
+    monkeypatch.setenv(
+        "SHELL_IMAGE_SUPPLY_CHAIN_COSIGN_CERTIFICATE_OIDC_ISSUER",
+        "https://issuer.internal",
+    )
+    monkeypatch.setenv("SHELL_IMAGE_SUPPLY_CHAIN_BLOCKED_SEVERITIES", "critical, high")
+
+    settings = AppSettings()
+
+    assert settings.shell_image_supply_chain.trivy_enabled is True
+    assert (
+        settings.shell_image_supply_chain.trivy_cache_dir == r"D:\agent-platform-cache\trivy-test"
+    )
+    assert settings.shell_image_supply_chain.cosign_enabled is True
+    assert (
+        settings.shell_image_supply_chain.cosign_certificate_identity
+        == "workflow@aegis-flow.internal"
+    )
+    assert (
+        settings.shell_image_supply_chain.cosign_certificate_oidc_issuer
+        == "https://issuer.internal"
+    )
+    assert settings.shell_image_supply_chain.blocked_severity_set == frozenset({"CRITICAL", "HIGH"})
+
+
 def test_secret_values_are_not_shown_in_repr() -> None:
     settings = AppSettings()
 

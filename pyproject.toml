@@ -68,6 +68,7 @@ markers = [
   "real_http: tests that require a real HTTP API server",
   "real_mcp: tests that require a real HTTP MCP server",
   "real_redis: tests that require the configured Redis instance",
+  "real_trivy: tests that require a real Trivy executable or toolchain",
 ]
 
 [tool.coverage.run]

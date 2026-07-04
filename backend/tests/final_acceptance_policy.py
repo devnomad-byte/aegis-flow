@@ -7,6 +7,7 @@ REAL_DEPENDENCY_MARKERS = {
     "real_http",
     "real_mcp",
     "real_redis",
+    "real_trivy",
 }
 
 REAL_DEPENDENCY_ENV_FLAGS = {
@@ -16,6 +17,7 @@ REAL_DEPENDENCY_ENV_FLAGS = {
     "real_http": "AEGIS_REAL_HTTP",
     "real_mcp": "AEGIS_REAL_MCP",
     "real_redis": "AEGIS_REAL_REDIS",
+    "real_trivy": "AEGIS_REAL_TRIVY",
 }
 
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}

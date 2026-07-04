@@ -12,15 +12,24 @@ from backend.app.api.dependencies import (
     get_tool_registry_store,
 )
 from backend.app.audit.store import AuditEventStore
+from backend.app.core.settings import AppSettings
 from backend.app.execution.shell_policy import ShellTemplatePolicyError
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_evidence import (
+    CosignCliEvidenceProvider,
+    NoopShellImageEvidenceProvider,
+    ShellImageEvidenceProvider,
+    TrivyCliEvidenceProvider,
+    merge_evidence_providers,
+)
 from backend.app.tool_registry.image_supply_chain import (
     OciDigestResolver,
     OciManifestDigestError,
     OciManifestDigestResolver,
     ShellImageAdmissionService,
+    sanitize_image_evidence_summary,
 )
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
@@ -72,6 +81,36 @@ def get_oci_digest_resolver() -> OciDigestResolver:
 
 
 OciDigestResolverDependency = Depends(get_oci_digest_resolver)
+
+
+def get_shell_image_evidence_provider() -> ShellImageEvidenceProvider:
+    settings = AppSettings().shell_image_supply_chain
+    providers: list[ShellImageEvidenceProvider] = []
+    if settings.cosign_enabled:
+        providers.append(
+            CosignCliEvidenceProvider(
+                cosign_command=settings.cosign_command,
+                timeout_seconds=settings.scan_timeout_seconds,
+                certificate_identity=settings.cosign_certificate_identity,
+                certificate_oidc_issuer=settings.cosign_certificate_oidc_issuer,
+                key_ref=settings.cosign_key_ref,
+            )
+        )
+    if settings.trivy_enabled:
+        providers.append(
+            TrivyCliEvidenceProvider(
+                trivy_command=settings.trivy_command,
+                timeout_seconds=settings.scan_timeout_seconds,
+                blocked_severities=settings.blocked_severity_set,
+                cache_dir=settings.trivy_cache_dir,
+            )
+        )
+    if not providers:
+        return NoopShellImageEvidenceProvider()
+    return merge_evidence_providers(*providers)
+
+
+ShellImageEvidenceProviderDependency = Depends(get_shell_image_evidence_provider)
 
 
 @router.get("/catalog", response_model=ToolRegistryCatalogResponse)
@@ -729,6 +768,7 @@ async def resolve_shell_image_admission(
     registry_store: ToolRegistryStore = RegistryStore,
     audit_store: AuditEventStore = AuditStore,
     digest_resolver: OciDigestResolver = OciDigestResolverDependency,
+    evidence_provider: ShellImageEvidenceProvider = ShellImageEvidenceProviderDependency,
 ) -> ShellImageAdmissionRead:
     _require_project_permission(
         project_access,
@@ -739,6 +779,7 @@ async def resolve_shell_image_admission(
     service = ShellImageAdmissionService(
         store=registry_store,
         digest_resolver=digest_resolver,
+        evidence_provider=evidence_provider,
     )
     try:
         admission = await service.resolve_and_record(
@@ -763,10 +804,14 @@ async def resolve_shell_image_admission(
             "image_digest_prefix": admission.image_digest[:19],
             "registry_digest_prefix": admission.registry_digest[:19],
             "digest_match": admission.digest_match,
+            "signature_status": admission.signature_status,
+            "sbom_status": admission.sbom_status,
+            "vulnerability_status": admission.vulnerability_status,
+            "blocked_vulnerability_count": _blocked_vulnerability_count(admission),
             "policy_decision": admission.policy_decision,
         },
     )
-    return admission
+    return admission.model_copy(update={"evidence": _sanitize_image_evidence(admission.evidence)})
 
 
 @router.post(
@@ -1001,3 +1046,15 @@ def _highest_risk_level(risk_levels: list[str]) -> str:
     if not risk_levels:
         return "low"
     return max(risk_levels, key=lambda risk_level: order.get(risk_level, 0))
+
+
+def _sanitize_image_evidence(evidence: dict[str, object]) -> dict[str, object]:
+    return sanitize_image_evidence_summary(evidence)
+
+
+def _blocked_vulnerability_count(admission: ShellImageAdmissionRead) -> int:
+    vulnerabilities = admission.evidence.get("vulnerabilities")
+    if not isinstance(vulnerabilities, dict):
+        return 0
+    blocked_count = vulnerabilities.get("blocked_count")
+    return blocked_count if isinstance(blocked_count, int) else 0

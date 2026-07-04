@@ -285,6 +285,10 @@ class SqlAlchemyToolRegistryStore:
         digest_match: bool,
         policy_decision: str,
         decision_reason: str,
+        signature_status: str,
+        sbom_status: str,
+        vulnerability_status: str,
+        evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
         checked_at = datetime.now(UTC)
         result = await self._session.execute(
@@ -296,6 +300,7 @@ class SqlAlchemyToolRegistryStore:
         )
         admission = result.scalar_one_or_none()
         evidence = {
+            **evidence_summary,
             "content_type": digest_result.content_type,
             "manifest_size_bytes": digest_result.manifest_size_bytes,
             "computed_digest": digest_result.computed_digest,
@@ -313,9 +318,9 @@ class SqlAlchemyToolRegistryStore:
         admission.registry_url = digest_result.registry_url
         admission.registry_digest = digest_result.registry_digest
         admission.digest_match = digest_match
-        admission.signature_status = "not_checked"
-        admission.sbom_status = "not_checked"
-        admission.vulnerability_status = "not_checked"
+        admission.signature_status = signature_status
+        admission.sbom_status = sbom_status
+        admission.vulnerability_status = vulnerability_status
         admission.policy_decision = policy_decision
         admission.decision_reason = decision_reason
         admission.checked_at = checked_at

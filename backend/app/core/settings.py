@@ -80,6 +80,34 @@ class WorkflowQueueSettings(BaseSettings):
     redis_wakeup_ttl_seconds: int = 60
 
 
+class ShellImageSupplyChainSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SHELL_IMAGE_SUPPLY_CHAIN_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    trivy_enabled: bool = False
+    trivy_command: str = "trivy"
+    trivy_cache_dir: str = r"D:\agent-platform-cache\trivy"
+    cosign_enabled: bool = False
+    cosign_command: str = "cosign"
+    cosign_certificate_identity: str = ""
+    cosign_certificate_oidc_issuer: str = ""
+    cosign_key_ref: str = ""
+    scan_timeout_seconds: float = 120.0
+    blocked_severities: str = "HIGH,CRITICAL"
+
+    @property
+    def blocked_severity_set(self) -> frozenset[str]:
+        return frozenset(
+            severity.strip().upper()
+            for severity in self.blocked_severities.split(",")
+            if severity.strip()
+        )
+
+
 class S3Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="S3_",
@@ -187,6 +215,9 @@ class AppSettings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     workflow_queue: WorkflowQueueSettings = Field(default_factory=WorkflowQueueSettings)
+    shell_image_supply_chain: ShellImageSupplyChainSettings = Field(
+        default_factory=ShellImageSupplyChainSettings
+    )
     s3: S3Settings = Field(default_factory=S3Settings)
     milvus: MilvusSettings = Field(default_factory=MilvusSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)

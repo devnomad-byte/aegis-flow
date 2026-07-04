@@ -11,7 +11,10 @@ from backend.app.api.dependencies import (
     get_project_access_provider,
     get_tool_registry_store,
 )
-from backend.app.api.routes.tool_registry import get_oci_digest_resolver
+from backend.app.api.routes.tool_registry import (
+    get_oci_digest_resolver,
+    get_shell_image_evidence_provider,
+)
 from backend.app.execution.shell_policy import (
     ShellTemplatePolicyInput,
     build_shell_template_preview,
@@ -24,6 +27,10 @@ from backend.app.security.egress_policy import (
     EgressPolicy,
     EgressPolicyViolation,
     validate_egress_url,
+)
+from backend.app.tool_registry.image_evidence import (
+    ShellImageEvidenceResult,
+    StaticShellImageEvidenceProvider,
 )
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
@@ -648,6 +655,10 @@ class InMemoryToolRegistryStore:
         digest_match: bool,
         policy_decision: str,
         decision_reason: str,
+        signature_status: str,
+        sbom_status: str,
+        vulnerability_status: str,
+        evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
         now = datetime.now(UTC)
         existing = [
@@ -663,13 +674,14 @@ class InMemoryToolRegistryStore:
             registry_url=digest_result.registry_url,
             registry_digest=digest_result.registry_digest,
             digest_match=digest_match,
-            signature_status="not_checked",
-            sbom_status="not_checked",
-            vulnerability_status="not_checked",
+            signature_status=signature_status,
+            sbom_status=sbom_status,
+            vulnerability_status=vulnerability_status,
             policy_decision=policy_decision,
             decision_reason=decision_reason,
             checked_at=now,
             evidence={
+                **evidence_summary,
                 "content_type": digest_result.content_type,
                 "manifest_size_bytes": digest_result.manifest_size_bytes,
                 "computed_digest": digest_result.computed_digest,
@@ -861,6 +873,7 @@ def build_client(
     audit_store: InMemoryAuditEventStore,
     egress_policy: EgressPolicy | None = None,
     digest_resolver: object | None = None,
+    evidence_provider: object | None = None,
 ) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_account] = lambda: account
@@ -873,6 +886,8 @@ def build_client(
     app.dependency_overrides[get_mcp_egress_policy] = lambda: resolved_egress_policy
     if digest_resolver is not None:
         app.dependency_overrides[get_oci_digest_resolver] = lambda: digest_resolver
+    if evidence_provider is not None:
+        app.dependency_overrides[get_shell_image_evidence_provider] = lambda: evidence_provider
     return TestClient(app)
 
 
@@ -1622,6 +1637,86 @@ def test_tool_registry_resolves_shell_image_admission_and_allows_high_risk_templ
     ]
     admission_metadata = cast(dict[str, object], audit_store.events[-2]["metadata"])
     assert admission_metadata["policy_decision"] == "approved"
+
+
+def test_tool_registry_shell_image_admission_records_real_evidence_statuses_safely() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    digest = "sha256:" + ("e" * 64)
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        digest_resolver=StaticDigestResolver(
+            OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=digest,
+                computed_digest=digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            )
+        ),
+        evidence_provider=StaticShellImageEvidenceProvider(
+            ShellImageEvidenceResult(
+                signature_status="passed",
+                sbom_status="passed",
+                vulnerability_status="passed",
+                policy_decision="approved",
+                decision_reason=(
+                    "registry digest, signature, SBOM, and vulnerability evidence passed"
+                ),
+                evidence={
+                    "signature": {
+                        "tool": "cosign",
+                        "identity": "aegis-ci@example.com",
+                        "raw_payload": "raw-token-value",
+                    },
+                    "sbom": {
+                        "tool": "trivy",
+                        "format": "CycloneDX",
+                        "component_count": 12,
+                        "raw_sbom": {"components": [{"name": "secret-package"}]},
+                    },
+                    "vulnerabilities": {
+                        "tool": "trivy",
+                        "severity_counts": {"LOW": 1, "HIGH": 0, "CRITICAL": 0},
+                        "blocked_count": 0,
+                        "raw_report": {"Description": "raw details"},
+                    },
+                },
+            )
+        ),
+    )
+
+    admission = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/resolve",
+        json={
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+        },
+    )
+
+    assert admission.status_code == 200
+    body = admission.json()
+    assert body["policy_decision"] == "approved"
+    assert body["signature_status"] == "passed"
+    assert body["sbom_status"] == "passed"
+    assert body["vulnerability_status"] == "passed"
+    assert body["evidence"]["sbom"]["component_count"] == 12
+    assert body["evidence"]["vulnerabilities"]["blocked_count"] == 0
+    rendered = admission.text + repr(audit_store.events[-1])
+    assert "raw-token-value" not in rendered
+    assert "raw_sbom" not in rendered
+    assert "raw_report" not in rendered
+    metadata = cast(dict[str, object], audit_store.events[-1]["metadata"])
+    assert metadata["signature_status"] == "passed"
+    assert metadata["sbom_status"] == "passed"
+    assert metadata["vulnerability_status"] == "passed"
+    assert metadata["blocked_vulnerability_count"] == 0
 
 
 def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:

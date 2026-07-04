@@ -1,5 +1,5 @@
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote
 from uuid import UUID
@@ -7,6 +7,10 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel
 
+from backend.app.tool_registry.image_evidence import (
+    NoopShellImageEvidenceProvider,
+    ShellImageEvidenceProvider,
+)
 from backend.app.tool_registry.schemas import (
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
@@ -86,6 +90,9 @@ class OciManifestDigestResolver:
 class ShellImageAdmissionService:
     store: "ShellImageAdmissionStore"
     digest_resolver: OciDigestResolver
+    evidence_provider: ShellImageEvidenceProvider = field(
+        default_factory=NoopShellImageEvidenceProvider
+    )
 
     async def resolve_and_record(
         self,
@@ -98,15 +105,24 @@ class ShellImageAdmissionService:
         digest_match = (
             digest_result.digest_match and digest_result.registry_digest == request.image_digest
         )
-        if digest_match:
-            policy_decision = "approved"
-            reason = (
-                "registry digest matches requested digest; signature, SBOM, and vulnerability "
-                "evidence not checked"
-            )
-        else:
+        signature_status = "not_checked"
+        sbom_status = "not_checked"
+        vulnerability_status = "not_checked"
+        evidence: dict[str, object] = {}
+        if not digest_match:
             policy_decision = "rejected"
             reason = "registry digest does not match requested digest"
+        else:
+            evidence_result = await self.evidence_provider.collect(
+                image_ref=request.image_ref,
+                image_digest=request.image_digest,
+            )
+            signature_status = evidence_result.signature_status
+            sbom_status = evidence_result.sbom_status
+            vulnerability_status = evidence_result.vulnerability_status
+            policy_decision = evidence_result.policy_decision
+            reason = evidence_result.decision_reason
+            evidence = sanitize_image_evidence_summary(evidence_result.evidence)
         return await self.store.record_shell_image_admission(
             project_id=project_id,
             actor_id=actor_id,
@@ -115,6 +131,10 @@ class ShellImageAdmissionService:
             digest_match=digest_match,
             policy_decision=policy_decision,
             decision_reason=reason,
+            signature_status=signature_status,
+            sbom_status=sbom_status,
+            vulnerability_status=vulnerability_status,
+            evidence_summary=evidence,
         )
 
 
@@ -129,6 +149,10 @@ class ShellImageAdmissionStore(Protocol):
         digest_match: bool,
         policy_decision: str,
         decision_reason: str,
+        signature_status: str,
+        sbom_status: str,
+        vulnerability_status: str,
+        evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
         raise NotImplementedError
 
@@ -144,6 +168,40 @@ def parse_image_ref(image_ref: str) -> tuple[str, str, str]:
         return registry_host, repository, tag
     registry_host, repository = _split_registry_and_repo(image_ref)
     return registry_host, repository, "latest"
+
+
+def sanitize_image_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:
+    allowed_nested_keys = {
+        "signature": {"tool", "verifier", "identity", "issuer", "status"},
+        "sbom": {"tool", "format", "component_count", "status"},
+        "vulnerabilities": {
+            "tool",
+            "severity_counts",
+            "total_count",
+            "blocked_severities",
+            "blocked_count",
+            "status",
+        },
+    }
+    allowed_top_level = {
+        "content_type",
+        "manifest_size_bytes",
+        "computed_digest",
+    }
+    sanitized: dict[str, object] = {}
+    for key, value in evidence.items():
+        if key in allowed_top_level:
+            sanitized[key] = value
+            continue
+        if not isinstance(value, dict):
+            continue
+        allowed = allowed_nested_keys.get(key)
+        if allowed is None:
+            continue
+        sanitized[key] = {
+            nested_key: value[nested_key] for nested_key in allowed if nested_key in value
+        }
+    return sanitized
 
 
 def _split_registry_and_repo(image_ref_without_reference: str) -> tuple[str, str]:

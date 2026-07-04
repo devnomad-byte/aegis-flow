@@ -151,6 +151,10 @@ async def test_sqlalchemy_tool_registry_lists_and_previews_shell_templates() -> 
                 "registry digest matches requested digest; signature, SBOM, and vulnerability "
                 "evidence not checked"
             ),
+            signature_status="not_checked",
+            sbom_status="not_checked",
+            vulnerability_status="not_checked",
+            evidence_summary={},
         )
         await store.create_shell_template(
             project_id=project_id,
