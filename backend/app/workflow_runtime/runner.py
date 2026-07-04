@@ -19,6 +19,7 @@ from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
 from backend.app.tool_gateway.schemas import ToolInvocationRequest, ToolInvocationResponse
 from backend.app.tool_gateway.service import ToolGatewayServiceError
+from backend.app.workflow_runtime.agent import AgentNodeSubgraphRunner, build_agent_resume_output
 from backend.app.workflow_runtime.compiler import (
     WorkflowRuntimeState,
     _condition_path_map,
@@ -37,6 +38,7 @@ from backend.app.workflow_runtime.schemas import (
 )
 from backend.app.workflow_runtime.store import WorkflowRunStore
 from backend.app.workflows.dsl import (
+    AgentNodeData,
     ConditionNodeData,
     HttpNodeData,
     HumanApprovalNodeData,
@@ -50,7 +52,7 @@ from backend.app.workflows.schemas import WorkflowVersionRead
 
 _TEMPLATE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
 _SUPPORTED_NODE_TYPES = frozenset(
-    {"start", "llm", "condition", "mcp_tool", "http", "shell", "human_approval", "end"}
+    {"start", "agent", "llm", "condition", "mcp_tool", "http", "shell", "human_approval", "end"}
 )
 
 
@@ -423,11 +425,19 @@ class _RuntimeExecution:
             raise WorkflowRuntimeError("pending approval node does not match checkpoint")
         started = time.perf_counter()
         if pending_approval.approval_kind == "tool":
-            output = await self._resume_tool_node(
-                node=node,
-                pending_approval=pending_approval,
-                resume_request=resume_request,
-            )
+            if node.type == "agent":
+                output = await self._resume_agent_tool_node(
+                    node=node,
+                    state=state,
+                    pending_approval=pending_approval,
+                    resume_request=resume_request,
+                )
+            else:
+                output = await self._resume_tool_node(
+                    node=node,
+                    pending_approval=pending_approval,
+                    resume_request=resume_request,
+                )
         else:
             output = {
                 "status": "approved",
@@ -548,6 +558,8 @@ class _RuntimeExecution:
             return {"inputs": dict(state.get("inputs", {}))}
         if node.type == "end":
             return {"completed": True}
+        if node.type == "agent":
+            return await self._run_agent_node(node, state)
         if node.type == "llm":
             return await self._run_llm_node(node, state)
         if node.type == "condition":
@@ -561,6 +573,68 @@ class _RuntimeExecution:
         if node.type == "human_approval":
             return _build_pending_approval(node, state)
         raise WorkflowRuntimeError(f"unsupported workflow node type: {node.type}")
+
+    async def _run_agent_node(
+        self,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+    ) -> dict[str, Any]:
+        if not isinstance(node.data, AgentNodeData):
+            raise WorkflowRuntimeError(f"agent node data is invalid: {node.id}")
+        parameters = _render_json_value(
+            node.parameters,
+            _template_context(
+                state,
+                run_id=self.run_id,
+                trace_id=self.trace_id,
+                workflow_ref=self.workflow_ref,
+                node_id=node.id,
+            ),
+        )
+        if not isinstance(parameters, dict):
+            raise WorkflowRuntimeError("agent node parameters must render to an object")
+        started = time.perf_counter()
+        try:
+            output = await AgentNodeSubgraphRunner(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                workflow=self.workflow,
+                workflow_ref=self.workflow_ref,
+                node=node,
+                run_id=self.run_id,
+                trace_id=self.trace_id,
+                llm_runner=self.llm_runner,
+                tool_gateway=self.tool_gateway,
+                parameters=parameters,
+            ).run()
+        except Exception as exc:
+            await self._record_agent_subgraph_span(
+                node=node,
+                status="failed",
+                started=started,
+                attributes={
+                    "agent.status": "failed",
+                    "agent.iterations": 0,
+                    "agent.tool_calls": 0,
+                    "error.type": exc.__class__.__name__,
+                    "error.message": str(exc),
+                },
+            )
+            raise
+        await self._record_agent_subgraph_span(
+            node=node,
+            status="pending" if output.get("pending_approval") else "success",
+            started=started,
+            attributes={
+                "agent.status": output.get("status", ""),
+                "agent.iterations": output.get("iterations", 0),
+                "agent.tool_calls": output.get("tool_calls", 0),
+                "agent.max_iterations": node.data.budget.max_iterations,
+                "agent.max_tool_calls": node.data.budget.max_tool_calls,
+                "agent.autonomy_level": node.data.autonomy_level,
+            },
+        )
+        return output
 
     async def _run_llm_node(
         self,
@@ -754,6 +828,45 @@ class _RuntimeExecution:
             raise WorkflowRuntimeError("resumed tool invocation does not match workflow node")
         return _tool_response_to_output(response, node=node)
 
+    async def _resume_agent_tool_node(
+        self,
+        *,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+        pending_approval: WorkflowPendingApproval,
+        resume_request: WorkflowRunResumeRequest,
+    ) -> dict[str, Any]:
+        if not isinstance(node.data, AgentNodeData):
+            raise WorkflowRuntimeError(f"agent node data is invalid: {node.id}")
+        started = time.perf_counter()
+        tool_output = await self._resume_tool_node(
+            node=node,
+            pending_approval=pending_approval,
+            resume_request=resume_request,
+        )
+        output = build_agent_resume_output(
+            node=node,
+            state=dict(state),
+            pending_approval=pending_approval,
+            tool_output=tool_output,
+        )
+        await self._record_agent_subgraph_span(
+            node=node,
+            status="success",
+            started=started,
+            attributes={
+                "agent.status": "success",
+                "agent.iterations": output.get("iterations", 0),
+                "agent.tool_calls": output.get("tool_calls", 0),
+                "agent.max_iterations": node.data.budget.max_iterations,
+                "agent.max_tool_calls": node.data.budget.max_tool_calls,
+                "agent.autonomy_level": node.data.autonomy_level,
+                "resume": True,
+            },
+            span_suffix=f"resume:{uuid4().hex}",
+        )
+        return output
+
     async def _record_policy_event(
         self,
         *,
@@ -855,6 +968,50 @@ class _RuntimeExecution:
                 links=[],
                 resource={"service.name": "aegis-flow-runtime"},
                 source_type="workflow_runtime_node",
+                source_id=f"{self.run_id}:{node.id}{suffix}",
+                created_by=self.request.actor_id,
+                updated_by=self.request.actor_id,
+            )
+        )
+
+    async def _record_agent_subgraph_span(
+        self,
+        *,
+        node: NodeDefinition,
+        status: str,
+        started: float,
+        attributes: dict[str, Any],
+        span_suffix: str = "",
+    ) -> None:
+        now_nano = time.time_ns()
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        suffix = f":{span_suffix}" if span_suffix else ""
+        await self.trace_store.record_span(
+            RuntimeTraceSpanCreate(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                trace_id=self.trace_id,
+                run_id=self.run_id,
+                workflow_ref=self.workflow_ref,
+                node_id=node.id,
+                parent_span_id=f"workflow:{self.run_id}:{node.id}",
+                span_id=f"agent:{self.run_id}:{node.id}{suffix}",
+                span_name="agent.subgraph",
+                span_kind="internal",
+                component="agent_runtime",
+                status=cast(Any, status),
+                start_time_unix_nano=max(0, now_nano - duration_ms * 1_000_000),
+                end_time_unix_nano=now_nano,
+                duration_ms=duration_ms,
+                attributes={
+                    **attributes,
+                    "node_type": node.type,
+                    "node_name": node.name,
+                },
+                events=[],
+                links=[],
+                resource={"service.name": "aegis-flow-runtime"},
+                source_type="agent_subgraph",
                 source_id=f"{self.run_id}:{node.id}{suffix}",
                 created_by=self.request.actor_id,
                 updated_by=self.request.actor_id,

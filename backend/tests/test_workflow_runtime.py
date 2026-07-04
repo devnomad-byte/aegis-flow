@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -26,6 +27,8 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunUpdate,
 )
 from backend.app.workflows.dsl import (
+    AgentBudget,
+    AgentNodeData,
     ConditionNodeData,
     EdgeDefinition,
     HttpNodeData,
@@ -80,6 +83,7 @@ async def test_runtime_executes_published_workflow_through_gateways_and_records_
             "arguments": {"message": "hello runtime"},
             "tool_group_refs": ["runtime.tools"],
             "workflow_ref": "runtime_flow:1",
+            "agent_ref": "",
             "run_id": result.run_id,
             "node_id": "tool_1",
             "trace_id": result.trace_id,
@@ -432,6 +436,263 @@ async def test_runtime_executes_http_node_through_http_execution_gateway() -> No
     assert http_attributes["node_type"] == "http"
 
 
+@pytest.mark.asyncio
+async def test_runtime_executes_agent_node_subgraph_through_model_and_tool_gateways() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_agent_node())
+    store = InMemoryWorkflowRunStore()
+    policy_store = InMemoryPolicyGateStore()
+    trace_store = InMemoryTraceStore()
+    llm_runner = RecordingLlmRunner(
+        contents=[
+            (
+                '{"action":"tool","tool_ref":"real-mcp.echo_risky",'
+                '"arguments":{"message":"hello agent"},"reason":"need evidence"}'
+            ),
+            '{"action":"final","answer":"agent saw echo:hello agent"}',
+        ]
+    )
+    tool_gateway = RecordingToolGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=policy_store,
+        trace_store=trace_store,
+        llm_runner=llm_runner,
+        tool_gateway=tool_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello agent"},
+            run_id="run-agent-test",
+            trace_id="trace-agent-test",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["nodes"]["agent_1"]["status"] == "success"
+    assert result.outputs["nodes"]["agent_1"]["final_answer"] == "agent saw echo:hello agent"
+    assert result.outputs["nodes"]["agent_1"]["iterations"] == 2
+    assert result.outputs["nodes"]["agent_1"]["tool_calls"] == 1
+    assert [call.node_id for call in llm_runner.calls] == ["agent_1_plan", "agent_1_plan"]
+    assert tool_gateway.calls == [
+        {
+            "tool_ref": "real-mcp.echo_risky",
+            "arguments": {"message": "hello agent"},
+            "tool_group_refs": ["runtime.tools"],
+            "workflow_ref": "agent_flow:1",
+            "agent_ref": "agent_1",
+            "run_id": "run-agent-test",
+            "node_id": "agent_1",
+            "trace_id": "trace-agent-test",
+        }
+    ]
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "agent_1",
+        "end_1",
+    ]
+    agent_span = next(
+        span
+        for span in trace_store.spans
+        if span["node_id"] == "agent_1" and span["span_name"] == "agent.subgraph"
+    )
+    agent_attributes = cast(dict[str, Any], agent_span["attributes"])
+    assert agent_attributes["agent.iterations"] == 2
+    assert agent_attributes["agent.tool_calls"] == 1
+    assert "hello agent" not in str(agent_span)
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_node_pending_tool_approval_resumes_without_second_invoke() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    approval_task_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_agent_node())
+    store = InMemoryWorkflowRunStore()
+    tool_gateway = RecordingToolGateway(
+        pending_approval=True,
+        approval_task_id=approval_task_id,
+    )
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(
+            contents=[
+                (
+                    '{"action":"tool","tool_ref":"real-mcp.echo_risky",'
+                    '"arguments":{"message":"hello agent"},"reason":"needs approval"}'
+                )
+            ]
+        ),
+        tool_gateway=tool_gateway,
+    )
+
+    pending = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello agent"},
+            run_id="run-agent-approval",
+            trace_id="trace-agent-approval",
+        )
+    )
+
+    assert pending.status == "pending_approval"
+    assert pending.pending_approval is not None
+    assert pending.pending_approval.node_id == "agent_1"
+    assert pending.pending_approval.approval_kind == "tool"
+    assert pending.pending_approval.approval_task_id == approval_task_id
+    assert store.checkpoints[-1].node_id == "agent_1"
+    assert store.checkpoints[-1].status == "pending_approval"
+
+    result = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id=pending.run_id,
+            approval_task_id=approval_task_id,
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["nodes"]["agent_1"]["status"] == "success"
+    assert result.outputs["nodes"]["agent_1"]["tool_calls"] == 1
+    assert result.outputs["nodes"]["agent_1"]["observations"][0]["structured_content"] == {
+        "echo": "hello runtime"
+    }
+    assert len(tool_gateway.calls) == 1
+    assert tool_gateway.resume_calls == [approval_task_id]
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "agent_1",
+        "agent_1",
+        "end_1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_node_enforces_tool_budget_before_tool_gateway_call() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(
+        project_id=project_id,
+        workflow=workflow_with_agent_node(max_tool_calls=0),
+    )
+    tool_gateway = RecordingToolGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=InMemoryWorkflowRunStore(),
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(
+            contents=[
+                (
+                    '{"action":"tool","tool_ref":"real-mcp.echo_risky",'
+                    '"arguments":{"message":"hello agent"},"reason":"try tool"}'
+                )
+            ]
+        ),
+        tool_gateway=tool_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello agent"},
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "agent node tool budget exceeded"
+    assert tool_gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_node_enforces_runtime_budget_before_tool_gateway_call() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(
+        project_id=project_id,
+        workflow=workflow_with_agent_node(max_runtime_seconds=1),
+    )
+    tool_gateway = RecordingToolGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=InMemoryWorkflowRunStore(),
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(
+            contents=[
+                (
+                    '{"action":"tool","tool_ref":"real-mcp.echo_risky",'
+                    '"arguments":{"message":"hello agent"},"reason":"try after slow plan"}'
+                )
+            ],
+            delay_seconds=1.1,
+        ),
+        tool_gateway=tool_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello agent"},
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "agent node runtime budget exceeded"
+    assert tool_gateway.calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_node_blocks_tool_call_when_autonomy_level_is_zero() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(
+        project_id=project_id,
+        workflow=workflow_with_agent_node(autonomy_level=0),
+    )
+    tool_gateway = RecordingToolGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=InMemoryWorkflowRunStore(),
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(
+            contents=[
+                (
+                    '{"action":"tool","tool_ref":"real-mcp.echo_risky",'
+                    '"arguments":{"message":"hello agent"},"reason":"not allowed"}'
+                )
+            ]
+        ),
+        tool_gateway=tool_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello agent"},
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "agent node autonomy level does not allow tool calls"
+    assert tool_gateway.calls == []
+
+
 def test_compiler_rejects_non_published_workflow_version() -> None:
     project_id = uuid4()
     version = make_version(
@@ -452,6 +713,17 @@ def test_compiler_builds_langgraph_for_supported_nodes() -> None:
 
     assert compiled.workflow_ref == "shell_flow:1"
     assert compiled.supported_node_ids == ["start_1", "shell_1", "end_1"]
+    assert compiled.graph is not None
+
+
+def test_compiler_builds_langgraph_for_agent_node() -> None:
+    project_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_agent_node())
+
+    compiled = compile_workflow_version(version)
+
+    assert compiled.workflow_ref == "agent_flow:1"
+    assert compiled.supported_node_ids == ["start_1", "agent_1", "end_1"]
     assert compiled.graph is not None
 
 
@@ -542,16 +814,30 @@ class InMemoryTraceStore:
 
 
 class RecordingLlmRunner:
-    def __init__(self, *, content: str) -> None:
+    def __init__(
+        self,
+        *,
+        content: str = "",
+        contents: list[str] | None = None,
+        delay_seconds: float = 0,
+    ) -> None:
         self.content = content
+        self.contents = contents or []
+        self.delay_seconds = delay_seconds
         self.calls: list[LlmNodeRunRequest] = []
 
     async def run(self, request: LlmNodeRunRequest) -> LlmNodeRunResult:
         self.calls.append(request)
+        if self.delay_seconds:
+            await asyncio.sleep(self.delay_seconds)
+        if self.contents:
+            content = self.contents[min(len(self.calls), len(self.contents)) - 1]
+        else:
+            content = self.content
         return LlmNodeRunResult(
             provider="openai-compatible",
             model="gpt-5.5",
-            content=self.content,
+            content=content,
             finish_reason="stop",
             usage={"total_tokens": 8},
             latency_ms=5,
@@ -586,6 +872,7 @@ class RecordingToolGateway:
                 "arguments": payload["arguments"],
                 "tool_group_refs": payload["tool_group_refs"],
                 "workflow_ref": payload["workflow_ref"],
+                "agent_ref": payload["agent_ref"],
                 "run_id": payload["run_id"],
                 "node_id": payload["node_id"],
                 "trace_id": payload["trace_id"],
@@ -703,7 +990,7 @@ class RecordingToolGateway:
             server_ref="real-mcp",
             tool_group_refs=["runtime.tools"],
             workflow_ref=str(request_payload["workflow_ref"]),
-            agent_ref="",
+            agent_ref=str(request_payload["agent_ref"]),
             role_refs=[],
             run_id=str(request_payload["run_id"]),
             node_id=str(request_payload["node_id"]),
@@ -929,6 +1216,51 @@ def workflow_with_http_node() -> WorkflowDefinition:
         edges=[
             EdgeDefinition(source="start_1", target="http_1"),
             EdgeDefinition(source="http_1", target="end_1"),
+        ],
+    )
+
+
+def workflow_with_agent_node(
+    *,
+    max_tool_calls: int = 2,
+    max_runtime_seconds: int = 120,
+    autonomy_level: int = 1,
+) -> WorkflowDefinition:
+    return WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="agent_flow",
+            name="Agent Flow",
+            project_id="runtime-project",
+            version=1,
+            status="published",
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="agent_1",
+                name="Incident Agent",
+                type="agent",
+                data=AgentNodeData(
+                    goal="Use evidence tools and return a final incident summary.",
+                    tool_groups=["runtime.tools"],
+                    autonomy_level=cast(Any, autonomy_level),
+                    budget=AgentBudget(
+                        max_iterations=4,
+                        max_tool_calls=max_tool_calls,
+                        max_runtime_seconds=max_runtime_seconds,
+                    ),
+                ),
+                parameters={
+                    "allowed_tool_refs": ["real-mcp.echo_risky"],
+                    "context": {"message": "{{message}}"},
+                },
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="agent_1"),
+            EdgeDefinition(source="agent_1", target="end_1"),
         ],
     )
 

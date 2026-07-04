@@ -10,6 +10,7 @@ from backend.app.workflows.schemas import WorkflowVersionRead
 SUPPORTED_NODE_TYPES = frozenset(
     {
         "start",
+        "agent",
         "llm",
         "condition",
         "mcp_tool",
