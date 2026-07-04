@@ -5,8 +5,11 @@ from backend.app.audit.sqlalchemy_store import SqlAlchemyAuditEventStore
 from backend.app.audit.store import AuditEventStore
 from backend.app.core.settings import AppSettings
 from backend.app.db.session import get_async_session
-from backend.app.execution.gateway import ShellExecutionGatewayService
-from backend.app.execution.sqlalchemy_store import SqlAlchemyShellInvocationStore
+from backend.app.execution.gateway import HttpExecutionGatewayService, ShellExecutionGatewayService
+from backend.app.execution.sqlalchemy_store import (
+    SqlAlchemyHttpInvocationStore,
+    SqlAlchemyShellInvocationStore,
+)
 from backend.app.global_command.sqlalchemy_store import SqlAlchemyGlobalCommandCenterStore
 from backend.app.global_command.store import GlobalCommandCenterStore
 from backend.app.iam.access import AccountPrincipal
@@ -156,6 +159,12 @@ def get_shell_invocation_store(
     return SqlAlchemyShellInvocationStore(session)
 
 
+def get_http_invocation_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> SqlAlchemyHttpInvocationStore:
+    return SqlAlchemyHttpInvocationStore(session)
+
+
 def get_mcp_tools_client() -> McpToolsClient:
     return HttpMcpToolsClient()
 
@@ -173,6 +182,7 @@ def get_workflow_run_store(
 ToolRegistryStoreDependency = Depends(get_tool_registry_store)
 ToolInvocationStoreDependency = Depends(get_tool_invocation_store)
 ShellInvocationStoreDependency = Depends(get_shell_invocation_store)
+HttpInvocationStoreDependency = Depends(get_http_invocation_store)
 AuditEventStoreDependency = Depends(get_audit_event_store)
 McpToolCallClientDependency = Depends(get_mcp_tool_call_client)
 ModelGatewayStoreDependency = Depends(get_model_gateway_store)
@@ -205,6 +215,25 @@ def get_shell_execution_gateway_service(
     )
 
 
+def get_http_egress_policy() -> EgressPolicy:
+    return EgressPolicy()
+
+
+HttpEgressPolicyDependency = Depends(get_http_egress_policy)
+
+
+def get_http_execution_gateway_service(
+    registry_store: ToolRegistryStore = ToolRegistryStoreDependency,
+    invocation_store: SqlAlchemyHttpInvocationStore = HttpInvocationStoreDependency,
+    egress_policy: EgressPolicy = HttpEgressPolicyDependency,
+) -> HttpExecutionGatewayService:
+    return HttpExecutionGatewayService(
+        environment_store=registry_store,
+        invocation_store=invocation_store,
+        egress_policy=egress_policy,
+    )
+
+
 def get_llm_node_runner(
     model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStoreDependency,
 ) -> LlmNodeRunner:
@@ -220,6 +249,7 @@ def get_llm_node_runner(
 LlmNodeRunnerDependency = Depends(get_llm_node_runner)
 ToolGatewayServiceDependency = Depends(get_tool_gateway_service)
 ShellExecutionGatewayServiceDependency = Depends(get_shell_execution_gateway_service)
+HttpExecutionGatewayServiceDependency = Depends(get_http_execution_gateway_service)
 
 
 def get_workflow_runtime_runner(
@@ -229,6 +259,7 @@ def get_workflow_runtime_runner(
     llm_runner: LlmNodeRunner = LlmNodeRunnerDependency,
     tool_gateway: ToolGatewayService = ToolGatewayServiceDependency,
     execution_gateway: ShellExecutionGatewayService = ShellExecutionGatewayServiceDependency,
+    http_execution_gateway: HttpExecutionGatewayService = HttpExecutionGatewayServiceDependency,
 ) -> WorkflowRuntimeRunner:
     return WorkflowRuntimeRunner(
         run_store=run_store,
@@ -237,6 +268,7 @@ def get_workflow_runtime_runner(
         llm_runner=llm_runner,
         tool_gateway=tool_gateway,
         execution_gateway=execution_gateway,
+        http_execution_gateway=http_execution_gateway,
     )
 
 

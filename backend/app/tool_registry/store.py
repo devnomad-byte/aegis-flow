@@ -67,6 +67,14 @@ class ToolRegistryStore(Protocol):
     ) -> EnvironmentRead:
         raise NotImplementedError
 
+    async def get_active_environment(
+        self,
+        *,
+        project_id: UUID,
+        environment_key: str,
+    ) -> EnvironmentRead | None:
+        raise NotImplementedError
+
     async def create_mcp_server(
         self,
         *,

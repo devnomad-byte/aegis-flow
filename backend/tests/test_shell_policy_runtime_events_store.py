@@ -2,8 +2,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from backend.app.db.base import Base
-from backend.app.execution.schemas import ShellInvocationCreate
-from backend.app.execution.sqlalchemy_store import SqlAlchemyShellInvocationStore
+from backend.app.execution.schemas import HttpInvocationCreate, ShellInvocationCreate
+from backend.app.execution.sqlalchemy_store import (
+    SqlAlchemyHttpInvocationStore,
+    SqlAlchemyShellInvocationStore,
+)
 from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
 from backend.app.policy_gate.sqlalchemy_store import SqlAlchemyPolicyGateEventStore
@@ -171,6 +174,93 @@ def test_shell_invocation_create_rejects_raw_command_and_raw_output_fields() -> 
         ShellInvocationCreate.model_validate(payload)
 
 
+@pytest.mark.asyncio
+async def test_http_invocation_store_records_ledger_and_runtime_span_by_project_scope() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        store = SqlAlchemyHttpInvocationStore(session)
+        project_id = uuid4()
+        other_project_id = uuid4()
+        actor_id = uuid4()
+
+        await store.record_http_invocation(
+            make_http_invocation(
+                project_id=project_id,
+                actor_id=actor_id,
+                invocation_ref="http-call-1",
+                run_id="run-1",
+                node_id="http_1",
+                trace_id="trace-1",
+            )
+        )
+        await store.record_http_invocation(
+            make_http_invocation(
+                project_id=project_id,
+                actor_id=actor_id,
+                invocation_ref="http-call-2",
+                run_id="run-2",
+                node_id="http_1",
+                trace_id="trace-1",
+            )
+        )
+        await store.record_http_invocation(
+            make_http_invocation(
+                project_id=other_project_id,
+                actor_id=actor_id,
+                invocation_ref="http-call-other-project",
+                run_id="run-1",
+                node_id="http_1",
+                trace_id="trace-1",
+            )
+        )
+
+        invocations = await store.list_http_invocations(
+            project_id=project_id,
+            run_id="run-1",
+            node_id="http_1",
+            trace_id="trace-1",
+        )
+        trace_spans = list(
+            await session.scalars(
+                select(RuntimeTraceSpan)
+                .where(RuntimeTraceSpan.project_id == project_id)
+                .order_by(RuntimeTraceSpan.created_at)
+            )
+        )
+
+    await engine.dispose()
+
+    assert len(invocations) == 1
+    assert invocations[0].project_id == project_id
+    assert invocations[0].invocation_ref == "http-call-1"
+    assert [span.span_id for span in trace_spans] == ["http:http-call-1", "http:http-call-2"]
+    assert trace_spans[0].component == "http_runner"
+    assert trace_spans[0].source_type == "http_runner_invocation"
+    assert trace_spans[0].attributes["http.action_ref"] == "echo-http"
+
+
+def test_http_invocation_create_rejects_raw_request_and_response_fields() -> None:
+    payload = make_http_invocation(
+        project_id=uuid4(),
+        actor_id=uuid4(),
+        invocation_ref="http-call-raw",
+        run_id="run-1",
+        node_id="http_1",
+        trace_id="trace-1",
+    ).model_dump()
+    payload["raw_url"] = "https://api.example.com?token=raw"
+    payload["raw_headers"] = {"authorization": "Bearer raw"}
+    payload["raw_body"] = {"password": "hunter2"}
+    payload["raw_response"] = {"secret": "raw"}
+
+    with pytest.raises(ValidationError):
+        HttpInvocationCreate.model_validate(payload)
+
+
 def test_policy_gate_event_create_rejects_raw_policy_input() -> None:
     payload = make_policy_event(
         project_id=uuid4(),
@@ -218,6 +308,41 @@ def make_shell_invocation(
         resource_usage={"cpu_seconds": 0.32, "memory_peak_bytes": 12_345_678},
         stdout_summary="collected 10 lines",
         stderr_summary="",
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+
+
+def make_http_invocation(
+    *,
+    project_id: UUID,
+    actor_id: UUID,
+    invocation_ref: str,
+    run_id: str,
+    node_id: str,
+    trace_id: str,
+) -> HttpInvocationCreate:
+    return HttpInvocationCreate(
+        project_id=project_id,
+        actor_id=actor_id,
+        invocation_ref=invocation_ref,
+        action_ref="echo-http",
+        method="POST",
+        url_hash="sha256:rendered-url",
+        target_host="api.example.com",
+        target_port=443,
+        egress_profile_ref="egress-dev",
+        egress_proxy_mode="direct",
+        workflow_ref="incident-response",
+        run_id=run_id,
+        node_id=node_id,
+        trace_id=trace_id,
+        status="success",
+        http_status_code=200,
+        duration_ms=32,
+        request_summary='{"header_keys":["authorization"]}',
+        response_summary='{"echo":"ok"}',
+        response_json={"echo": "ok"},
         created_by=actor_id,
         updated_by=actor_id,
     )

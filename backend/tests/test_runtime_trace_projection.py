@@ -1,9 +1,10 @@
 from uuid import uuid4
 
-from backend.app.execution.models import ShellRunnerInvocation
+from backend.app.execution.models import HttpRunnerInvocation, ShellRunnerInvocation
 from backend.app.knowledge.models import RetrievalQueryLog
 from backend.app.model_gateway.models import ModelGatewayInvocation, ModelGatewayPolicy
 from backend.app.observability.projection import (
+    http_invocation_to_span,
     model_invocation_to_span,
     policy_gate_event_to_span,
     retrieval_query_log_to_span,
@@ -200,6 +201,59 @@ def test_shell_invocation_projects_to_runtime_span_without_raw_command_or_output
     assert "raw-provider-token" not in str(span)
     assert "raw-shell-token" not in str(span)
     assert "hunter2" not in str(span)
+
+
+def test_http_invocation_projects_to_runtime_span_without_raw_request_or_response() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    invocation = HttpRunnerInvocation(
+        project_id=project_id,
+        actor_id=actor_id,
+        invocation_ref="http-call-1",
+        action_ref="echo-http",
+        method="POST",
+        url_hash="sha256:rendered-url",
+        target_host="api.example.com",
+        target_port=443,
+        egress_profile_ref="egress-dev",
+        egress_proxy_mode="direct",
+        workflow_ref="incident-response",
+        run_id="run-1",
+        node_id="http_1",
+        trace_id="trace-1",
+        status="success",
+        http_status_code=200,
+        duration_ms=32,
+        request_summary='{"header_keys":["authorization"],"has_body":true}',
+        response_summary='{"echo":"ok","authorization":"Bearer raw-http-token"}',
+        response_json={"echo": "ok"},
+        error_type="",
+        error_message="",
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+
+    span = http_invocation_to_span(invocation)
+
+    assert span.project_id == project_id
+    assert span.actor_id == actor_id
+    assert span.trace_id == "trace-1"
+    assert span.run_id == "run-1"
+    assert span.node_id == "http_1"
+    assert span.span_id == "http:http-call-1"
+    assert span.span_name == "http.client"
+    assert span.span_kind == "client"
+    assert span.component == "http_runner"
+    assert span.status == "success"
+    assert span.duration_ms == 32
+    assert span.attributes["http.action_ref"] == "echo-http"
+    assert span.attributes["http.method"] == "POST"
+    assert span.attributes["http.status_code"] == 200
+    assert span.attributes["http.target_host"] == "api.example.com"
+    assert span.attributes["http.target_port"] == 443
+    assert span.attributes["http.url_hash"] == "sha256:rendered-url"
+    assert "[redacted]" in span.attributes["response_summary"]
+    assert "raw-http-token" not in str(span)
 
 
 def test_policy_gate_event_projects_to_runtime_span_without_policy_input_or_secret() -> None:

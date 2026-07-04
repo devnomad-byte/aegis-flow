@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from backend.app.execution.models import ShellRunnerInvocation
+from backend.app.execution.models import HttpRunnerInvocation, ShellRunnerInvocation
 from backend.app.knowledge.models import RetrievalQueryLog
 from backend.app.model_gateway.models import ModelGatewayInvocation
 from backend.app.observability.schemas import RuntimeSpanStatus, RuntimeTraceSpanCreate
@@ -179,6 +179,49 @@ def shell_invocation_to_span(invocation: ShellRunnerInvocation) -> RuntimeTraceS
     )
 
 
+def http_invocation_to_span(invocation: HttpRunnerInvocation) -> RuntimeTraceSpanCreate:
+    start_nano, end_nano = _time_window_to_nanos(invocation.created_at, invocation.duration_ms)
+    attributes = {
+        "http.action_ref": invocation.action_ref,
+        "http.method": invocation.method,
+        "http.status_code": invocation.http_status_code,
+        "http.target_host": invocation.target_host,
+        "http.target_port": invocation.target_port,
+        "http.url_hash": invocation.url_hash,
+        "http.egress_profile_ref": invocation.egress_profile_ref,
+        "http.egress_proxy_mode": invocation.egress_proxy_mode,
+        "request_summary": invocation.request_summary,
+        "response_summary": invocation.response_summary,
+        "error.type": invocation.error_type,
+        "error.message": invocation.error_message,
+    }
+    return RuntimeTraceSpanCreate(
+        project_id=invocation.project_id,
+        actor_id=invocation.actor_id,
+        trace_id=_trace_id_or_fallback(invocation.trace_id, invocation.invocation_ref),
+        run_id=invocation.run_id,
+        workflow_ref=invocation.workflow_ref,
+        node_id=invocation.node_id,
+        parent_span_id="",
+        span_id=f"http:{invocation.invocation_ref}",
+        span_name="http.client",
+        span_kind="client",
+        component="http_runner",
+        status=_map_http_status(invocation.status),
+        start_time_unix_nano=start_nano,
+        end_time_unix_nano=end_nano,
+        duration_ms=invocation.duration_ms,
+        attributes=sanitize_trace_value(_drop_empty(attributes)),
+        events=[],
+        links=[],
+        resource={"service.name": "aegis-flow-runtime"},
+        source_type="http_runner_invocation",
+        source_id=str(invocation.id or invocation.invocation_ref),
+        created_by=invocation.created_by,
+        updated_by=invocation.updated_by,
+    )
+
+
 def policy_gate_event_to_span(event: PolicyGateEvent) -> RuntimeTraceSpanCreate:
     start_nano, end_nano = _time_window_to_nanos(event.created_at, event.duration_ms)
     attributes = {
@@ -241,6 +284,16 @@ def _map_status(status: str) -> RuntimeSpanStatus:
 
 
 def _map_shell_status(status: str) -> RuntimeSpanStatus:
+    if status == "success":
+        return "success"
+    if status == "denied":
+        return "denied"
+    if status == "cancelled":
+        return "cancelled"
+    return "failed"
+
+
+def _map_http_status(status: str) -> RuntimeSpanStatus:
     if status == "success":
         return "success"
     if status == "denied":

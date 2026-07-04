@@ -8,7 +8,12 @@ from uuid import UUID, uuid4
 
 from langgraph.graph import END, START, StateGraph
 
-from backend.app.execution.gateway import ShellExecutionRequest, ShellExecutionResult
+from backend.app.execution.gateway import (
+    HttpExecutionRequest,
+    HttpExecutionResult,
+    ShellExecutionRequest,
+    ShellExecutionResult,
+)
 from backend.app.model_gateway.runner import LlmNodeRunRequest, LlmNodeRunResult
 from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
@@ -33,6 +38,7 @@ from backend.app.workflow_runtime.schemas import (
 from backend.app.workflow_runtime.store import WorkflowRunStore
 from backend.app.workflows.dsl import (
     ConditionNodeData,
+    HttpNodeData,
     HumanApprovalNodeData,
     LlmNodeData,
     McpToolNodeData,
@@ -44,7 +50,7 @@ from backend.app.workflows.schemas import WorkflowVersionRead
 
 _TEMPLATE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
 _SUPPORTED_NODE_TYPES = frozenset(
-    {"start", "llm", "condition", "mcp_tool", "shell", "human_approval", "end"}
+    {"start", "llm", "condition", "mcp_tool", "http", "shell", "human_approval", "end"}
 )
 
 
@@ -88,6 +94,11 @@ class ShellExecutionRuntimeClient(Protocol):
         raise NotImplementedError
 
 
+class HttpExecutionRuntimeClient(Protocol):
+    async def run_http(self, request: HttpExecutionRequest) -> HttpExecutionResult:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class WorkflowRuntimeRunner:
     run_store: WorkflowRunStore
@@ -96,6 +107,7 @@ class WorkflowRuntimeRunner:
     llm_runner: LlmNodeRuntimeRunner
     tool_gateway: ToolGatewayRuntimeClient
     execution_gateway: ShellExecutionRuntimeClient | None = None
+    http_execution_gateway: HttpExecutionRuntimeClient | None = None
 
     async def run(self, request: WorkflowRunRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -115,6 +127,7 @@ class WorkflowRuntimeRunner:
             llm_runner=self.llm_runner,
             tool_gateway=self.tool_gateway,
             execution_gateway=self.execution_gateway,
+            http_execution_gateway=self.http_execution_gateway,
         )
         run_record = await self.run_store.create_run(
             WorkflowRunCreate(
@@ -245,6 +258,7 @@ class WorkflowRuntimeRunner:
             llm_runner=self.llm_runner,
             tool_gateway=self.tool_gateway,
             execution_gateway=self.execution_gateway,
+            http_execution_gateway=self.http_execution_gateway,
             workflow_run_id=run_record.id,
         )
 
@@ -353,6 +367,7 @@ class _RuntimeExecution:
     llm_runner: LlmNodeRuntimeRunner
     tool_gateway: ToolGatewayRuntimeClient
     execution_gateway: ShellExecutionRuntimeClient | None = None
+    http_execution_gateway: HttpExecutionRuntimeClient | None = None
     workflow_run_id: UUID | None = None
     node_results: list[WorkflowNodeRunResult] = None  # type: ignore[assignment]
 
@@ -539,6 +554,8 @@ class _RuntimeExecution:
             return _evaluate_condition_node(node, state)
         if node.type == "mcp_tool":
             return await self._run_tool_node(node, state)
+        if node.type == "http":
+            return await self._run_http_node(node, state)
         if node.type == "shell":
             return await self._run_shell_node(node, state)
         if node.type == "human_approval":
@@ -640,6 +657,73 @@ class _RuntimeExecution:
             "sandbox_image": result.sandbox_image,
             "sandbox_image_digest": result.sandbox_image_digest,
             "network_mode": result.network_mode,
+        }
+        if result.status != "success":
+            raise WorkflowRuntimeError(result.error_message or result.status)
+        return output
+
+    async def _run_http_node(
+        self,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+    ) -> dict[str, Any]:
+        if self.http_execution_gateway is None:
+            raise WorkflowRuntimeError("http execution gateway is not configured")
+        if not isinstance(node.data, HttpNodeData):
+            raise WorkflowRuntimeError(f"http node data is invalid: {node.id}")
+        parameters = _render_json_value(
+            node.parameters,
+            _template_context(
+                state,
+                run_id=self.run_id,
+                trace_id=self.trace_id,
+                workflow_ref=self.workflow_ref,
+                node_id=node.id,
+            ),
+        )
+        if not isinstance(parameters, dict):
+            raise WorkflowRuntimeError("http node parameters must render to an object")
+        query = parameters.get("query", {})
+        headers = parameters.get("headers", {})
+        body = parameters.get("body")
+        if query is None:
+            query = {}
+        if headers is None:
+            headers = {}
+        if not isinstance(query, dict):
+            raise WorkflowRuntimeError("http node query parameters must render to an object")
+        if not isinstance(headers, dict):
+            raise WorkflowRuntimeError("http node headers must render to an object")
+        result = await self.http_execution_gateway.run_http(
+            HttpExecutionRequest(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                workflow_ref=self.workflow_ref,
+                run_id=self.run_id,
+                node_id=node.id,
+                trace_id=self.trace_id,
+                action_ref=node.data.action_ref,
+                method=node.data.method,
+                url=node.data.url,
+                tool_group_ref=node.data.tool_group_ref,
+                environment=node.data.environment,
+                egress_profile_ref=node.data.egress_profile_ref,
+                query=query,
+                headers=headers,
+                body=body,
+                timeout_seconds=node.timeout_seconds or 30,
+            )
+        )
+        output = {
+            "status": result.status,
+            "http_status_code": result.http_status_code,
+            "duration_ms": result.duration_ms,
+            "response_summary": result.response_summary,
+            "json": result.response_json,
+            "invocation_id": result.invocation_id,
+            "target_host": result.target_host,
+            "target_port": result.target_port,
+            "egress_proxy_mode": result.egress_proxy_mode,
         }
         if result.status != "success":
             raise WorkflowRuntimeError(result.error_message or result.status)
@@ -905,12 +989,27 @@ def _build_pending_approval(
     return {"pending_approval": pending.model_dump(mode="json")}
 
 
-def _template_context(state: WorkflowRuntimeState) -> dict[str, Any]:
+def _template_context(
+    state: WorkflowRuntimeState,
+    *,
+    run_id: str = "",
+    trace_id: str = "",
+    workflow_ref: str = "",
+    node_id: str = "",
+) -> dict[str, Any]:
     context: dict[str, Any] = {}
     context.update(state.get("inputs", {}))
     last = state.get("last", {})
     if isinstance(last, dict):
         context.update(last)
+    context.update(
+        {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "workflow_ref": workflow_ref,
+            "node_id": node_id,
+        }
+    )
     return context
 
 

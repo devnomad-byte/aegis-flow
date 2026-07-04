@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -27,6 +28,7 @@ from backend.app.workflow_runtime.schemas import (
 from backend.app.workflows.dsl import (
     ConditionNodeData,
     EdgeDefinition,
+    HttpNodeData,
     HumanApprovalNodeData,
     LlmNodeData,
     McpToolNodeData,
@@ -357,6 +359,79 @@ async def test_runtime_executes_shell_node_through_execution_gateway() -> None:
     assert shell_attributes["node_type"] == "shell"
 
 
+@pytest.mark.asyncio
+async def test_runtime_executes_http_node_through_http_execution_gateway() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_http_node())
+    store = InMemoryWorkflowRunStore()
+    policy_store = InMemoryPolicyGateStore()
+    trace_store = InMemoryTraceStore()
+    http_execution_gateway = RecordingHttpExecutionGateway()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=policy_store,
+        trace_store=trace_store,
+        llm_runner=RecordingLlmRunner(content="unused"),
+        tool_gateway=RecordingToolGateway(),
+        http_execution_gateway=http_execution_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"message": "hello http"},
+            run_id="run-http-test",
+            trace_id="trace-http-test",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["nodes"]["http_1"] == {
+        "status": "success",
+        "http_status_code": 200,
+        "duration_ms": 9,
+        "response_summary": '{"echo":"hello http"}',
+        "json": {"echo": "hello http"},
+        "invocation_id": "http-call-1",
+        "target_host": "api.example.com",
+        "target_port": 443,
+        "egress_proxy_mode": "direct",
+    }
+    assert len(http_execution_gateway.calls) == 1
+    call = http_execution_gateway.calls[0]
+    assert call.project_id == project_id
+    assert call.actor_id == actor_id
+    assert call.workflow_ref == "http_flow:1"
+    assert call.run_id == "run-http-test"
+    assert call.node_id == "http_1"
+    assert call.trace_id == "trace-http-test"
+    assert call.action_ref == "echo-http"
+    assert call.method == "POST"
+    assert call.url == "https://api.example.com/echo"
+    assert call.tool_group_ref == "runtime.http"
+    assert call.environment == "test"
+    assert call.query == {"message": "hello http"}
+    assert call.headers == {"x-aegis-test": "trace-http-test"}
+    assert call.body == {"message": "hello http"}
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "http_1",
+        "end_1",
+    ]
+    assert [event["node_id"] for event in policy_store.events] == [
+        "start_1",
+        "http_1",
+        "end_1",
+    ]
+    http_span = next(span for span in trace_store.spans if span["node_id"] == "http_1")
+    assert http_span["component"] == "workflow_runtime"
+    http_attributes = cast(dict[str, Any], http_span["attributes"])
+    assert http_attributes["node_type"] == "http"
+
+
 def test_compiler_rejects_non_published_workflow_version() -> None:
     project_id = uuid4()
     version = make_version(
@@ -674,6 +749,26 @@ class RecordingShellExecutionGateway:
         return self.result
 
 
+class RecordingHttpExecutionGateway:
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def run_http(self, request: Any) -> Any:
+        self.calls.append(request)
+        return SimpleNamespace(
+            status="success",
+            http_status_code=200,
+            duration_ms=9,
+            response_summary='{"echo":"hello http"}',
+            response_json={"echo": "hello http"},
+            invocation_id="http-call-1",
+            target_host="api.example.com",
+            target_port=443,
+            egress_proxy_mode="direct",
+            error_message="",
+        )
+
+
 def workflow_with_llm_condition_tool() -> WorkflowDefinition:
     return WorkflowDefinition(
         schema_version="workflow.dsl/v0.2",
@@ -796,6 +891,44 @@ def workflow_with_shell_node() -> WorkflowDefinition:
         edges=[
             EdgeDefinition(source="start_1", target="shell_1"),
             EdgeDefinition(source="shell_1", target="end_1"),
+        ],
+    )
+
+
+def workflow_with_http_node() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="http_flow",
+            name="HTTP Flow",
+            project_id="runtime-project",
+            version=1,
+            status="published",
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="http_1",
+                name="Echo HTTP",
+                type="http",
+                data=HttpNodeData(
+                    action_ref="echo-http",
+                    method="POST",
+                    url="https://api.example.com/echo",
+                    tool_group_ref="runtime.http",
+                    environment="test",
+                ),
+                parameters={
+                    "query": {"message": "{{message}}"},
+                    "headers": {"x-aegis-test": "{{trace_id}}"},
+                    "body": {"message": "{{message}}"},
+                },
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="http_1"),
+            EdgeDefinition(source="http_1", target="end_1"),
         ],
     )
 

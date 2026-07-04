@@ -4,6 +4,7 @@ REAL_DEPENDENCY_MARKERS = {
     "real_ai_provider",
     "real_database",
     "real_docker",
+    "real_http",
     "real_mcp",
 }
 
@@ -11,6 +12,7 @@ REAL_DEPENDENCY_ENV_FLAGS = {
     "real_ai_provider": "AEGIS_REAL_AI_PROVIDER",
     "real_database": "AEGIS_REAL_DATABASE",
     "real_docker": "AEGIS_REAL_DOCKER",
+    "real_http": "AEGIS_REAL_HTTP",
     "real_mcp": "AEGIS_REAL_MCP",
 }
 

@@ -131,6 +131,17 @@ class SqlAlchemyToolRegistryStore:
         )
         return EnvironmentRead.model_validate(await self._insert(resource))
 
+    async def get_active_environment(
+        self,
+        *,
+        project_id: UUID,
+        environment_key: str,
+    ) -> EnvironmentRead | None:
+        environment = await self._get_active_environment(project_id, environment_key)
+        if environment is None:
+            return None
+        return EnvironmentRead.model_validate(environment)
+
     async def create_mcp_server(
         self,
         *,

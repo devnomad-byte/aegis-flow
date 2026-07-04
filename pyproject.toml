@@ -62,6 +62,7 @@ markers = [
   "real_ai_provider: tests that call a real OpenAI-compatible AI provider",
   "real_database: tests that require the configured PostgreSQL database",
   "real_docker: tests that require the local Docker daemon and sandboxed containers",
+  "real_http: tests that require a real HTTP API server",
   "real_mcp: tests that require a real HTTP MCP server",
 ]
 

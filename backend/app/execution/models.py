@@ -54,3 +54,49 @@ class ShellRunnerInvocation(Base, TimestampMixin):
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+
+
+class HttpRunnerInvocation(Base, TimestampMixin):
+    __tablename__ = "http_runner_invocations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "invocation_ref",
+            name="uq_http_runner_invocations_project_ref",
+        ),
+        Index(
+            "ix_http_runner_invocations_project_run_node_trace",
+            "project_id",
+            "run_id",
+            "node_id",
+            "trace_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    invocation_ref: Mapped[str] = mapped_column(String(160), nullable=False)
+    action_ref: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    url_hash: Mapped[str] = mapped_column(String(120), nullable=False)
+    target_host: Mapped[str] = mapped_column(String(260), nullable=False, default="")
+    target_port: Mapped[int] = mapped_column(nullable=False, default=0)
+    egress_profile_ref: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    egress_proxy_mode: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    workflow_ref: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    run_id: Mapped[str] = mapped_column(String(160), nullable=False, default="", index=True)
+    node_id: Mapped[str] = mapped_column(String(160), nullable=False, default="", index=True)
+    trace_id: Mapped[str] = mapped_column(String(160), nullable=False, default="", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    http_status_code: Mapped[int | None] = mapped_column(nullable=True)
+    duration_ms: Mapped[int] = mapped_column(nullable=False, default=0)
+    request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    response_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    error_type: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
