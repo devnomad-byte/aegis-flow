@@ -4,7 +4,10 @@ from pathlib import Path
 from backend.tests.final_acceptance_policy import (
     REAL_DEPENDENCY_MARKERS,
     build_final_acceptance_skip_message,
+    build_final_acceptance_skip_reason,
     is_final_acceptance_mode,
+    missing_real_dependency_flags,
+    should_skip_final_acceptance_test,
 )
 
 
@@ -27,6 +30,42 @@ def test_final_acceptance_skip_message_names_skipped_real_tests() -> None:
     assert "final acceptance cannot skip real dependency tests" in message
     assert "test_sandbox_runs" in message
     assert "test_real_provider" in message
+
+
+def test_final_acceptance_tests_skip_without_global_or_explicit_real_flags() -> None:
+    marker_names = {"final_acceptance", "real_database", "real_ai_provider"}
+    missing_flags = missing_real_dependency_flags(marker_names, {})
+
+    assert missing_flags == {
+        "real_ai_provider": "AEGIS_REAL_AI_PROVIDER",
+        "real_database": "AEGIS_REAL_DATABASE",
+    }
+    assert should_skip_final_acceptance_test(marker_names, {}) is True
+
+    reason = build_final_acceptance_skip_reason(missing_flags)
+    assert "AEGIS_FINAL_ACCEPTANCE=1" in reason
+    assert "AEGIS_REAL_AI_PROVIDER" in reason
+    assert "AEGIS_REAL_DATABASE" in reason
+
+
+def test_final_acceptance_tests_run_with_global_or_matching_explicit_real_flags() -> None:
+    marker_names = {"final_acceptance", "real_database", "real_mcp"}
+
+    assert should_skip_final_acceptance_test(marker_names, {"AEGIS_FINAL_ACCEPTANCE": "1"}) is False
+    assert (
+        should_skip_final_acceptance_test(
+            marker_names,
+            {"AEGIS_REAL_DATABASE": "1", "AEGIS_REAL_MCP": "true"},
+        )
+        is False
+    )
+    assert (
+        should_skip_final_acceptance_test(
+            marker_names,
+            {"AEGIS_REAL_DATABASE": "1"},
+        )
+        is True
+    )
 
 
 def test_pytest_final_acceptance_markers_are_registered() -> None:

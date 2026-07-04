@@ -1,0 +1,40 @@
+from typing import Protocol
+from uuid import UUID
+
+from backend.app.workflow_runtime.schemas import (
+    WorkflowRunCheckpointCreate,
+    WorkflowRunCheckpointRead,
+    WorkflowRunCreate,
+    WorkflowRunRead,
+    WorkflowRunUpdate,
+)
+
+
+class WorkflowRunStore(Protocol):
+    async def create_run(self, request: WorkflowRunCreate) -> WorkflowRunRead:
+        raise NotImplementedError
+
+    async def update_run(self, request: WorkflowRunUpdate) -> WorkflowRunRead:
+        raise NotImplementedError
+
+    async def get_run(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str,
+    ) -> WorkflowRunRead | None:
+        raise NotImplementedError
+
+    async def record_checkpoint(
+        self,
+        request: WorkflowRunCheckpointCreate,
+    ) -> WorkflowRunCheckpointRead:
+        raise NotImplementedError
+
+    async def list_checkpoints(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str,
+    ) -> list[WorkflowRunCheckpointRead]:
+        raise NotImplementedError
