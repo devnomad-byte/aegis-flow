@@ -105,12 +105,73 @@ class ToolRegistryShellTemplate(Base, TimestampMixin):
     credential_ref: Mapped[str] = mapped_column(String(240), nullable=False, default="")
     image_ref: Mapped[str] = mapped_column(String(260), nullable=False, default="")
     image_digest: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    image_registry_digest: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    image_registry_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    image_signature_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_checked",
+    )
+    image_sbom_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_checked",
+    )
+    image_vulnerability_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_checked",
+    )
+    image_admission_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_required",
+    )
+    image_admission_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     entrypoint: Mapped[str] = mapped_column(String(160), nullable=False, default="")
     argv_template: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     parameter_schema: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     timeout_seconds: Mapped[int] = mapped_column(nullable=False, default=60)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryImageAdmission(Base, TimestampMixin):
+    __tablename__ = "tool_registry_image_admissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "image_ref",
+            "image_digest",
+            name="uq_tool_image_admission_project_ref_digest",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    image_ref: Mapped[str] = mapped_column(String(260), nullable=False)
+    image_digest: Mapped[str] = mapped_column(String(160), nullable=False)
+    registry_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    registry_digest: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    digest_match: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    signature_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_checked")
+    sbom_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_checked")
+    vulnerability_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="not_checked",
+    )
+    policy_decision: Mapped[str] = mapped_column(String(32), nullable=False, default="rejected")
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

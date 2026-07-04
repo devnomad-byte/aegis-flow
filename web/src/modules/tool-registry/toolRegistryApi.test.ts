@@ -4,6 +4,7 @@ import {
   createShellTemplate,
   listShellTemplates,
   previewShellTemplate,
+  resolveShellImageAdmission,
   shellTemplatesQueryKey,
 } from "./toolRegistryApi";
 
@@ -20,6 +21,21 @@ describe("toolRegistryApi", () => {
         return new Response(JSON.stringify({ template_ref: "diag", template_version: 2 }), {
           status: 201,
         });
+      }
+      if (url.endsWith("/shell-images/admissions/resolve")) {
+        return new Response(
+          JSON.stringify({
+            image_ref: "registry.example/aegis/runtime:7-alpine",
+            image_digest: `sha256:${"a".repeat(64)}`,
+            registry_digest: `sha256:${"a".repeat(64)}`,
+            digest_match: true,
+            policy_decision: "approved",
+            signature_status: "not_checked",
+            sbom_status: "not_checked",
+            vulnerability_status: "not_checked",
+          }),
+          { status: 200 },
+        );
       }
       return new Response(
         JSON.stringify({
@@ -73,6 +89,16 @@ describe("toolRegistryApi", () => {
         fetcher,
       ),
     ).resolves.toMatchObject({ command_hash: "sha256:abc" });
+    await expect(
+      resolveShellImageAdmission(
+        "ops-command",
+        {
+          image_ref: "registry.example/aegis/runtime:7-alpine",
+          image_digest: `sha256:${"a".repeat(64)}`,
+        },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ policy_decision: "approved", digest_match: true });
 
     expect(shellTemplatesQueryKey("ops-command")).toEqual([
       "project",
@@ -82,6 +108,10 @@ describe("toolRegistryApi", () => {
     ]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-templates/preview",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/resolve",
       expect.objectContaining({ method: "POST" }),
     );
   });

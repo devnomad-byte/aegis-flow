@@ -12,6 +12,13 @@ export type ShellTemplate = {
   credential_ref: string;
   image_ref: string;
   image_digest: string;
+  image_registry_digest?: string;
+  image_registry_checked_at?: string | null;
+  image_signature_status?: "not_checked" | "passed" | "failed";
+  image_sbom_status?: "not_checked" | "passed" | "failed";
+  image_vulnerability_status?: "not_checked" | "passed" | "failed";
+  image_admission_status?: string;
+  image_admission_reason?: string;
   entrypoint: string;
   argv_template: string[];
   parameter_schema: Record<string, unknown>;
@@ -22,6 +29,28 @@ export type ShellTemplate = {
   updated_by: string;
   created_at: string;
   updated_at: string;
+};
+
+export type ShellImageAdmissionResolveRequest = {
+  image_ref: string;
+  image_digest: string;
+};
+
+export type ShellImageAdmission = {
+  id: string;
+  project_id: string;
+  image_ref: string;
+  image_digest: string;
+  registry_url: string;
+  registry_digest: string;
+  digest_match: boolean;
+  signature_status: "not_checked" | "passed" | "failed";
+  sbom_status: "not_checked" | "passed" | "failed";
+  vulnerability_status: "not_checked" | "passed" | "failed";
+  policy_decision: "approved" | "rejected";
+  decision_reason: string;
+  checked_at: string;
+  evidence: Record<string, unknown>;
 };
 
 export type ShellTemplateCreateRequest = Pick<
@@ -102,6 +131,22 @@ export async function previewShellTemplate(
 ): Promise<ShellTemplatePreviewResponse> {
   return requestJson<ShellTemplatePreviewResponse>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-templates/preview`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function resolveShellImageAdmission(
+  projectId: string,
+  request: ShellImageAdmissionResolveRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageAdmission> {
+  return requestJson<ShellImageAdmission>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admissions/resolve`,
     {
       body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },

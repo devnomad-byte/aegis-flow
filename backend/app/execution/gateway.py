@@ -450,6 +450,8 @@ def _validate_executable_template(
                 argv_template=template.argv_template,
                 parameter_schema=template.parameter_schema,
                 timeout_seconds=template.timeout_seconds,
+                image_registry_digest=template.image_registry_digest,
+                image_admission_status=template.image_admission_status,
             )
         )
     except ShellTemplatePolicyError as exc:

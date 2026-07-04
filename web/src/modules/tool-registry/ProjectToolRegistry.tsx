@@ -7,6 +7,8 @@ import {
   createShellTemplate,
   listShellTemplates,
   previewShellTemplate,
+  resolveShellImageAdmission,
+  type ShellImageAdmission,
   shellTemplatesQueryKey,
   type ShellRiskLevel,
   type ShellTemplate,
@@ -50,6 +52,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const [parameterText, setParameterText] = useState('{"message":"hello"}');
   const [localError, setLocalError] = useState("");
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
+  const [admission, setAdmission] = useState<ShellImageAdmission | null>(null);
 
   const templatesQuery = useQuery({
     queryFn: () => listShellTemplates(project.projectId),
@@ -76,6 +79,14 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
       }),
     onSuccess: (result) => setPreview(result),
   });
+  const admissionMutation = useMutation({
+    mutationFn: (request: ShellTemplateCreateRequest) =>
+      resolveShellImageAdmission(project.projectId, {
+        image_digest: request.image_digest,
+        image_ref: request.image_ref,
+      }),
+    onSuccess: (result) => setAdmission(result),
+  });
 
   useEffect(() => {
     const firstTemplate = templatesQuery.data?.[0];
@@ -84,7 +95,16 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     }
   }, [templatesQuery.data]);
 
-  const error = localError || createMutation.error || previewMutation.error || templatesQuery.error;
+  useEffect(() => {
+    setAdmission(null);
+  }, [form.image_digest, form.image_ref, project.projectId]);
+
+  const error =
+    localError ||
+    createMutation.error ||
+    previewMutation.error ||
+    admissionMutation.error ||
+    templatesQuery.error;
 
   return (
     <main className="aegis-main settings-main">
@@ -123,6 +143,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
                 onClick={() => {
                   applyTemplate(template, setForm, setArgvText, setSchemaText);
                   setPreview(null);
+                  setAdmission(null);
                 }}
                 type="button"
               >
@@ -196,6 +217,23 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
                 <Play aria-hidden="true" size={16} />
                 Preview command
               </button>
+              <button
+                className="toolbar-button"
+                disabled={admissionMutation.isPending}
+                onClick={() => {
+                  submitWithParsedFields({
+                    argvText,
+                    form,
+                    onError: setLocalError,
+                    onSubmit: (request) => admissionMutation.mutate(request),
+                    schemaText,
+                  });
+                }}
+                type="button"
+              >
+                <ShieldCheck aria-hidden="true" size={16} />
+                Verify supply chain
+              </button>
             </div>
           </form>
 
@@ -207,6 +245,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               </div>
               <ShieldCheck aria-hidden="true" size={18} />
             </div>
+            <SupplyChainPanel admission={admission} />
             {preview ? (
               <PreviewPanel preview={preview} />
             ) : (
@@ -216,6 +255,19 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
         </div>
       </section>
     </main>
+  );
+}
+
+function SupplyChainPanel({ admission }: { admission: ShellImageAdmission | null }) {
+  return (
+    <div className="shell-preview-grid">
+      <Detail label="Image admission" value={admission?.policy_decision ?? "not_checked"} />
+      <Detail label="Registry digest" value={admission?.registry_digest ?? "not_checked"} />
+      <Detail label="Signature" value={admission?.signature_status ?? "not_checked"} />
+      <Detail label="SBOM" value={admission?.sbom_status ?? "not_checked"} />
+      <Detail label="Vulnerability" value={admission?.vulnerability_status ?? "not_checked"} />
+      {admission ? <EvidenceCode label="ADMISSION REASON" value={admission.decision_reason} /> : null}
+    </div>
   );
 }
 

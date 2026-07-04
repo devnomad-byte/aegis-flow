@@ -26,8 +26,14 @@ describe("ProjectToolRegistry", () => {
               risk_level: "low",
               environment_key: "test",
               credential_ref: "",
-              image_ref: "redis:7-alpine",
+              image_ref: "registry.example/aegis/runtime:7-alpine",
               image_digest: validDigest,
+              image_registry_digest: validDigest,
+              image_signature_status: "not_checked",
+              image_sbom_status: "not_checked",
+              image_vulnerability_status: "not_checked",
+              image_admission_status: "approved",
+              image_admission_reason: "registry digest matches requested digest; signature, SBOM, and vulnerability evidence not checked",
               entrypoint: "/bin/sh",
               argv_template: ["-lc", "echo {{message}}"],
               parameter_schema: {
@@ -53,10 +59,37 @@ describe("ProjectToolRegistry", () => {
           JSON.stringify({
             template_ref: "runtime-shell-echo",
             template_version: 2,
-            image_ref: "redis:7-alpine",
+            image_ref: "registry.example/aegis/runtime:7-alpine",
             image_digest: validDigest,
+            image_registry_digest: validDigest,
+            image_signature_status: "not_checked",
+            image_sbom_status: "not_checked",
+            image_vulnerability_status: "not_checked",
+            image_admission_status: "approved",
           }),
           { status: 201 },
+        );
+      }
+      if (url.endsWith("/shell-images/admissions/resolve")) {
+        return new Response(
+          JSON.stringify({
+            id: "admission-1",
+            project_id: "ops-command",
+            image_ref: "registry.example/aegis/runtime:7-alpine",
+            image_digest: validDigest,
+            registry_url: "https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+            registry_digest: validDigest,
+            digest_match: true,
+            signature_status: "not_checked",
+            sbom_status: "not_checked",
+            vulnerability_status: "not_checked",
+            policy_decision: "approved",
+            decision_reason:
+              "registry digest matches requested digest; signature, SBOM, and vulnerability evidence not checked",
+            checked_at: "2026-07-05T00:00:00Z",
+            evidence: { manifest_size_bytes: 128 },
+          }),
+          { status: 200 },
         );
       }
       if (url.endsWith("/shell-templates/preview")) {
@@ -96,7 +129,7 @@ describe("ProjectToolRegistry", () => {
     );
 
     expect(await screen.findByText("Runtime Shell Echo")).toBeInTheDocument();
-    expect(screen.getByText("redis:7-alpine")).toBeInTheDocument();
+    expect(screen.getByText("registry.example/aegis/runtime:7-alpine")).toBeInTheDocument();
 
     await user.clear(screen.getByLabelText("Version"));
     await user.type(screen.getByLabelText("Version"), "2");
@@ -107,10 +140,13 @@ describe("ProjectToolRegistry", () => {
     fireEvent.change(screen.getByLabelText("Test parameters"), {
       target: { value: '{"message":"hello","token":"raw-token"}' },
     });
+    await user.click(screen.getByRole("button", { name: "Verify supply chain" }));
     await user.click(screen.getByRole("button", { name: "Save template" }));
     await user.click(screen.getByRole("button", { name: "Preview command" }));
 
     expect(await screen.findByText("sha256:preview")).toBeInTheDocument();
+    expect(screen.getByText("approved")).toBeInTheDocument();
+    expect(screen.getAllByText("not_checked").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute(
       "href",
@@ -123,6 +159,10 @@ describe("ProjectToolRegistry", () => {
         expect.objectContaining({ method: "POST" }),
       );
     });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/resolve",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("shows backend policy errors without exposing raw secret parameters", async () => {

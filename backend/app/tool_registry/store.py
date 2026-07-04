@@ -1,4 +1,6 @@
-from typing import Protocol
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from backend.app.security.egress_policy import EgressPolicy, EgressPolicyViolation
@@ -16,6 +18,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionRead,
+    ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -28,6 +32,9 @@ from backend.app.tool_registry.schemas import (
     ToolMcpServerCredentialRead,
     ToolSyncRunRead,
 )
+
+if TYPE_CHECKING:
+    from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
 
 
@@ -54,6 +61,10 @@ class ToolSyncFailedError(RuntimeError):
         super().__init__(public_message)
         self.public_message = public_message
         self.target_id = target_id
+
+
+class ShellImageAdmissionRequiredError(ValueError):
+    """Raised when a shell template requires an approved image admission."""
 
 
 class ToolRegistryStore(Protocol):
@@ -124,6 +135,19 @@ class ToolRegistryStore(Protocol):
         actor_id: UUID,
         request: ShellTemplatePreviewRequest,
     ) -> ShellTemplatePreviewResponse:
+        raise NotImplementedError
+
+    async def record_shell_image_admission(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionResolveRequest,
+        digest_result: OciManifestDigestResult,
+        digest_match: bool,
+        policy_decision: str,
+        decision_reason: str,
+    ) -> ShellImageAdmissionRead:
         raise NotImplementedError
 
     async def create_credential_ref(

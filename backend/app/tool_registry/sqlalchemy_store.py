@@ -21,6 +21,7 @@ from backend.app.security.egress_proxy import (
     EgressProxyPolicyViolation,
     build_egress_proxy_plan,
 )
+from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.mcp_client import (
     McpServerConnection,
     McpTool,
@@ -32,6 +33,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryCredentialAccessIntent,
     ToolRegistryCredentialRef,
     ToolRegistryEnvironment,
+    ToolRegistryImageAdmission,
     ToolRegistryMcpServer,
     ToolRegistrySecretLease,
     ToolRegistryShellTemplate,
@@ -53,6 +55,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionRead,
+    ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePolicySummary,
     ShellTemplatePreviewRequest,
@@ -68,6 +72,7 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
+    ShellImageAdmissionRequiredError,
     ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
     ToolSyncFailedError,
@@ -215,9 +220,21 @@ class SqlAlchemyToolRegistryStore:
             project_id=project_id,
             credential_ref=request.credential_ref,
         )
-        validate_shell_template_policy(
-            _policy_input_from_shell_request(project_id=project_id, request=request)
+        admission = await self._find_approved_image_admission(
+            project_id=project_id,
+            image_ref=request.image_ref,
+            image_digest=request.image_digest,
         )
+        if _requires_image_admission(request) and admission is None:
+            raise ShellImageAdmissionRequiredError(
+                "Approved shell image admission is required for production or high risk templates"
+            )
+        policy_input = _policy_input_from_shell_request(
+            project_id=project_id,
+            request=request,
+            admission=admission,
+        )
+        validate_shell_template_policy(policy_input)
         resource = ToolRegistryShellTemplate(
             project_id=project_id,
             template_ref=request.template_ref,
@@ -228,6 +245,15 @@ class SqlAlchemyToolRegistryStore:
             credential_ref=request.credential_ref,
             image_ref=request.image_ref,
             image_digest=request.image_digest,
+            image_registry_digest=admission.registry_digest if admission else "",
+            image_registry_checked_at=admission.checked_at if admission else None,
+            image_signature_status=admission.signature_status if admission else "not_checked",
+            image_sbom_status=admission.sbom_status if admission else "not_checked",
+            image_vulnerability_status=admission.vulnerability_status
+            if admission
+            else "not_checked",
+            image_admission_status=admission.policy_decision if admission else "not_required",
+            image_admission_reason=admission.decision_reason if admission else "",
             entrypoint=request.entrypoint,
             argv_template=request.argv_template,
             parameter_schema=request.parameter_schema,
@@ -248,6 +274,56 @@ class SqlAlchemyToolRegistryStore:
             )
         )
         return [ShellTemplateRead.model_validate(resource) for resource in result.all()]
+
+    async def record_shell_image_admission(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionResolveRequest,
+        digest_result: OciManifestDigestResult,
+        digest_match: bool,
+        policy_decision: str,
+        decision_reason: str,
+    ) -> ShellImageAdmissionRead:
+        checked_at = datetime.now(UTC)
+        result = await self._session.execute(
+            select(ToolRegistryImageAdmission).where(
+                ToolRegistryImageAdmission.project_id == project_id,
+                ToolRegistryImageAdmission.image_ref == request.image_ref,
+                ToolRegistryImageAdmission.image_digest == request.image_digest,
+            )
+        )
+        admission = result.scalar_one_or_none()
+        evidence = {
+            "content_type": digest_result.content_type,
+            "manifest_size_bytes": digest_result.manifest_size_bytes,
+            "computed_digest": digest_result.computed_digest,
+        }
+        if admission is None:
+            admission = ToolRegistryImageAdmission(
+                project_id=project_id,
+                image_ref=request.image_ref,
+                image_digest=request.image_digest,
+                created_by=actor_id,
+                updated_by=actor_id,
+                checked_at=checked_at,
+            )
+            self._session.add(admission)
+        admission.registry_url = digest_result.registry_url
+        admission.registry_digest = digest_result.registry_digest
+        admission.digest_match = digest_match
+        admission.signature_status = "not_checked"
+        admission.sbom_status = "not_checked"
+        admission.vulnerability_status = "not_checked"
+        admission.policy_decision = policy_decision
+        admission.decision_reason = decision_reason
+        admission.checked_at = checked_at
+        admission.evidence = evidence
+        admission.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(admission)
+        return ShellImageAdmissionRead.model_validate(admission)
 
     async def get_active_shell_template(
         self,
@@ -1144,6 +1220,28 @@ class SqlAlchemyToolRegistryStore:
         )
         return [ToolDefinitionRead.model_validate(resource) for resource in result.all()]
 
+    async def _find_approved_image_admission(
+        self,
+        *,
+        project_id: UUID,
+        image_ref: str,
+        image_digest: str,
+    ) -> ShellImageAdmissionRead | None:
+        if not image_ref or not image_digest:
+            return None
+        result = await self._session.execute(
+            select(ToolRegistryImageAdmission).where(
+                ToolRegistryImageAdmission.project_id == project_id,
+                ToolRegistryImageAdmission.image_ref == image_ref,
+                ToolRegistryImageAdmission.image_digest == image_digest,
+                ToolRegistryImageAdmission.policy_decision == "approved",
+            )
+        )
+        admission = result.scalar_one_or_none()
+        if admission is None:
+            return None
+        return ShellImageAdmissionRead.model_validate(admission)
+
 
 def _highest_risk_level(risk_levels: list[str | None]) -> str:
     order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -1157,6 +1255,7 @@ def _policy_input_from_shell_request(
     *,
     project_id: UUID,
     request: ShellTemplateCreateRequest,
+    admission: ShellImageAdmissionRead | None = None,
 ) -> ShellTemplatePolicyInput:
     return ShellTemplatePolicyInput(
         project_id=project_id,
@@ -1170,6 +1269,8 @@ def _policy_input_from_shell_request(
         argv_template=request.argv_template,
         parameter_schema=request.parameter_schema,
         timeout_seconds=request.timeout_seconds,
+        image_registry_digest=admission.registry_digest if admission else "",
+        image_admission_status=admission.policy_decision if admission else "not_required",
     )
 
 
@@ -1186,7 +1287,16 @@ def _policy_input_from_shell_read(template: ShellTemplateRead) -> ShellTemplateP
         argv_template=template.argv_template,
         parameter_schema=template.parameter_schema,
         timeout_seconds=template.timeout_seconds,
+        image_registry_digest=template.image_registry_digest,
+        image_admission_status=template.image_admission_status,
     )
+
+
+def _requires_image_admission(request: ShellTemplateCreateRequest) -> bool:
+    return request.environment_key.lower() in {"prod", "production"} or request.risk_level in {
+        "high",
+        "critical",
+    }
 
 
 def _authorized_context_matches(

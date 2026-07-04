@@ -16,6 +16,12 @@ from backend.app.execution.shell_policy import ShellTemplatePolicyError
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_supply_chain import (
+    OciDigestResolver,
+    OciManifestDigestError,
+    OciManifestDigestResolver,
+    ShellImageAdmissionService,
+)
 from backend.app.tool_registry.mcp_client import McpToolsClient
 from backend.app.tool_registry.schemas import (
     AuthorizedToolsResolveRequest,
@@ -28,6 +34,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionRead,
+    ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -42,6 +50,7 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
+    ShellImageAdmissionRequiredError,
     ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
     ToolRegistryStore,
@@ -56,6 +65,13 @@ RegistryStore = Depends(get_tool_registry_store)
 AuditStore = Depends(get_audit_event_store)
 McpToolsClientDependency = Depends(get_mcp_tools_client)
 McpEgressPolicyDependency = Depends(get_mcp_egress_policy)
+
+
+def get_oci_digest_resolver() -> OciDigestResolver:
+    return OciManifestDigestResolver()
+
+
+OciDigestResolverDependency = Depends(get_oci_digest_resolver)
 
 
 @router.get("/catalog", response_model=ToolRegistryCatalogResponse)
@@ -702,6 +718,58 @@ async def resolve_authorized_tools(
 
 
 @router.post(
+    "/shell-images/admissions/resolve",
+    response_model=ShellImageAdmissionRead,
+)
+async def resolve_shell_image_admission(
+    project_id: UUID,
+    request: ShellImageAdmissionResolveRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    digest_resolver: OciDigestResolver = OciDigestResolverDependency,
+) -> ShellImageAdmissionRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    service = ShellImageAdmissionService(
+        store=registry_store,
+        digest_resolver=digest_resolver,
+    )
+    try:
+        admission = await service.resolve_and_record(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except OciManifestDigestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_admission.resolve",
+        target_type="tool_registry_image_admission",
+        target_id=str(admission.id),
+        risk_level="high" if admission.policy_decision == "rejected" else "medium",
+        metadata={
+            "image_ref": admission.image_ref,
+            "image_digest_prefix": admission.image_digest[:19],
+            "registry_digest_prefix": admission.registry_digest[:19],
+            "digest_match": admission.digest_match,
+            "policy_decision": admission.policy_decision,
+        },
+    )
+    return admission
+
+
+@router.post(
     "/shell-templates",
     response_model=ShellTemplateRead,
     status_code=status.HTTP_201_CREATED,
@@ -733,6 +801,8 @@ async def create_shell_template(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credential reference not found or inactive",
         ) from exc
+    except ShellImageAdmissionRequiredError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ShellTemplatePolicyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await _record_create_event(

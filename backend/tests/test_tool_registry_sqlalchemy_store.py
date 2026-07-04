@@ -5,9 +5,11 @@ import pytest
 from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
     EnvironmentCreateRequest,
     McpServerCreateRequest,
+    ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
 )
@@ -126,6 +128,30 @@ async def test_sqlalchemy_tool_registry_lists_and_previews_shell_templates() -> 
         await session.commit()
 
         store = SqlAlchemyToolRegistryStore(session)
+        image_digest = "sha256:" + ("a" * 64)
+        await store.record_shell_image_admission(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionResolveRequest(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=image_digest,
+            ),
+            digest_result=OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=image_digest,
+                computed_digest=image_digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            ),
+            digest_match=True,
+            policy_decision="approved",
+            decision_reason=(
+                "registry digest matches requested digest; signature, SBOM, and vulnerability "
+                "evidence not checked"
+            ),
+        )
         await store.create_shell_template(
             project_id=project_id,
             actor_id=actor_id,
@@ -135,8 +161,8 @@ async def test_sqlalchemy_tool_registry_lists_and_previews_shell_templates() -> 
                 name="Diagnostics",
                 risk_level="high",
                 environment_key="prod",
-                image_ref="redis:7-alpine",
-                image_digest="sha256:" + ("a" * 64),
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=image_digest,
                 entrypoint="/bin/sh",
                 argv_template=["-lc", "echo {{message}} && echo token={{token}}"],
                 parameter_schema={

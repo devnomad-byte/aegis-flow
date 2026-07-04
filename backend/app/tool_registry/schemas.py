@@ -36,6 +36,8 @@ CredentialStatus = Literal["active", "archived", "disabled"]
 CredentialRequesterType = Literal["tool_gateway", "execution_gateway", "api", "system"]
 CredentialAccessDecision = Literal["recorded", "denied"]
 SecretLeaseStatus = Literal["active", "revoked", "expired", "denied"]
+ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
+ImageAdmissionDecision = Literal["approved", "rejected"]
 
 
 class ToolRegistryCatalogResponse(BaseModel):
@@ -120,6 +122,13 @@ class ShellTemplatePreviewRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     run_id: str = Field(default="", max_length=160)
     trace_id: str = Field(default="", max_length=160)
+
+
+class ShellImageAdmissionResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_ref: str = Field(min_length=1, max_length=260)
+    image_digest: str = Field(min_length=1, max_length=160)
 
 
 class CredentialRefCreateRequest(BaseModel):
@@ -236,6 +245,13 @@ class ShellTemplateRead(RegistryResourceRead):
     credential_ref: str
     image_ref: str
     image_digest: str
+    image_registry_digest: str = ""
+    image_registry_checked_at: datetime | None = None
+    image_signature_status: ImageEvidenceStatus = "not_checked"
+    image_sbom_status: ImageEvidenceStatus = "not_checked"
+    image_vulnerability_status: ImageEvidenceStatus = "not_checked"
+    image_admission_status: str = "not_required"
+    image_admission_reason: str = ""
     entrypoint: str
     argv_template: list[str] = Field(default_factory=list)
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
@@ -258,6 +274,29 @@ class ShellTemplatePreviewResponse(BaseModel):
     sandbox: dict[str, Any]
     policy: ShellTemplatePolicySummary
     trace_link: str
+
+
+class ShellImageAdmissionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    image_ref: str
+    image_digest: str
+    registry_url: str
+    registry_digest: str
+    digest_match: bool
+    signature_status: ImageEvidenceStatus
+    sbom_status: ImageEvidenceStatus
+    vulnerability_status: ImageEvidenceStatus
+    policy_decision: ImageAdmissionDecision
+    decision_reason: str
+    checked_at: datetime
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class CredentialRefRead(BaseModel):

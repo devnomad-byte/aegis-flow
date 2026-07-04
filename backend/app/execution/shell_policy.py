@@ -62,6 +62,8 @@ class ShellTemplatePolicyInput:
     argv_template: list[str]
     parameter_schema: dict[str, Any]
     timeout_seconds: int
+    image_registry_digest: str = ""
+    image_admission_status: str = "not_required"
 
 
 def validate_shell_template_policy(
@@ -75,7 +77,7 @@ def validate_shell_template_policy(
         return decision
     if image_policy.forbid_latest and _uses_latest_or_missing_tag(template.image_ref):
         raise ShellTemplatePolicyError("Shell template image tag latest is forbidden")
-    if template.image_ref not in image_policy.allowlist:
+    if not _image_is_allowlisted(template, image_policy):
         raise ShellTemplatePolicyError("Shell template image is not allowlisted")
     if image_policy.require_digest and not template.image_digest:
         raise ShellTemplatePolicyError("Shell template image digest is required")
@@ -104,7 +106,7 @@ def evaluate_shell_template_policy(
             or template.risk_level in {"high", "critical"}
         ),
         digest_required=image_policy.require_digest,
-        allowlisted=template.image_ref in image_policy.allowlist,
+        allowlisted=_image_is_allowlisted(template, image_policy),
         reasons=reasons,
     )
 
@@ -188,6 +190,19 @@ def _render_template_arg(template: str, parameters: dict[str, Any]) -> str:
 
 def _has_executable_metadata(template: ShellTemplatePolicyInput) -> bool:
     return bool(template.image_ref or template.entrypoint or template.argv_template)
+
+
+def _image_is_allowlisted(
+    template: ShellTemplatePolicyInput,
+    image_policy: ShellImagePolicy,
+) -> bool:
+    if template.image_ref in image_policy.allowlist:
+        return True
+    return (
+        template.image_admission_status == "approved"
+        and bool(template.image_registry_digest)
+        and template.image_registry_digest == template.image_digest
+    )
 
 
 def _uses_latest_or_missing_tag(image_ref: str) -> bool:

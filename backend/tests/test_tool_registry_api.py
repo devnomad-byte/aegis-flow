@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from ipaddress import ip_address
+from typing import cast
 from uuid import UUID, uuid4
 
 from backend.app.api.dependencies import (
@@ -10,6 +11,7 @@ from backend.app.api.dependencies import (
     get_project_access_provider,
     get_tool_registry_store,
 )
+from backend.app.api.routes.tool_registry import get_oci_digest_resolver
 from backend.app.execution.shell_policy import (
     ShellTemplatePolicyInput,
     build_shell_template_preview,
@@ -23,6 +25,7 @@ from backend.app.security.egress_policy import (
     EgressPolicyViolation,
     validate_egress_url,
 )
+from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
     AuthorizedToolRead,
     AuthorizedToolsResolveResponse,
@@ -35,6 +38,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionRead,
+    ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePolicySummary,
     ShellTemplatePreviewRequest,
@@ -48,6 +53,7 @@ from backend.app.tool_registry.schemas import (
     ToolSyncRunRead,
 )
 from backend.app.tool_registry.store import (
+    ShellImageAdmissionRequiredError,
     ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
     ToolSyncFailedError,
@@ -88,6 +94,7 @@ class InMemoryToolRegistryStore:
         self.tool_groups: dict[UUID, list[ToolGroupRead]] = {}
         self.tool_group_items: dict[UUID, list[ToolGroupItemRead]] = {}
         self.shell_templates: dict[UUID, list[ShellTemplateRead]] = {}
+        self.image_admissions: dict[UUID, list[ShellImageAdmissionRead]] = {}
         self.fail_next_sync = False
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
@@ -568,6 +575,18 @@ class InMemoryToolRegistryStore:
         template_ref = str(request.template_ref)
         template_version = int(request.template_version)
         reference = f"{template_ref}@{template_version}"
+        admission = self._find_approved_admission(
+            project_id,
+            image_ref=str(request.image_ref),
+            image_digest=str(request.image_digest),
+        )
+        if (
+            str(request.environment_key).lower() in {"prod", "production"}
+            or str(request.risk_level) in {"high", "critical"}
+        ) and admission is None:
+            raise ShellImageAdmissionRequiredError(
+                "Approved shell image admission is required for production or high risk templates"
+            )
         validate_shell_template_policy(
             ShellTemplatePolicyInput(
                 project_id=project_id,
@@ -581,6 +600,8 @@ class InMemoryToolRegistryStore:
                 argv_template=list(request.argv_template),
                 parameter_schema=dict(request.parameter_schema),
                 timeout_seconds=int(request.timeout_seconds),
+                image_registry_digest=admission.registry_digest if admission else "",
+                image_admission_status=admission.policy_decision if admission else "not_required",
             )
         )
         catalog = self.catalogs.get(project_id, ProjectResourceCatalog())
@@ -599,6 +620,15 @@ class InMemoryToolRegistryStore:
                 credential_ref=str(request.credential_ref),
                 image_ref=str(request.image_ref),
                 image_digest=str(request.image_digest),
+                image_registry_digest=admission.registry_digest if admission else "",
+                image_registry_checked_at=admission.checked_at if admission else None,
+                image_signature_status=admission.signature_status if admission else "not_checked",
+                image_sbom_status=admission.sbom_status if admission else "not_checked",
+                image_vulnerability_status=admission.vulnerability_status
+                if admission
+                else "not_checked",
+                image_admission_status=admission.policy_decision if admission else "not_required",
+                image_admission_reason=admission.decision_reason if admission else "",
                 entrypoint=str(request.entrypoint),
                 argv_template=list(request.argv_template),
                 parameter_schema=dict(request.parameter_schema),
@@ -607,6 +637,68 @@ class InMemoryToolRegistryStore:
         )
         self.shell_templates.setdefault(project_id, []).append(template)
         return template
+
+    async def record_shell_image_admission(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionResolveRequest,
+        digest_result: OciManifestDigestResult,
+        digest_match: bool,
+        policy_decision: str,
+        decision_reason: str,
+    ) -> ShellImageAdmissionRead:
+        now = datetime.now(UTC)
+        existing = [
+            item
+            for item in self.image_admissions.get(project_id, [])
+            if item.image_ref == request.image_ref and item.image_digest == request.image_digest
+        ]
+        admission = ShellImageAdmissionRead(
+            id=existing[0].id if existing else uuid4(),
+            project_id=project_id,
+            image_ref=request.image_ref,
+            image_digest=request.image_digest,
+            registry_url=digest_result.registry_url,
+            registry_digest=digest_result.registry_digest,
+            digest_match=digest_match,
+            signature_status="not_checked",
+            sbom_status="not_checked",
+            vulnerability_status="not_checked",
+            policy_decision=policy_decision,
+            decision_reason=decision_reason,
+            checked_at=now,
+            evidence={
+                "content_type": digest_result.content_type,
+                "manifest_size_bytes": digest_result.manifest_size_bytes,
+                "computed_digest": digest_result.computed_digest,
+            },
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=existing[0].created_at if existing else now,
+            updated_at=now,
+        )
+        self.image_admissions[project_id] = [
+            item for item in self.image_admissions.get(project_id, []) if item.id != admission.id
+        ] + [admission]
+        return admission
+
+    def _find_approved_admission(
+        self,
+        project_id: UUID,
+        *,
+        image_ref: str,
+        image_digest: str,
+    ) -> ShellImageAdmissionRead | None:
+        for admission in self.image_admissions.get(project_id, []):
+            if (
+                admission.image_ref == image_ref
+                and admission.image_digest == image_digest
+                and admission.policy_decision == "approved"
+            ):
+                return admission
+        return None
 
     async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
         return self.shell_templates.get(project_id, [])
@@ -638,6 +730,8 @@ class InMemoryToolRegistryStore:
                 argv_template=template.argv_template,
                 parameter_schema=template.parameter_schema,
                 timeout_seconds=template.timeout_seconds,
+                image_registry_digest=template.image_registry_digest,
+                image_admission_status=template.image_admission_status,
             ),
             parameters=request.parameters,
             run_id=request.run_id,
@@ -751,6 +845,14 @@ def _test_authorized_context_matches(
     return not (item.allowed_role_refs and not set(role_refs).intersection(item.allowed_role_refs))
 
 
+class StaticDigestResolver:
+    def __init__(self, result: OciManifestDigestResult) -> None:
+        self._result = result
+
+    async def resolve(self, image_ref: str) -> OciManifestDigestResult:
+        return self._result.model_copy(update={"image_ref": image_ref})
+
+
 def build_client(
     *,
     account: AccountPrincipal,
@@ -758,6 +860,7 @@ def build_client(
     registry_store: InMemoryToolRegistryStore,
     audit_store: InMemoryAuditEventStore,
     egress_policy: EgressPolicy | None = None,
+    digest_resolver: object | None = None,
 ) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_account] = lambda: account
@@ -768,6 +871,8 @@ def build_client(
         resolver=lambda _host, _port: [ip_address("93.184.216.34")]
     )
     app.dependency_overrides[get_mcp_egress_policy] = lambda: resolved_egress_policy
+    if digest_resolver is not None:
+        app.dependency_overrides[get_oci_digest_resolver] = lambda: digest_resolver
     return TestClient(app)
 
 
@@ -1370,13 +1475,31 @@ def test_tool_registry_lists_and_previews_shell_templates_without_leaking_secret
     project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
     registry_store = InMemoryToolRegistryStore()
     audit_store = InMemoryAuditEventStore()
+    valid_digest = "sha256:" + ("b" * 64)
     client = build_client(
         account=make_account(),
         provider=PermissionAwareProjectProvider([project]),
         registry_store=registry_store,
         audit_store=audit_store,
+        digest_resolver=StaticDigestResolver(
+            OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=valid_digest,
+                computed_digest=valid_digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            )
+        ),
     )
-    valid_digest = "sha256:" + ("b" * 64)
+    admission_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/resolve",
+        json={
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": valid_digest,
+        },
+    )
     create_response = client.post(
         f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
         json={
@@ -1385,7 +1508,7 @@ def test_tool_registry_lists_and_previews_shell_templates_without_leaking_secret
             "name": "日志采集",
             "risk_level": "high",
             "environment_key": "prod",
-            "image_ref": "redis:7-alpine",
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
             "image_digest": valid_digest,
             "entrypoint": "/bin/sh",
             "argv_template": ["-lc", "echo {{message}} && echo token={{token}}"],
@@ -1414,7 +1537,10 @@ def test_tool_registry_lists_and_previews_shell_templates_without_leaking_secret
         },
     )
 
+    assert admission_response.status_code == 200
+    assert admission_response.json()["policy_decision"] == "approved"
     assert create_response.status_code == 201
+    assert create_response.json()["image_admission_status"] == "approved"
     assert list_response.status_code == 200
     assert list_response.json()[0]["template_ref"] == "k8s-log-collector"
     assert preview_response.status_code == 200
@@ -1426,11 +1552,76 @@ def test_tool_registry_lists_and_previews_shell_templates_without_leaking_secret
     assert body["policy"]["approval_required"] is True
     assert body["trace_link"].endswith("run_id=run-shell-preview&trace_id=trace-shell-preview")
     assert "raw-token-value" not in preview_response.text
-    assert [event["action"] for event in audit_store.events][-3:] == [
+    assert [event["action"] for event in audit_store.events][-4:] == [
+        "tool_registry.shell_image_admission.resolve",
         "tool_registry.shell_template.create",
         "tool_registry.shell_template.list",
         "tool_registry.shell_template.preview",
     ]
+
+
+def test_tool_registry_resolves_shell_image_admission_and_allows_high_risk_template() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    digest = "sha256:" + ("c" * 64)
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        digest_resolver=StaticDigestResolver(
+            OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=digest,
+                computed_digest=digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            )
+        ),
+    )
+
+    admission = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/resolve",
+        json={
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+        },
+    )
+    created = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "prod-diag",
+            "template_version": 1,
+            "name": "Production Diagnostics",
+            "risk_level": "high",
+            "environment_key": "prod",
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo ok"],
+            "parameter_schema": {"type": "object"},
+            "timeout_seconds": 30,
+        },
+    )
+
+    assert admission.status_code == 200
+    assert admission.json()["policy_decision"] == "approved"
+    assert admission.json()["signature_status"] == "not_checked"
+    assert "schemaVersion" not in admission.text
+    assert "layers" not in admission.text
+    assert "token" not in admission.text.lower()
+    assert created.status_code == 201
+    assert created.json()["image_admission_status"] == "approved"
+    assert created.json()["image_registry_digest"] == digest
+    assert [event["action"] for event in audit_store.events][-2:] == [
+        "tool_registry.shell_image_admission.resolve",
+        "tool_registry.shell_template.create",
+    ]
+    admission_metadata = cast(dict[str, object], audit_store.events[-2]["metadata"])
+    assert admission_metadata["policy_decision"] == "approved"
 
 
 def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:
