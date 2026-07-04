@@ -159,6 +159,7 @@ class AppSettings(BaseSettings):
     app_version: str = "0.1.0"
     service_name: str = "aegis-flow-api"
     environment: str = "local"
+    workflow_checkpoint_setup_on_startup: bool = False
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     s3: S3Settings = Field(default_factory=S3Settings)

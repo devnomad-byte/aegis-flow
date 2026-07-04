@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -27,8 +28,16 @@ class WorkflowCheckpointerProvider(Protocol):
         raise NotImplementedError
 
 
+class WorkflowCheckpointSaver(Protocol):
+    async def setup(self) -> None:
+        raise NotImplementedError
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        raise NotImplementedError
+
+
 class _AsyncCheckpointerContext(Protocol):
-    async def __aenter__(self) -> AsyncPostgresSaver:
+    async def __aenter__(self) -> WorkflowCheckpointSaver:
         raise NotImplementedError
 
     async def __aexit__(
@@ -53,12 +62,19 @@ class InMemoryWorkflowCheckpointerProvider:
 
 
 class PostgresWorkflowCheckpointerProvider:
-    def __init__(self, database: DatabaseSettings, *, setup: bool = False) -> None:
+    def __init__(
+        self,
+        database: DatabaseSettings,
+        *,
+        setup: bool = False,
+        saver_factory: Callable[[str], _AsyncCheckpointerContext] | None = None,
+    ) -> None:
         self._conn_string = database.psycopg_url
         self._setup = setup
+        self._saver_factory = saver_factory or AsyncPostgresSaver.from_conn_string
 
     async def for_run(self, run_id: str) -> "WorkflowCheckpointerHandle":
-        context = AsyncPostgresSaver.from_conn_string(self._conn_string)
+        context = self._saver_factory(self._conn_string)
         saver = await context.__aenter__()
         if self._setup:
             await saver.setup()

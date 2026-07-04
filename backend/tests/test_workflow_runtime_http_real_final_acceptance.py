@@ -44,6 +44,9 @@ from backend.app.tool_registry.models import (
     ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
 )
+from backend.app.workflow_runtime.checkpoint_lifecycle import (
+    LangGraphCheckpointLifecycleService,
+)
 from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
 from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
 from fastapi.testclient import TestClient
@@ -106,6 +109,7 @@ def running_http_api_server() -> Iterator[tuple[str, dict[str, Any]]]:
 
 def test_real_workflow_runtime_runs_http_node_through_execution_gateway() -> None:
     settings = AppSettings()
+    asyncio.run(LangGraphCheckpointLifecycleService(settings.database).setup())
     project_id = uuid4()
     actor_id = uuid4()
     cleanup_ids = _CleanupIds(project_id=project_id, actor_id=actor_id)

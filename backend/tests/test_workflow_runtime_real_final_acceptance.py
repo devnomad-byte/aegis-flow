@@ -50,6 +50,9 @@ from backend.app.tool_registry.models import (
     ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
 )
+from backend.app.workflow_runtime.checkpoint_lifecycle import (
+    LangGraphCheckpointLifecycleService,
+)
 from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
 from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
 from fastapi.testclient import TestClient
@@ -78,6 +81,7 @@ def require_real_workflow_runtime_final_acceptance() -> AppSettings:
         pytest.skip("real workflow runtime final acceptance is not enabled")
     if not settings.model_gateway.openai_compatible.has_auth_token:
         pytest.skip("OpenAI-compatible auth token is not configured")
+    asyncio.run(LangGraphCheckpointLifecycleService(settings.database).setup())
     return settings
 
 
@@ -825,6 +829,7 @@ def test_real_workflow_runtime_resumes_human_interrupts_with_postgres_checkpoint
     )
     engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    checkpoint_lifecycle = LangGraphCheckpointLifecycleService(settings.database)
 
     async def seed() -> None:
         async with session_factory() as session:
@@ -1000,6 +1005,22 @@ def test_real_workflow_runtime_resumes_human_interrupts_with_postgres_checkpoint
                 assert policy_event_count == 2
 
         asyncio.run(assert_persisted())
+        checkpoint_health = asyncio.run(checkpoint_lifecycle.health())
+        assert checkpoint_health.ready is True
+        assert checkpoint_health.tables["checkpoints"].row_count is not None
+        assert checkpoint_health.tables["checkpoints"].row_count >= 1
+        asyncio.run(checkpoint_lifecycle.delete_thread(run_id))
+
+        async def assert_langgraph_thread_deleted() -> None:
+            async with session_factory() as session:
+                for table_name in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                    row_count = await session.scalar(
+                        text(f"select count(*) from {table_name} where thread_id = :run_id"),
+                        {"run_id": run_id},
+                    )
+                    assert row_count == 0
+
+        asyncio.run(assert_langgraph_thread_deleted())
     finally:
         asyncio.run(_cleanup(session_factory, cleanup_ids))
         asyncio.run(engine.dispose())

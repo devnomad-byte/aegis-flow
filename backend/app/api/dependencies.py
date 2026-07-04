@@ -196,7 +196,7 @@ RuntimeTraceStoreDependency = Depends(get_runtime_trace_store)
 
 
 def get_workflow_checkpointer_provider() -> WorkflowCheckpointerProvider:
-    return PostgresWorkflowCheckpointerProvider(AppSettings().database, setup=True)
+    return PostgresWorkflowCheckpointerProvider(AppSettings().database)
 
 
 WorkflowCheckpointerProviderDependency = Depends(get_workflow_checkpointer_provider)
