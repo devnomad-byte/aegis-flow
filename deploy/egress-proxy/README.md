@@ -30,3 +30,30 @@ docker compose -f deploy/egress-proxy/squid/docker-compose.yml up -d
 ```
 
 Squid is kept as a simple ACL-based alternative for environments that standardize on Squid. It provides host/port ACLs, a basic unsafe destination ACL, stripped `Location` response headers, stripped `Authorization`/`Cookie` request headers, and access logs without full URLs. It is not a metrics-equivalent replacement for the Envoy profile.
+
+## Kubernetes / Helm Profile
+
+Standard Kubernetes profile:
+
+```powershell
+kubectl apply -f deploy/egress-proxy/kubernetes/manifests/aegis-egress-proxy.yaml
+```
+
+Helm chart skeleton:
+
+```powershell
+helm upgrade --install aegis-egress-proxy deploy/egress-proxy/kubernetes/helm/aegis-egress-proxy --namespace aegis-project-123 --create-namespace
+```
+
+The Kubernetes profile includes:
+
+- Namespace, ServiceAccount, ConfigMap, Deployment, Service, and NetworkPolicy resources.
+- RollingUpdate deployment strategy with `maxUnavailable=0`.
+- Envoy config mounted from ConfigMap and optional Secret reference for audit integration.
+- ClusterIP service exposing proxy port `8888` and admin metrics port `9901` inside the cluster.
+- Prometheus scrape annotations and an optional ServiceMonitor template.
+- Client egress policy that only allows project egress clients to reach the proxy and DNS.
+- Proxy ingress policy that only allows same-project clients on `8888` and observability namespaces on `9901`.
+- Proxy egress policy that allows DNS and configured TCP ports while excluding unsafe private, loopback, link-local, CGNAT, multicast, and reserved ranges.
+
+Kubernetes NetworkPolicy requires a CNI plugin that enforces NetworkPolicy. Treat `resolved_address_filter` as an Envoy upgrade option only after the target Envoy image accepts that field in validation; the current profile relies on platform egress policy, Envoy host/port policy, and Kubernetes NetworkPolicy as the deployable defense in depth.

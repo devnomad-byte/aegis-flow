@@ -1,0 +1,321 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aegis-project-123
+  labels:
+    aegis.flow/project: project-123
+    aegis.flow/egress-namespace: 'true'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aegis-egress-proxy
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis-egress-proxy-config
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+data:
+  envoy.yaml: "admin:\n  address:\n    socket_address:\n      address: 0.0.0.0\n \
+    \     port_value: 9901\nstatic_resources:\n  listeners:\n  - name: aegis_egress_listener\n\
+    \    address:\n      socket_address:\n        address: 0.0.0.0\n        port_value:\
+    \ 8888\n    filter_chains:\n    - filters:\n      - name: envoy.filters.network.http_connection_manager\n\
+    \        typed_config:\n          '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager\n\
+    \          stat_prefix: aegis_egress\n          codec_type: AUTO\n          route_config:\n\
+    \            name: aegis_egress_route\n            virtual_hosts:\n          \
+    \  - name: dynamic_forward_proxy\n              domains:\n              - '*'\n\
+    \              routes:\n              - match:\n                  prefix: /\n\
+    \                route:\n                  cluster: dynamic_forward_proxy_cluster\n\
+    \          http_filters:\n          - name: envoy.filters.http.lua\n         \
+    \   typed_config:\n              '@type': type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua\n\
+    \              default_source_code:\n                filename: /etc/envoy/policy.lua\n\
+    \          - name: envoy.filters.http.dynamic_forward_proxy\n            typed_config:\n\
+    \              '@type': type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig\n\
+    \              dns_cache_config:\n                name: dynamic_forward_proxy_cache_config\n\
+    \                dns_lookup_family: V4_ONLY\n                dns_min_refresh_rate:\
+    \ 60s\n                host_ttl: 300s\n          - name: envoy.filters.http.router\n\
+    \            typed_config:\n              '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router\n\
+    \  clusters:\n  - name: dynamic_forward_proxy_cluster\n    lb_policy: CLUSTER_PROVIDED\n\
+    \    cluster_type:\n      name: envoy.clusters.dynamic_forward_proxy\n      typed_config:\n\
+    \        '@type': type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig\n\
+    \        dns_cache_config:\n          name: dynamic_forward_proxy_cache_config\n\
+    \          dns_lookup_family: V4_ONLY\n          dns_min_refresh_rate: 60s\n \
+    \         host_ttl: 300s\n"
+  policy.lua: "local exact_hosts = {\n  [\"allowed.internal\"] = true,\n}\n\nlocal\
+    \ wildcard_hosts = {\n\n}\n\nlocal allowed_ports = {\n  [8080] = true,\n}\n\n\
+    local function json_escape(value)\n  return string.gsub(value or \"\", '\"', '\\\
+    \"')\nend\n\nlocal function host_matches(host)\n  if exact_hosts[host] == true\
+    \ then\n    return true\n  end\n  for suffix, _ in pairs(wildcard_hosts) do\n\
+    \    local dotted_suffix = \".\" .. suffix\n    if host ~= suffix and string.sub(host,\
+    \ -string.len(dotted_suffix)) == dotted_suffix then\n      return true\n    end\n\
+    \  end\n  return false\nend\n\nlocal function audit(handle, reason, host, port)\n\
+    \  local method = json_escape(handle:headers():get(\":method\") or \"\")\n  local\
+    \ message = '{\"reason\":\"' .. json_escape(reason) ..\n    '\",\"target_host\"\
+    :\"' .. json_escape(host) ..\n    '\",\"target_port\":' .. tostring(port) ..\n\
+    \    ',\"method\":\"' .. method .. '\"}'\n  handle:logInfo(message)\nend\n\nlocal\
+    \ function deny(handle, status, reason, host, port)\n  audit(handle, reason, host,\
+    \ port)\n  local headers = {[\":status\"] = tostring(status), [\"content-type\"\
+    ] = \"text/plain\"}\n  handle:respond(headers, reason)\nend\n\nfunction envoy_on_request(handle)\n\
+    \  local authority = handle:headers():get(\":authority\") or \"\"\n  local host\
+    \ = string.lower(string.gsub(authority, \":.*$\", \"\"))\n  local port = tonumber(string.match(authority,\
+    \ \":(%d+)$\") or \"80\")\n  if host_matches(host) ~= true then\n    return deny(handle,\
+    \ 403, \"host_not_allowlisted\", host, port)\n  end\n  if next(allowed_ports)\
+    \ ~= nil and allowed_ports[port] ~= true then\n    return deny(handle, 403, \"\
+    port_not_allowlisted\", host, port)\n  end\n  handle:streamInfo():dynamicMetadata():set(\"\
+    envoy.filters.http.lua\", \"target_host\", host)\n  handle:streamInfo():dynamicMetadata():set(\"\
+    envoy.filters.http.lua\", \"target_port\", port)\n  audit(handle, \"allowed\"\
+    , host, port)\nend\n\nfunction envoy_on_response(handle)\n  local status = tonumber(handle:headers():get(\"\
+    :status\") or \"0\")\n  local location = handle:headers():get(\"location\")\n\
+    \  if status >= 300 and status < 400 and location ~= nil then\n    local metadata\
+    \ = handle:streamInfo():dynamicMetadata():get(\"envoy.filters.http.lua\")\n  \
+    \  local host = metadata[\"target_host\"] or \"\"\n    local port = metadata[\"\
+    target_port\"] or 0\n    handle:headers():replace(\":status\", \"502\")\n    handle:headers():replace(\"\
+    content-type\", \"text/plain\")\n    handle:headers():remove(\"location\")\n \
+    \   handle:body():setBytes(\"redirect_denied\")\n    audit(handle, \"redirect_denied\"\
+    , host, port)\n  end\nend\n"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis-egress-proxy
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aegis-egress-proxy
+      aegis.flow/project: project-123
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aegis-egress-proxy
+        app.kubernetes.io/part-of: aegis-flow
+        app.kubernetes.io/component: egress-proxy
+        aegis.flow/project: project-123
+    spec:
+      serviceAccountName: aegis-egress-proxy
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.35-latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - envoy
+        - -c
+        - /etc/envoy/envoy.yaml
+        ports:
+        - name: proxy
+          containerPort: 8888
+          protocol: TCP
+        - name: admin-metrics
+          containerPort: 9901
+          protocol: TCP
+        env:
+        - name: AEGIS_EGRESS_AUDIT_SHARED_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aegis-egress-proxy-secrets
+              key: audit-shared-key
+              optional: true
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: admin-metrics
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: admin-metrics
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy/envoy.yaml
+          subPath: envoy.yaml
+          readOnly: true
+        - name: envoy-config
+          mountPath: /etc/envoy/policy.lua
+          subPath: policy.lua
+          readOnly: true
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: aegis-egress-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis-egress-proxy
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+  annotations:
+    prometheus.io/scrape: 'true'
+    prometheus.io/path: /stats/prometheus
+    prometheus.io/port: '9901'
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: aegis-egress-proxy
+    aegis.flow/project: project-123
+  ports:
+  - name: proxy
+    port: 8888
+    targetPort: proxy
+    protocol: TCP
+  - name: admin-metrics
+    port: 9901
+    targetPort: admin-metrics
+    protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aegis-egress-client-egress
+  namespace: aegis-project-123
+spec:
+  podSelector:
+    matchLabels:
+      aegis.flow/egress-client: 'true'
+      aegis.flow/project: project-123
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: aegis-egress-proxy
+    ports:
+    - protocol: TCP
+      port: 8888
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aegis-egress-proxy-ingress
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aegis-egress-proxy
+      aegis.flow/project: project-123
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          aegis.flow/egress-client: 'true'
+          aegis.flow/project: project-123
+    ports:
+    - protocol: TCP
+      port: 8888
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          aegis.flow/observability: 'true'
+    ports:
+    - protocol: TCP
+      port: 9901
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aegis-egress-proxy-egress
+  namespace: aegis-project-123
+  labels:
+    app.kubernetes.io/name: aegis-egress-proxy
+    app.kubernetes.io/part-of: aegis-flow
+    app.kubernetes.io/component: egress-proxy
+    aegis.flow/project: project-123
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aegis-egress-proxy
+      aegis.flow/project: project-123
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 224.0.0.0/4
+        - 240.0.0.0/4
+    ports:
+    - protocol: TCP
+      port: 8080

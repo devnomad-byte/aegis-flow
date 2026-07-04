@@ -1,0 +1,6 @@
+apiVersion: v2
+name: aegis-egress-proxy
+description: AegisFlow governed Envoy egress proxy profile.
+type: application
+version: 0.1.0
+appVersion: '1.35'

@@ -1,0 +1,56 @@
+projectRef: project-123
+namespaceOverride: aegis-project-123
+replicaCount: 2
+image:
+  repository: envoyproxy/envoy
+  tag: v1.35-latest
+  pullPolicy: IfNotPresent
+secretRef:
+  name: aegis-egress-proxy-secrets
+  auditSharedKey: audit-shared-key
+egressPolicy:
+  allowedHosts:
+  - allowed.internal
+  allowedPorts:
+  - 8080
+service:
+  type: ClusterIP
+  proxyPort: 8888
+  adminMetricsPort: 9901
+  annotations:
+    prometheus.io/scrape: 'true'
+    prometheus.io/path: /stats/prometheus
+    prometheus.io/port: '9901'
+networkPolicy:
+  enabled: true
+  clientSelector:
+    aegis.flow/egress-client: 'true'
+  observabilityNamespaceSelector:
+    aegis.flow/observability: 'true'
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  unsafeCidrs:
+  - 10.0.0.0/8
+  - 127.0.0.0/8
+  - 169.254.0.0/16
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 224.0.0.0/4
+  - 240.0.0.0/4
+serviceMonitor:
+  enabled: false
+  interval: 30s
+failureDrills:
+  commands:
+  - verify-client-direct-egress-denied
+  - verify-denied-host
+  - verify-denied-port
+  - verify-proxy-unavailable
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
