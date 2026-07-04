@@ -13,7 +13,7 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
   },
   inputs: [
     {
-      name: "alert_payload",
+      key: "alert_payload",
       type: "object",
       required: true,
       description: "Alertmanager 或监控系统传入的告警上下文。",
@@ -35,8 +35,9 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
       risk_level: "medium",
       position: { x: 340, y: 80 },
       data: {
+        goal: "Diagnose alert context and choose governed evidence collection steps.",
         tool_groups: ["kubernetes-readonly"],
-        mcp_servers: ["cluster-observability"],
+        autonomy_level: 1,
       },
     },
     {
@@ -48,6 +49,7 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
       data: {
         mcp_server_ref: "cluster-observability",
         tool_group_ref: "kubernetes-readonly",
+        tool_name: "kubectl_get_pods",
         environment: "staging",
       },
     },
@@ -60,7 +62,7 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
       position: { x: 630, y: 180 },
       data: {
         template_ref: "collect-pod-logs",
-        template_version: "1.0.0",
+        template_version: 1,
         environment: "staging",
       },
     },
@@ -78,7 +80,6 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
         temperature: 0,
         max_tokens: 128,
         output_schema_ref: "incident-report/v1",
-        structured_output_placeholder: "{ \"summary\": \"...\", \"next_action\": \"...\" }",
       },
     },
     {
@@ -97,9 +98,9 @@ export const SAMPLE_WORKFLOW: WorkflowDefinition = {
     { source: "llm_1", target: "end_1" },
   ],
   policies: {
-    require_approval_for_risk: ["high", "critical"],
+    default_environment: "staging",
     max_runtime_seconds: 900,
-    allowed_environments: ["staging"],
+    max_tool_calls: 20,
   },
 };
 

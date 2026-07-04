@@ -28,8 +28,8 @@ export type WorkflowMetadata = {
 };
 
 export type WorkflowInputDefinition = {
-  name: string;
-  type: "string" | "number" | "boolean" | "object" | "array";
+  key: string;
+  type: "string" | "number" | "integer" | "boolean" | "object" | "array";
   required?: boolean;
   description?: string;
 };
@@ -69,7 +69,6 @@ export type LlmNodeData = {
   max_tokens?: number;
   output_schema_ref?: string;
   output_schema?: Record<string, unknown>;
-  structured_output_placeholder?: string;
 };
 
 export type EdgeDefinition = {
@@ -88,8 +87,10 @@ export type EdgeDefinition = {
 };
 
 export type WorkflowPolicies = {
-  require_approval_for_risk?: RiskLevel[];
+  default_environment?: string;
+  max_tool_calls?: number;
   max_runtime_seconds?: number;
+  require_approval_for_risk?: RiskLevel[];
   allowed_environments?: string[];
 };
 

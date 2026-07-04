@@ -645,10 +645,71 @@ select {
   opacity: 0.62;
 }
 
+.toolbar-button:hover {
+  border-color: rgba(46, 243, 197, 0.58);
+}
+
+.toolbar-button-danger {
+  border-color: rgba(255, 77, 94, 0.58);
+  color: var(--color-danger);
+}
+
 .workflow-stats {
   display: grid;
   gap: var(--space-md);
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.node-library {
+  align-items: center;
+  background: rgba(16, 22, 21, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(150px, 0.28fr) minmax(0, 1fr);
+  min-height: 92px;
+  padding: var(--space-md);
+}
+
+.node-library strong {
+  display: block;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.node-library-actions {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(6, minmax(98px, 1fr));
+}
+
+.node-library-button {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.9);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  cursor: pointer;
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 54px;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.node-library-button:hover {
+  border-color: rgba(46, 243, 197, 0.58);
+}
+
+.node-library-button small {
+  color: var(--color-text-muted);
+  display: block;
+  font-size: 11px;
+  line-height: 1.25;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
 }
 
 .metric-cell {
@@ -859,6 +920,31 @@ select {
 .preview-list {
   display: grid;
   gap: var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.edge-composer-grid {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.edge-identity-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.78);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  display: grid;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  gap: var(--space-sm);
+  grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr);
+  min-height: 42px;
+  padding: 0 var(--space-md);
+}
+
+.edge-identity-row span {
   overflow-wrap: anywhere;
 }
 
@@ -1552,6 +1638,19 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .node-library {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .node-library-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .edge-composer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1629,6 +1728,7 @@ select {
   }
 
   .workflow-stats,
+  .node-library-actions,
   .global-metric-grid,
   .node-detail-grid,
   .model-trace-metrics,

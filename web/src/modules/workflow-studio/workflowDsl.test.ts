@@ -3,12 +3,17 @@ import { describe, expect, it } from "vitest";
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
   buildImportPreviewSummary,
+  createWorkflowEdge,
+  createWorkflowNode,
+  deleteWorkflowEdge,
+  deleteWorkflowNode,
   flowToWorkflow,
   renameWorkflowNode,
+  updateWorkflowEdge,
   updateWorkflowNodeData,
   workflowToFlow,
 } from "./workflowDsl";
-import { previewWorkflowImportFromYaml } from "./workflowYaml";
+import { exportWorkflowYaml, previewWorkflowImportFromYaml } from "./workflowYaml";
 import type { WorkflowDefinition } from "./workflowTypes";
 
 const WORKFLOW_V2_YAML = `
@@ -60,6 +65,7 @@ nodes:
     data:
       mcp_server_ref: cluster-observability
       tool_group_ref: kubernetes-readonly
+      tool_name: kubectl_get_pods
       environment: staging
   - id: llm_1
     type: llm
@@ -204,10 +210,20 @@ describe("workflow DSL adapters", () => {
     const summary = buildImportPreviewSummary(preview.analysis);
 
     expect(preview.workflow.workflow.name).toBe("运维排障导入样例");
+    expect(preview.workflow.inputs?.[0]?.key).toBe("alert_payload");
     expect(summary.missingCount).toBe(1);
-    expect(summary.missingLabels).toContain("shell_template: collect-pod-logs@1.0.0");
+    expect(summary.missingLabels).toContain("shell_template: collect-pod-logs@1");
     expect(summary.riskLabels).toEqual(["medium", "high"]);
     expect(summary.canPublishOrRun).toBe(false);
+  });
+
+  it("exports backend-compatible YAML keys and omits frontend-only draft fields", () => {
+    const exportedYaml = exportWorkflowYaml(SAMPLE_WORKFLOW);
+
+    expect(exportedYaml).toContain("key: alert_payload");
+    expect(exportedYaml).not.toContain("name: alert_payload");
+    expect(exportedYaml).not.toContain("structured_output_placeholder");
+    expect(exportedYaml).toContain("template_version: 1");
   });
 
   it("parses workflow DSL v2 and reports import diff against the current canvas", () => {
@@ -260,5 +276,43 @@ describe("workflow DSL adapters", () => {
     });
     expect(loopEdge?.label).toBe("refine");
     expect(loopEdge?.loop?.max_iterations).toBe(3);
+  });
+
+  it("creates library nodes, edits loop edges, and deletes dependent edges in v2 DSL", () => {
+    const withCondition = createWorkflowNode(SAMPLE_WORKFLOW, "condition");
+    const condition = withCondition.nodes.at(-1);
+
+    expect(withCondition.schema_version).toBe("workflow.dsl/v0.2");
+    expect(condition?.type).toBe("condition");
+    expect(condition?.id).toMatch(/^condition_\d+$/);
+    expect(condition?.data).toEqual({ expression: "inputs.route", cases: ["default"] });
+
+    const withLoop = createWorkflowEdge(withCondition, {
+      source: "llm_1",
+      target: condition?.id ?? "",
+      kind: "loop",
+    });
+    const loopEdge = withLoop.edges.find((edge) => edge.kind === "loop");
+
+    expect(loopEdge?.loop).toEqual({ max_iterations: 3 });
+
+    const updated = updateWorkflowEdge(withLoop, "llm_1->condition_1:loop:default", {
+      label: "refine",
+      loop: { max_iterations: 5, while_expression: "needs_more_context" },
+    });
+    const updatedLoopEdge = updated.edges.find((edge) => edge.kind === "loop");
+
+    expect(updatedLoopEdge?.label).toBe("refine");
+    expect(updatedLoopEdge?.loop?.max_iterations).toBe(5);
+    expect(updatedLoopEdge?.loop?.while_expression).toBe("needs_more_context");
+
+    const withoutLoop = deleteWorkflowEdge(updated, "llm_1->condition_1:loop:default");
+
+    expect(withoutLoop.edges.some((edge) => edge.kind === "loop")).toBe(false);
+
+    const withoutCondition = deleteWorkflowNode(withLoop, condition?.id ?? "");
+
+    expect(withoutCondition.nodes.some((node) => node.id === condition?.id)).toBe(false);
+    expect(withoutCondition.edges.some((edge) => edge.target === condition?.id)).toBe(false);
   });
 });

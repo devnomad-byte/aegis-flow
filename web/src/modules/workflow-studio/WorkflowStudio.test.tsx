@@ -17,7 +17,7 @@ describe("WorkflowStudio", () => {
     await user.click(screen.getByRole("button", { name: "预览导入" }));
 
     expect(screen.getByText("缺失资源 1")).toBeInTheDocument();
-    expect(screen.getByText("shell_template: collect-pod-logs@1.0.0")).toBeInTheDocument();
+    expect(screen.getByText("shell_template: collect-pod-logs@1")).toBeInTheDocument();
     expect(screen.getByText("禁止发布/运行")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "应用预览到画布" }));
@@ -113,6 +113,7 @@ nodes:
     data:
       mcp_server_ref: cluster-observability
       tool_group_ref: kubernetes-readonly
+      tool_name: kubectl_get_pods
       environment: staging
   - id: llm_1
     type: llm
@@ -170,5 +171,52 @@ edges:
     expect(exportedYaml.value).toContain("schema_version: workflow.dsl/v0.2");
     expect(exportedYaml.value).toContain("kind: loop");
     expect(exportedYaml.value).toContain("parameters:");
+  });
+
+  it("adds nodes from the library, edits a loop edge, deletes canvas items, and exports v2 YAML", async () => {
+    const user = userEvent.setup();
+
+    render(<WorkflowStudio project={defaultProjectContext} />);
+
+    await user.click(screen.getByRole("button", { name: "Add Condition node" }));
+    await user.click(screen.getByRole("button", { name: "Add End node" }));
+
+    expect(screen.getByText("Condition Router")).toBeInTheDocument();
+    expect(screen.getByText("End Output")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Edge source"), "llm_1");
+    await user.selectOptions(screen.getByLabelText("Edge target"), "condition_1");
+    await user.selectOptions(screen.getByLabelText("Edge kind"), "loop");
+    await user.click(screen.getByRole("button", { name: "Create edge" }));
+
+    expect(screen.getByText("Selected Edge")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("loop")).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Loop max iterations"));
+    await user.type(screen.getByLabelText("Loop max iterations"), "5");
+    await user.clear(screen.getByLabelText("Edge label"));
+    await user.type(screen.getByLabelText("Edge label"), "refine");
+    await user.clear(screen.getByLabelText("Source handle"));
+    await user.type(screen.getByLabelText("Source handle"), "retry");
+
+    await user.click(screen.getByRole("button", { name: "导出 YAML" }));
+    let exportedYaml = screen.getByLabelText("导出的 Workflow YAML") as HTMLTextAreaElement;
+    expect(exportedYaml.value).toContain("schema_version: workflow.dsl/v0.2");
+    expect(exportedYaml.value).toContain("id: condition_1");
+    expect(exportedYaml.value).toContain("kind: loop");
+    expect(exportedYaml.value).toContain("source_handle: retry");
+    expect(exportedYaml.value).toContain("max_iterations: 5");
+    expect(exportedYaml.value).toContain("label: refine");
+
+    await user.click(screen.getByRole("button", { name: "Delete selected edge" }));
+    await user.click(screen.getByRole("button", { name: "导出 YAML" }));
+    exportedYaml = screen.getByLabelText("导出的 Workflow YAML") as HTMLTextAreaElement;
+    expect(exportedYaml.value).not.toContain("kind: loop");
+
+    await user.selectOptions(screen.getByLabelText("Select node for inspector"), "condition_1");
+    await user.click(screen.getByRole("button", { name: "Delete selected node" }));
+    await user.click(screen.getByRole("button", { name: "导出 YAML" }));
+    exportedYaml = screen.getByLabelText("导出的 Workflow YAML") as HTMLTextAreaElement;
+    expect(exportedYaml.value).not.toContain("condition_1");
   });
 });

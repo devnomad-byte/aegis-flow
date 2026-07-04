@@ -41,7 +41,7 @@ export function parseWorkflowYaml(yamlText: string): WorkflowDefinition {
 }
 
 export function exportWorkflowYaml(workflow: WorkflowDefinition): string {
-  return stringify(workflow, { lineWidth: 0 });
+  return stringify(toBackendWorkflowDocument(workflow), { lineWidth: 0 });
 }
 
 export function previewWorkflowImportFromYaml(
@@ -100,16 +100,48 @@ function normalizeInput(value: unknown): WorkflowInputDefinition {
 
   const inputType = asEnum(
     value.type,
-    ["string", "number", "boolean", "object", "array"],
+    ["string", "number", "integer", "boolean", "object", "array"],
     "input.type",
   );
 
   return {
-    name: asRequiredString(value.name, "input.name"),
+    key: asRequiredString(value.key ?? value.name, "input.key"),
     type: inputType,
     required: typeof value.required === "boolean" ? value.required : undefined,
     description: typeof value.description === "string" ? value.description : undefined,
   };
+}
+
+function toBackendWorkflowDocument(workflow: WorkflowDefinition): WorkflowDefinition {
+  const document: WorkflowDefinition = {
+    ...workflow,
+    nodes: workflow.nodes.map((node) => ({
+      ...node,
+      data: sanitizeNodeDataForExport(node),
+    })),
+  };
+
+  if (workflow.inputs) {
+    document.inputs = workflow.inputs.map((input) => ({ ...input, key: input.key }));
+  } else {
+    delete document.inputs;
+  }
+
+  return document;
+}
+
+function sanitizeNodeDataForExport(node: NodeDefinition) {
+  if (!isRecord(node.data)) {
+    return node.data;
+  }
+
+  if (node.type !== "llm") {
+    return node.data;
+  }
+
+  const data = { ...node.data };
+  delete data.structured_output_placeholder;
+  return data;
 }
 
 function normalizeNode(value: unknown): NodeDefinition {

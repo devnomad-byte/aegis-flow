@@ -1,21 +1,43 @@
 import "@xyflow/react/dist/style.css";
 
-import { useCallback, useMemo, useState } from "react";
+import { type ComponentType, useCallback, useMemo, useState } from "react";
 import {
   Background,
   Controls,
   MiniMap,
   ReactFlow,
+  type Connection,
+  type EdgeMouseHandler,
   type Node,
   type NodeMouseHandler,
 } from "@xyflow/react";
-import { Download, FileSearch, Import, ShieldAlert } from "lucide-react";
+import {
+  Bot,
+  BrainCircuit,
+  CheckCircle2,
+  CircleDot,
+  Download,
+  FileSearch,
+  GitBranch,
+  Import,
+  Link2,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
   buildImportPreviewSummary,
+  createWorkflowEdge,
+  createWorkflowNode,
+  deleteWorkflowEdge,
+  deleteWorkflowNode,
+  ensureWorkflowV2,
   getLlmNodeData,
+  getWorkflowEdgeIdentity,
   renameWorkflowNode,
+  updateWorkflowEdge,
   updateWorkflowNodeData,
   workflowToFlow,
 } from "./workflowDsl";
@@ -23,7 +45,10 @@ import { exportWorkflowYaml, previewWorkflowImportFromYaml } from "./workflowYam
 import { WorkflowNode } from "./WorkflowNode";
 import type { ProjectContext } from "../../shell/projectContext";
 import type {
+  EdgeDefinition,
+  EdgeKind,
   ImportPreviewSummary,
+  NodeType,
   WorkflowDefinition,
   WorkflowFlowNode,
   WorkflowImportPreview,
@@ -48,6 +73,19 @@ type LlmTraceEvent = {
   totalTokens: number;
 };
 
+type NodeLibraryItem = {
+  type: NodeType;
+  label: string;
+  description: string;
+  icon: ComponentType<{ size?: number }>;
+};
+
+type EdgeComposerState = {
+  source: string;
+  target: string;
+  kind: EdgeKind;
+};
+
 const nodeTypes = {
   workflowNode: WorkflowNode,
 };
@@ -63,6 +101,51 @@ const sampleLlmTraceEvents: LlmTraceEvent[] = [
     totalTokens: 32,
   },
 ];
+const NODE_LIBRARY_ITEMS: NodeLibraryItem[] = [
+  {
+    type: "start",
+    label: "Start",
+    description: "Entry point",
+    icon: CircleDot,
+  },
+  {
+    type: "llm",
+    label: "LLM",
+    description: "Model policy",
+    icon: BrainCircuit,
+  },
+  {
+    type: "condition",
+    label: "Condition",
+    description: "Branch route",
+    icon: GitBranch,
+  },
+  {
+    type: "mcp_tool",
+    label: "MCP Tool",
+    description: "Tool gateway",
+    icon: Bot,
+  },
+  {
+    type: "human_approval",
+    label: "Human Approval",
+    description: "Risk gate",
+    icon: ShieldCheck,
+  },
+  {
+    type: "end",
+    label: "End",
+    description: "Final output",
+    icon: CheckCircle2,
+  },
+];
+const EDGE_KIND_OPTIONS: Array<{ label: string; value: EdgeKind }> = [
+  { label: "sequence", value: "sequence" },
+  { label: "condition", value: "condition" },
+  { label: "parallel", value: "parallel" },
+  { label: "loop", value: "loop" },
+  { label: "resume", value: "resume" },
+];
 
 export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(SAMPLE_WORKFLOW);
@@ -73,6 +156,11 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const [preview, setPreview] = useState<WorkflowImportPreview | null>(initialPreview);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [exportedYaml, setExportedYaml] = useState("");
+  const [selectedEdgeId, setSelectedEdgeId] = useState("");
+  const [edgeComposer, setEdgeComposer] = useState<EdgeComposerState>(
+    buildDefaultEdgeComposer(SAMPLE_WORKFLOW),
+  );
+  const [edgeComposerError, setEdgeComposerError] = useState<string | null>(null);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([
     { time: "00:00.000", label: "Workflow DSL loaded", state: "ok" },
     { time: "00:00.146", label: "Project catalog analyzed", state: "ok" },
@@ -85,9 +173,25 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   );
 
   const flow = useMemo(() => workflowToFlow(workflow, preview?.analysis), [preview?.analysis, workflow]);
+  const flowEdges = useMemo(
+    () => flow.edges.map((edge) => ({ ...edge, selected: edge.id === selectedEdgeId })),
+    [flow.edges, selectedEdgeId],
+  );
+  const nodeOptions = useMemo(
+    () =>
+      workflow.nodes.map((node) => ({
+        label: `${node.name} (${node.id})`,
+        value: node.id,
+      })),
+    [workflow.nodes],
+  );
   const selectedNode = useMemo(
     () => workflow.nodes.find((node) => node.id === selectedNodeId) ?? workflow.nodes[0],
     [selectedNodeId, workflow.nodes],
+  );
+  const selectedEdge = useMemo(
+    () => workflow.edges.find((edge) => getWorkflowEdgeIdentity(edge) === selectedEdgeId) ?? null,
+    [selectedEdgeId, workflow.edges],
   );
   const selectedFlowNode = flow.nodes.find((node) => node.id === selectedNode.id);
   const selectedLlmTraceEvents = sampleLlmTraceEvents.filter(
@@ -118,11 +222,13 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     }
 
     setWorkflow(preview.workflow);
+    setSelectedEdgeId("");
     setSelectedNodeId((currentNodeId) =>
       preview.workflow.nodes.some((node) => node.id === currentNodeId)
         ? currentNodeId
         : (preview.workflow.nodes[0]?.id ?? ""),
     );
+    setEdgeComposer(buildDefaultEdgeComposer(preview.workflow));
     setTimelineEvents((events) => [
       { time: "00:00.704", label: "Preview applied to canvas draft", state: "ok" },
       ...events.slice(0, 4),
@@ -130,7 +236,7 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   }, [preview]);
 
   const handleExportYaml = useCallback(() => {
-    setExportedYaml(exportWorkflowYaml(workflow));
+    setExportedYaml(exportWorkflowYaml(ensureWorkflowV2(workflow)));
     setTimelineEvents((events) => [
       { time: "00:00.881", label: "Workflow DSL exported as YAML", state: "ok" },
       ...events.slice(0, 4),
@@ -140,8 +246,38 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const handleNodeClick = useCallback<NodeMouseHandler>(
     (_event, node: Node) => {
       setSelectedNodeId(node.id);
+      setSelectedEdgeId("");
     },
     [],
+  );
+
+  const handleEdgeClick = useCallback<EdgeMouseHandler>(
+    (_event, edge) => {
+      setSelectedEdgeId(edge.id);
+    },
+    [],
+  );
+
+  const handleConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target) {
+        return;
+      }
+
+      const nextWorkflow = createWorkflowEdge(workflow, {
+        source: connection.source,
+        target: connection.target,
+        source_handle: connection.sourceHandle,
+        target_handle: connection.targetHandle,
+      });
+      const newEdge = findNewEdge(workflow.edges, nextWorkflow.edges);
+
+      setWorkflow(nextWorkflow);
+      if (newEdge) {
+        setSelectedEdgeId(getWorkflowEdgeIdentity(newEdge));
+      }
+    },
+    [workflow],
   );
 
   const handleNodeDragStop = useCallback(
@@ -180,6 +316,128 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     [selectedNode.id],
   );
 
+  const handleAddNode = useCallback(
+    (nodeType: NodeType) => {
+      const nextWorkflow = createWorkflowNode(workflow, nodeType);
+      const newNode = nextWorkflow.nodes.find(
+        (node) => !workflow.nodes.some((existingNode) => existingNode.id === node.id),
+      );
+
+      setWorkflow(nextWorkflow);
+      setSelectedEdgeId("");
+      setEdgeComposer((currentComposer) => ({
+        ...currentComposer,
+        source: currentComposer.source || nextWorkflow.nodes[0]?.id || "",
+        target: newNode?.id ?? currentComposer.target,
+      }));
+      if (newNode) {
+        setSelectedNodeId(newNode.id);
+      }
+      setTimelineEvents((events) => [
+        { time: "00:01.014", label: `${nodeType} node added from library`, state: "ok" },
+        ...events.slice(0, 4),
+      ]);
+    },
+    [workflow],
+  );
+
+  const handleCreateEdge = useCallback(() => {
+    if (!edgeComposer.source || !edgeComposer.target) {
+      setEdgeComposerError("Choose a source and target node.");
+      return;
+    }
+    if (edgeComposer.source === edgeComposer.target) {
+      setEdgeComposerError("Source and target must be different.");
+      return;
+    }
+
+    const nextWorkflow = createWorkflowEdge(workflow, edgeComposer);
+    const newEdge = findNewEdge(workflow.edges, nextWorkflow.edges);
+
+    if (!newEdge) {
+      setEdgeComposerError("This edge already exists.");
+      return;
+    }
+
+    setWorkflow(nextWorkflow);
+    setSelectedEdgeId(getWorkflowEdgeIdentity(newEdge));
+    setSelectedNodeId(edgeComposer.target);
+    setEdgeComposer((currentComposer) => ({ ...currentComposer, kind: "sequence" }));
+    setEdgeComposerError(null);
+    setTimelineEvents((events) => [
+      { time: "00:01.188", label: `${edgeComposer.kind} edge created`, state: "ok" },
+      ...events.slice(0, 4),
+    ]);
+  }, [edgeComposer, workflow]);
+
+  const handleSelectedEdgeChange = useCallback(
+    (patch: Partial<Omit<EdgeDefinition, "source" | "target">>) => {
+      if (!selectedEdge) {
+        return;
+      }
+
+      const nextWorkflow = updateWorkflowEdge(workflow, selectedEdgeId, patch);
+      const updatedEdge =
+        nextWorkflow.edges.find(
+          (edge) =>
+            edge.source === selectedEdge.source &&
+            edge.target === selectedEdge.target &&
+            (patch.kind ? edge.kind === patch.kind : getWorkflowEdgeIdentity(edge) === selectedEdgeId),
+        ) ??
+        nextWorkflow.edges.find(
+          (edge) => edge.source === selectedEdge.source && edge.target === selectedEdge.target,
+        );
+
+      setWorkflow(nextWorkflow);
+      if (updatedEdge) {
+        setSelectedEdgeId(getWorkflowEdgeIdentity(updatedEdge));
+      }
+    },
+    [selectedEdge, selectedEdgeId, workflow],
+  );
+
+  const handleSelectedEdgeKindChange = useCallback(
+    (kind: EdgeKind) => {
+      handleSelectedEdgeChange({
+        kind,
+        loop: kind === "loop" ? { max_iterations: selectedEdge?.loop?.max_iterations ?? 3 } : undefined,
+        source_handle:
+          kind === "condition" ? (selectedEdge?.source_handle ?? "case:default") : selectedEdge?.source_handle,
+      });
+    },
+    [handleSelectedEdgeChange, selectedEdge],
+  );
+
+  const handleDeleteSelectedEdge = useCallback(() => {
+    if (!selectedEdgeId) {
+      return;
+    }
+
+    const nextWorkflow = deleteWorkflowEdge(workflow, selectedEdgeId);
+    setWorkflow(nextWorkflow);
+    setSelectedEdgeId("");
+    setTimelineEvents((events) => [
+      { time: "00:01.274", label: "Selected edge deleted", state: "ok" },
+      ...events.slice(0, 4),
+    ]);
+  }, [selectedEdgeId, workflow]);
+
+  const handleDeleteSelectedNode = useCallback(() => {
+    if (!selectedNode) {
+      return;
+    }
+
+    const nextWorkflow = deleteWorkflowNode(workflow, selectedNode.id);
+    setWorkflow(nextWorkflow);
+    setSelectedNodeId(nextWorkflow.nodes[0]?.id ?? "");
+    setSelectedEdgeId("");
+    setEdgeComposer(buildDefaultEdgeComposer(nextWorkflow));
+    setTimelineEvents((events) => [
+      { time: "00:01.336", label: `${selectedNode.id} node deleted`, state: "ok" },
+      ...events.slice(0, 4),
+    ]);
+  }, [selectedNode, workflow]);
+
   return (
     <>
       <main className="aegis-main workflow-studio-main">
@@ -217,14 +475,18 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
             <Metric label="Run Gate" value={previewSummary?.canPublishOrRun ? "Ready" : "Blocked"} />
           </div>
 
+          <NodeLibrary items={NODE_LIBRARY_ITEMS} onAddNode={handleAddNode} />
+
           <div className="workflow-canvas">
             <ReactFlow
               colorMode="dark"
-              edges={flow.edges}
+              edges={flowEdges}
               fitView
               minZoom={0.45}
               nodes={flow.nodes}
               nodeTypes={nodeTypes}
+              onConnect={handleConnect}
+              onEdgeClick={handleEdgeClick}
               onNodeClick={handleNodeClick}
               onNodeDragStop={handleNodeDragStop}
               proOptions={{ hideAttribution: true }}
@@ -243,7 +505,56 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
         <PreviewPanel error={previewError} summary={previewSummary} />
 
         <section className="inspector-section">
+          <div className="telemetry">Edge Composer</div>
+          <div className="edge-composer-grid">
+            <SelectControl
+              label="Edge source"
+              onChange={(value) =>
+                setEdgeComposer((currentComposer) => ({ ...currentComposer, source: value }))
+              }
+              options={nodeOptions}
+              value={edgeComposer.source}
+            />
+            <SelectControl
+              label="Edge target"
+              onChange={(value) =>
+                setEdgeComposer((currentComposer) => ({ ...currentComposer, target: value }))
+              }
+              options={nodeOptions}
+              value={edgeComposer.target}
+            />
+            <SelectControl
+              label="Edge kind"
+              onChange={(value) =>
+                setEdgeComposer((currentComposer) => ({
+                  ...currentComposer,
+                  kind: value as EdgeKind,
+                }))
+              }
+              options={EDGE_KIND_OPTIONS}
+              value={edgeComposer.kind}
+            />
+          </div>
+          {edgeComposerError ? (
+            <div className="preview-alert preview-alert-danger">{edgeComposerError}</div>
+          ) : null}
+          <button className="toolbar-button" onClick={handleCreateEdge} type="button">
+            <Link2 aria-hidden="true" size={16} />
+            Create edge
+          </button>
+        </section>
+
+        <section className="inspector-section">
           <div className="telemetry">Selected Node</div>
+          <SelectControl
+            label="Select node for inspector"
+            onChange={(value) => {
+              setSelectedNodeId(value);
+              setSelectedEdgeId("");
+            }}
+            options={nodeOptions}
+            value={selectedNode.id}
+          />
           <label className="field-label" htmlFor="workflow-node-name">
             节点名称
           </label>
@@ -259,6 +570,10 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
             <DetailItem label="risk" value={selectedNode.risk_level ?? "low"} />
             <DetailItem label="resource" value={selectedFlowNode?.data.resourceState ?? "neutral"} />
           </div>
+          <button className="toolbar-button toolbar-button-danger" onClick={handleDeleteSelectedNode} type="button">
+            <Trash2 aria-hidden="true" size={16} />
+            Delete selected node
+          </button>
           {selectedFlowNode?.data.missingReferences.length ? (
             <div className="missing-inline">
               <ShieldAlert aria-hidden="true" size={16} />
@@ -269,6 +584,15 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
 
         {selectedNode.type === "llm" ? (
           <LlmControlsPanel node={selectedNode} onChange={handleNodeDataChange} />
+        ) : null}
+
+        {selectedEdge ? (
+          <SelectedEdgePanel
+            edge={selectedEdge}
+            onChange={handleSelectedEdgeChange}
+            onDelete={handleDeleteSelectedEdge}
+            onKindChange={handleSelectedEdgeKindChange}
+          />
         ) : null}
 
         <section className="inspector-section">
@@ -323,6 +647,138 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   );
 }
 
+function NodeLibrary({
+  items,
+  onAddNode,
+}: {
+  items: NodeLibraryItem[];
+  onAddNode: (nodeType: NodeType) => void;
+}) {
+  return (
+    <section className="node-library" aria-label="Node library">
+      <div>
+        <div className="telemetry">Node Library</div>
+        <strong>Harness nodes</strong>
+      </div>
+      <div className="node-library-actions">
+        {items.map((item) => {
+          const Icon = item.icon;
+
+          return (
+            <button
+              aria-label={`Add ${item.label} node`}
+              className="node-library-button"
+              key={item.type}
+              onClick={() => onAddNode(item.type)}
+              type="button"
+            >
+              <Icon size={16} />
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.description}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function SelectedEdgePanel({
+  edge,
+  onChange,
+  onDelete,
+  onKindChange,
+}: {
+  edge: EdgeDefinition;
+  onChange: (patch: Partial<Omit<EdgeDefinition, "source" | "target">>) => void;
+  onDelete: () => void;
+  onKindChange: (kind: EdgeKind) => void;
+}) {
+  const edgeKind = edge.kind ?? "sequence";
+
+  return (
+    <section className="inspector-section">
+      <div className="telemetry">Selected Edge</div>
+      <div className="edge-identity-row">
+        <span>{edge.source}</span>
+        <span>→</span>
+        <span>{edge.target}</span>
+      </div>
+      <SelectControl
+        label="Selected edge kind"
+        onChange={(value) => onKindChange(value as EdgeKind)}
+        options={EDGE_KIND_OPTIONS}
+        value={edgeKind}
+      />
+      <TextControl
+        label="Edge label"
+        onChange={(value) => onChange({ label: value })}
+        value={edge.label ?? ""}
+      />
+      <TextControl
+        label="Source handle"
+        onChange={(value) => {
+          const sourceHandle = value.trim();
+          onChange({ source_handle: sourceHandle ? sourceHandle : null });
+        }}
+        value={edge.source_handle ?? ""}
+      />
+      <TextControl
+        label="Target handle"
+        onChange={(value) => {
+          const targetHandle = value.trim();
+          onChange({ target_handle: targetHandle ? targetHandle : null });
+        }}
+        value={edge.target_handle ?? ""}
+      />
+      {edgeKind === "condition" ? (
+        <TextControl
+          label="Condition expression"
+          onChange={(value) => onChange({ condition: value })}
+          value={edge.condition ?? ""}
+        />
+      ) : null}
+      {edgeKind === "loop" ? (
+        <>
+          <NumberControl
+            label="Loop max iterations"
+            min={1}
+            onChange={(value) =>
+              onChange({
+                loop: {
+                  item_path: edge.loop?.item_path,
+                  max_iterations: value,
+                  while_expression: edge.loop?.while_expression,
+                },
+              })
+            }
+            value={edge.loop?.max_iterations ?? 3}
+          />
+          <TextControl
+            label="Loop while expression"
+            onChange={(value) =>
+              onChange({
+                loop: {
+                  item_path: edge.loop?.item_path,
+                  max_iterations: edge.loop?.max_iterations ?? 3,
+                  while_expression: value,
+                },
+              })
+            }
+            value={edge.loop?.while_expression ?? ""}
+          />
+        </>
+      ) : null}
+      <button className="toolbar-button toolbar-button-danger" onClick={onDelete} type="button">
+        <Trash2 aria-hidden="true" size={16} />
+        Delete selected edge
+      </button>
+    </section>
+  );
+}
+
 function LlmControlsPanel({
   node,
   onChange,
@@ -369,16 +825,39 @@ function LlmControlsPanel({
         onChange={(value) => onChange({ output_schema_ref: value })}
         value={data.output_schema_ref ?? ""}
       />
-      <label className="field-label" htmlFor="structured-output-placeholder">
-        Structured Output Placeholder
-        <textarea
-          className="yaml-field yaml-field-compact"
-          id="structured-output-placeholder"
-          onChange={(event) => onChange({ structured_output_placeholder: event.target.value })}
-          value={data.structured_output_placeholder ?? ""}
-        />
-      </label>
     </section>
+  );
+}
+
+function SelectControl({
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  options: Array<{ label: string; value: string }>;
+  value: string;
+}) {
+  const id = `workflow-${label.toLowerCase().replaceAll(" ", "-")}`;
+
+  return (
+    <label className="field-label" htmlFor={id}>
+      {label}
+      <select
+        className="text-field"
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -438,6 +917,19 @@ function NumberControl({
       />
     </label>
   );
+}
+
+function buildDefaultEdgeComposer(workflow: WorkflowDefinition): EdgeComposerState {
+  return {
+    source: workflow.nodes[0]?.id ?? "",
+    target: workflow.nodes[1]?.id ?? workflow.nodes[0]?.id ?? "",
+    kind: "sequence",
+  };
+}
+
+function findNewEdge(previousEdges: EdgeDefinition[], nextEdges: EdgeDefinition[]) {
+  const previousEdgeIds = new Set(previousEdges.map(getWorkflowEdgeIdentity));
+  return nextEdges.find((edge) => !previousEdgeIds.has(getWorkflowEdgeIdentity(edge)));
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

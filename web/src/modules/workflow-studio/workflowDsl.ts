@@ -16,6 +16,28 @@ import type {
 
 const DEFAULT_RISK_LEVEL: RiskLevel = "low";
 const APPROVAL_RISK_LEVELS: RiskLevel[] = ["high", "critical"];
+const NODE_TYPE_LABELS: Record<NodeDefinition["type"], string> = {
+  start: "Start Trigger",
+  end: "End Output",
+  agent: "Agent Planner",
+  llm: "LLM Summary",
+  mcp_tool: "MCP Tool Call",
+  shell: "Shell Sandbox",
+  http: "HTTP Request",
+  condition: "Condition Router",
+  human_approval: "Human Approval",
+};
+
+type CreateWorkflowEdgeInput = {
+  source: string;
+  target: string;
+  kind?: EdgeDefinition["kind"];
+  source_handle?: string | null;
+  target_handle?: string | null;
+  label?: string;
+};
+
+type EdgePatch = Partial<Omit<EdgeDefinition, "source" | "target">>;
 
 export function workflowToFlow(
   workflow: WorkflowDefinition,
@@ -124,6 +146,99 @@ export function updateWorkflowNodeData(
   };
 }
 
+export function createWorkflowNode(
+  workflow: WorkflowDefinition,
+  nodeType: NodeDefinition["type"],
+): WorkflowDefinition {
+  const nodeId = createNextNodeId(workflow, nodeType);
+  const nodeIndex = workflow.nodes.length;
+  const node: NodeDefinition = {
+    id: nodeId,
+    type: nodeType,
+    name: NODE_TYPE_LABELS[nodeType],
+    description: "",
+    risk_level: defaultRiskForNodeType(nodeType),
+    position: {
+      x: 80 + (nodeIndex % 4) * 260,
+      y: 90 + Math.floor(nodeIndex / 4) * 190,
+    },
+    data: createDefaultNodeData(nodeType),
+  };
+
+  return ensureWorkflowV2({
+    ...workflow,
+    nodes: [...workflow.nodes, node],
+  });
+}
+
+export function createWorkflowEdge(
+  workflow: WorkflowDefinition,
+  input: CreateWorkflowEdgeInput,
+): WorkflowDefinition {
+  if (!input.source || !input.target || input.source === input.target) {
+    return workflow;
+  }
+
+  const edge = normalizeEdge({
+    source: input.source,
+    target: input.target,
+    kind: input.kind ?? "sequence",
+    source_handle: input.source_handle ?? null,
+    target_handle: input.target_handle ?? null,
+    label: input.label,
+  });
+  const edgeId = buildEdgeIdentity(edge);
+  if (workflow.edges.some((existingEdge) => buildEdgeIdentity(existingEdge) === edgeId)) {
+    return workflow;
+  }
+
+  return ensureWorkflowV2({
+    ...workflow,
+    edges: [...workflow.edges, edge],
+  });
+}
+
+export function updateWorkflowEdge(
+  workflow: WorkflowDefinition,
+  edgeId: string,
+  patch: EdgePatch,
+): WorkflowDefinition {
+  return ensureWorkflowV2({
+    ...workflow,
+    edges: workflow.edges.map((edge) =>
+      buildEdgeIdentity(edge) === edgeId ? normalizeEdge({ ...edge, ...patch }) : edge,
+    ),
+  });
+}
+
+export function deleteWorkflowNode(
+  workflow: WorkflowDefinition,
+  nodeId: string,
+): WorkflowDefinition {
+  return ensureWorkflowV2({
+    ...workflow,
+    nodes: workflow.nodes.filter((node) => node.id !== nodeId),
+    edges: workflow.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
+  });
+}
+
+export function deleteWorkflowEdge(
+  workflow: WorkflowDefinition,
+  edgeId: string,
+): WorkflowDefinition {
+  return ensureWorkflowV2({
+    ...workflow,
+    edges: workflow.edges.filter((edge) => buildEdgeIdentity(edge) !== edgeId),
+  });
+}
+
+export function ensureWorkflowV2(workflow: WorkflowDefinition): WorkflowDefinition {
+  return {
+    ...workflow,
+    schema_version: "workflow.dsl/v0.2",
+  };
+}
+
 export function getLlmNodeData(node: NodeDefinition): LlmNodeData {
   if (node.type !== "llm") {
     return {};
@@ -138,8 +253,6 @@ export function getLlmNodeData(node: NodeDefinition): LlmNodeData {
     temperature: asNumber(node.data?.temperature),
     max_tokens: asNumber(node.data?.max_tokens),
     output_schema_ref: asOptionalString(node.data?.output_schema_ref) ?? "",
-    structured_output_placeholder:
-      asOptionalString(node.data?.structured_output_placeholder) ?? "",
   };
 }
 
@@ -254,6 +367,10 @@ function toFlowEdge(edge: EdgeDefinition): WorkflowFlowEdge {
   };
 }
 
+export function getWorkflowEdgeIdentity(edge: EdgeDefinition): string {
+  return buildEdgeIdentity(edge);
+}
+
 function buildFallbackPosition(index: number) {
   return {
     x: 80 + (index % 3) * 280,
@@ -364,8 +481,93 @@ function buildShellTemplateReference(node: NodeDefinition) {
     return null;
   }
 
-  const templateVersion = asString(node.data?.template_version);
+  const rawTemplateVersion = node.data?.template_version;
+  const templateVersion =
+    typeof rawTemplateVersion === "string" || typeof rawTemplateVersion === "number"
+      ? String(rawTemplateVersion)
+      : "";
   return templateVersion ? `${templateRef}@${templateVersion}` : templateRef;
+}
+
+function createNextNodeId(workflow: WorkflowDefinition, nodeType: NodeDefinition["type"]) {
+  const prefix = nodeType;
+  let index = 1;
+  const existingIds = new Set(workflow.nodes.map((node) => node.id));
+  while (existingIds.has(`${prefix}_${index}`)) {
+    index += 1;
+  }
+  return `${prefix}_${index}`;
+}
+
+function defaultRiskForNodeType(nodeType: NodeDefinition["type"]): RiskLevel {
+  if (nodeType === "mcp_tool" || nodeType === "llm") {
+    return "medium";
+  }
+  if (nodeType === "human_approval") {
+    return "high";
+  }
+  return "low";
+}
+
+function createDefaultNodeData(nodeType: NodeDefinition["type"]) {
+  if (nodeType === "llm") {
+    return {
+      model_policy_ref: "default",
+      prompt_template_ref: "incident-summary",
+      prompt_version: "v1",
+      temperature: 0,
+      max_tokens: 256,
+    };
+  }
+
+  if (nodeType === "condition") {
+    return {
+      expression: "inputs.route",
+      cases: ["default"],
+    };
+  }
+
+  if (nodeType === "mcp_tool") {
+    return {
+      mcp_server_ref: "cluster-observability",
+      tool_group_ref: "kubernetes-readonly",
+      tool_name: "kubectl_get_pods",
+      environment: "staging",
+    };
+  }
+
+  if (nodeType === "human_approval") {
+    return {
+      approval_policy_ref: "approval.default",
+      message_template: "Review and approve governed action",
+    };
+  }
+
+  return {};
+}
+
+function normalizeEdge(edge: EdgeDefinition): EdgeDefinition {
+  const kind = edge.kind ?? "sequence";
+  const normalized: EdgeDefinition = {
+    source: edge.source,
+    target: edge.target,
+    source_handle:
+      kind === "condition" ? (edge.source_handle ?? "case:default") : (edge.source_handle ?? null),
+    target_handle: edge.target_handle ?? null,
+    kind,
+    label: edge.label || undefined,
+    condition: edge.condition || undefined,
+  };
+
+  if (kind === "loop") {
+    normalized.loop = {
+      max_iterations: edge.loop?.max_iterations ?? 3,
+      while_expression: edge.loop?.while_expression || undefined,
+      item_path: edge.loop?.item_path || undefined,
+    };
+  }
+
+  return normalized;
 }
 
 function collectStringArray(value: unknown) {
