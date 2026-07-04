@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -6,6 +6,7 @@ from backend.app.model_gateway.runner import LlmNodeRunRequest, LlmNodeRunResult
 from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
 from backend.app.tool_gateway.schemas import (
+    ToolApprovalTaskRead,
     ToolGatewayResult,
     ToolInvocationRequest,
     ToolInvocationResponse,
@@ -18,6 +19,7 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunCreate,
     WorkflowRunRead,
     WorkflowRunRequest,
+    WorkflowRunResumeRequest,
     WorkflowRunUpdate,
 )
 from backend.app.workflows.dsl import (
@@ -138,6 +140,150 @@ async def test_runtime_stops_at_human_approval_with_pending_checkpoint() -> None
     assert store.checkpoints[-1].status == "pending_approval"
 
 
+@pytest.mark.asyncio
+async def test_runtime_stops_at_tool_gateway_pending_approval_with_pending_checkpoint() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    approval_task_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_llm_condition_tool())
+    store = InMemoryWorkflowRunStore()
+    tool_gateway = RecordingToolGateway(
+        pending_approval=True,
+        approval_task_id=approval_task_id,
+    )
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(content='{"route":"tool","message":"hello runtime"}'),
+        tool_gateway=tool_gateway,
+    )
+
+    result = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"route": "tool", "message": "hello runtime"},
+        )
+    )
+
+    assert result.status == "pending_approval"
+    assert result.pending_approval is not None
+    assert result.pending_approval.node_id == "tool_1"
+    assert result.pending_approval.approval_kind == "tool"
+    assert result.pending_approval.approval_task_id == approval_task_id
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "llm_1",
+        "route_1",
+        "tool_1",
+    ]
+    assert store.checkpoints[-1].status == "pending_approval"
+
+
+@pytest.mark.asyncio
+async def test_runtime_resumes_human_approval_from_pending_checkpoint() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_human_approval())
+    store = InMemoryWorkflowRunStore()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(content="unused"),
+        tool_gateway=RecordingToolGateway(),
+    )
+    pending = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"change_id": "CHG-123"},
+        )
+    )
+
+    result = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id=pending.run_id,
+            decision="approved",
+            payload={"reason": "approved by test"},
+        )
+    )
+
+    assert result.status == "success"
+    assert result.run_id == pending.run_id
+    assert result.id == pending.id
+    assert result.outputs["nodes"]["approval_1"]["decision"] == "approved"
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "approval_1",
+        "approval_1",
+        "end_1",
+    ]
+    assert [checkpoint.status for checkpoint in store.checkpoints] == [
+        "success",
+        "pending_approval",
+        "success",
+        "success",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_resumes_tool_approval_without_second_invoke() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    approval_task_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_llm_condition_tool())
+    store = InMemoryWorkflowRunStore()
+    tool_gateway = RecordingToolGateway(
+        pending_approval=True,
+        approval_task_id=approval_task_id,
+    )
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(content='{"route":"tool","message":"hello runtime"}'),
+        tool_gateway=tool_gateway,
+    )
+    pending = await runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            inputs={"route": "tool", "message": "hello runtime"},
+        )
+    )
+
+    result = await runner.resume(
+        WorkflowRunResumeRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            version=version,
+            run_id=pending.run_id,
+            approval_task_id=approval_task_id,
+        )
+    )
+
+    assert result.status == "success"
+    assert result.outputs["nodes"]["tool_1"]["structured_content"] == {"echo": "hello runtime"}
+    assert len(tool_gateway.calls) == 1
+    assert tool_gateway.resume_calls == [approval_task_id]
+    assert [checkpoint.node_id for checkpoint in store.checkpoints] == [
+        "start_1",
+        "llm_1",
+        "route_1",
+        "tool_1",
+        "tool_1",
+        "end_1",
+    ]
+
+
 def test_compiler_rejects_non_published_workflow_version() -> None:
     project_id = uuid4()
     version = make_version(
@@ -193,7 +339,11 @@ class InMemoryWorkflowRunStore:
 
     async def get_run(self, *, project_id: UUID, run_id: str) -> WorkflowRunRead | None:
         return next(
-            (run for run in self.runs if run.project_id == project_id and run.run_id == run_id),
+            (
+                run
+                for run in reversed(self.runs)
+                if run.project_id == project_id and run.run_id == run_id
+            ),
             None,
         )
 
@@ -262,8 +412,17 @@ class RecordingLlmRunner:
 
 
 class RecordingToolGateway:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        pending_approval: bool = False,
+        approval_task_id: UUID | None = None,
+    ) -> None:
+        self.pending_approval = pending_approval
+        self.approval_task_id = approval_task_id or uuid4()
         self.calls: list[dict[str, object]] = []
+        self.resume_calls: list[UUID] = []
+        self.pending_requests: dict[UUID, dict[str, object]] = {}
 
     async def invoke(
         self,
@@ -284,6 +443,35 @@ class RecordingToolGateway:
                 "trace_id": payload["trace_id"],
             }
         )
+        if self.pending_approval:
+            self.pending_requests[self.approval_task_id] = payload
+            return ToolInvocationResponse(
+                invocation_id=uuid4(),
+                project_id=project_id,
+                tool_ref=payload["tool_ref"],
+                tool_name="echo_risky",
+                server_ref="real-mcp",
+                status="pending_approval",
+                policy_decision="approval_required",
+                effective_risk_level="high",
+                approval_required=True,
+                input_summary='{"message":"hello runtime"}',
+                output_summary="tool invocation is waiting for approval",
+                error_type="",
+                error_message="",
+                duration_ms=6,
+                credential_ref="",
+                secret_lease_ref="",
+                run_id=payload["run_id"],
+                node_id=payload["node_id"],
+                trace_id=payload["trace_id"],
+                tool_call_id=payload["tool_call_id"],
+                approval_task=self._approval_task(
+                    project_id=project_id,
+                    actor_id=actor_id,
+                    request_payload=payload,
+                ),
+            )
         return ToolInvocationResponse(
             invocation_id=uuid4(),
             project_id=project_id,
@@ -310,6 +498,83 @@ class RecordingToolGateway:
                 structured_content={"echo": "hello runtime"},
                 is_error=False,
             ),
+        )
+
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
+    ) -> ToolInvocationResponse:
+        self.resume_calls.append(approval_task_id)
+        payload = self.pending_requests[approval_task_id]
+        return ToolInvocationResponse(
+            invocation_id=uuid4(),
+            project_id=project_id,
+            tool_ref=str(payload["tool_ref"]),
+            tool_name="echo_risky",
+            server_ref="real-mcp",
+            status="success",
+            policy_decision="allowed",
+            effective_risk_level="high",
+            approval_required=True,
+            input_summary='{"message":"hello runtime"}',
+            output_summary='{"echo":"hello runtime"}',
+            error_type="",
+            error_message="",
+            duration_ms=6,
+            credential_ref="",
+            secret_lease_ref="",
+            run_id=str(payload["run_id"]),
+            node_id=str(payload["node_id"]),
+            trace_id=str(payload["trace_id"]),
+            tool_call_id=str(payload["tool_call_id"]),
+            result=ToolGatewayResult(
+                content=[{"type": "text", "text": "echo:hello runtime"}],
+                structured_content={"echo": "hello runtime"},
+                is_error=False,
+            ),
+        )
+
+    def _approval_task(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request_payload: dict[str, object],
+    ) -> ToolApprovalTaskRead:
+        now = datetime.now(UTC)
+        return ToolApprovalTaskRead(
+            id=self.approval_task_id,
+            project_id=project_id,
+            invocation_id=uuid4(),
+            requested_by=actor_id,
+            tool_ref=str(request_payload["tool_ref"]),
+            tool_name="echo_risky",
+            server_ref="real-mcp",
+            tool_group_refs=["runtime.tools"],
+            workflow_ref=str(request_payload["workflow_ref"]),
+            agent_ref="",
+            role_refs=[],
+            run_id=str(request_payload["run_id"]),
+            node_id=str(request_payload["node_id"]),
+            trace_id=str(request_payload["trace_id"]),
+            tool_call_id=str(request_payload["tool_call_id"]),
+            effective_risk_level="high",
+            status="pending",
+            decision="",
+            decision_reason="",
+            request_payload=request_payload,
+            authorized_tool_snapshot={"tool_ref": request_payload["tool_ref"]},
+            expires_at=now + timedelta(minutes=15),
+            created_by=actor_id,
+            updated_by=actor_id,
+            decided_by=None,
+            decided_at=None,
+            resumed_at=None,
+            created_at=now,
+            updated_at=now,
         )
 
 

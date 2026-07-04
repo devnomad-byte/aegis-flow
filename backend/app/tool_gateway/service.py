@@ -267,6 +267,276 @@ class ToolGatewayService:
         )
         return _build_invocation_response(invocation, result=gateway_result)
 
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
+    ) -> ToolInvocationResponse:
+        approval_task = await self.invocation_store.get_approval_task(
+            project_id=project_id,
+            approval_task_id=approval_task_id,
+        )
+        if approval_task is None:
+            raise ToolGatewayServiceError(status_code=404, detail="Approval task not found")
+        if approval_task.status == "resumed":
+            raise ToolGatewayServiceError(
+                status_code=409,
+                detail="Approval task has already been resumed",
+            )
+        if approval_task.status != "approved":
+            raise ToolGatewayServiceError(status_code=409, detail="Approval task is not approved")
+        now = datetime.now(UTC)
+        if approval_task.expires_at <= now:
+            await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="expired",
+                policy_decision="denied",
+                output_summary="tool invocation approval expired",
+                error_type="approval_expired",
+                error_message="Approval task expired before resume",
+            )
+            await _record_approval_audit_event(
+                self.audit_store,
+                approval_task=approval_task,
+                actor_id=actor_id,
+                action="tool_gateway.resume",
+                result="failure",
+            )
+            raise ToolGatewayServiceError(
+                status_code=409,
+                detail="Approval task expired before resume",
+            )
+
+        original_request = ToolInvocationRequest.model_validate(approval_task.request_payload)
+        started = time.perf_counter()
+        authorized_tool = await _resolve_authorized_tool(
+            registry_store=self.registry_store,
+            project_id=project_id,
+            request=original_request,
+        )
+        if authorized_tool is None:
+            invocation = await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="denied",
+                policy_decision="denied",
+                output_summary="tool is no longer authorized for this runtime context",
+                error_type="authorization_denied",
+                error_message="Tool is no longer authorized for this runtime context",
+            )
+            await _record_audit_event(
+                self.audit_store,
+                invocation=invocation,
+                result="failure",
+                action="tool_gateway.resume",
+                actor_id=actor_id,
+            )
+            raise ToolGatewayServiceError(
+                status_code=403,
+                detail="Tool is no longer authorized for this runtime context",
+            )
+
+        try:
+            validate(instance=original_request.arguments, schema=authorized_tool.input_schema)
+        except ValidationError as exc:
+            invocation = await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="denied",
+                policy_decision="denied",
+                output_summary="arguments do not match tool input schema at resume",
+                error_type="schema_validation_failed",
+                error_message=_sanitize_error_message(exc.message),
+            )
+            await _record_audit_event(
+                self.audit_store,
+                invocation=invocation,
+                result="failure",
+                action="tool_gateway.resume",
+                actor_id=actor_id,
+            )
+            raise ToolGatewayServiceError(
+                status_code=422,
+                detail="arguments do not match tool input schema",
+            ) from exc
+
+        server = await self.registry_store.get_mcp_server_credential_for_tool(
+            project_id=project_id,
+            tool_ref=authorized_tool.tool_ref,
+        )
+        if server is None:
+            invocation = await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="failed",
+                policy_decision="allowed",
+                output_summary="MCP server not found for authorized tool",
+                error_type="mcp_server_not_found",
+                error_message="MCP server not found for authorized tool",
+            )
+            await _record_audit_event(
+                self.audit_store,
+                invocation=invocation,
+                result="failure",
+                action="tool_gateway.resume",
+                actor_id=actor_id,
+            )
+            raise ToolGatewayServiceError(status_code=404, detail="MCP server not found")
+
+        lease_id: UUID | None = None
+        lease_ref = ""
+        if server.credential_ref:
+            if server.credential_ref_id is None:
+                invocation = await self.invocation_store.update_invocation_status(
+                    project_id=project_id,
+                    invocation_id=approval_task.invocation_id,
+                    actor_id=actor_id,
+                    status="failed",
+                    policy_decision="allowed",
+                    output_summary="MCP server credential reference is inactive",
+                    error_type="credential_reference_inactive",
+                    error_message="MCP server credential reference is inactive",
+                    credential_ref=server.credential_ref,
+                )
+                await _record_audit_event(
+                    self.audit_store,
+                    invocation=invocation,
+                    result="failure",
+                    action="tool_gateway.resume",
+                    actor_id=actor_id,
+                )
+                raise ToolGatewayServiceError(
+                    status_code=409,
+                    detail="MCP server credential reference is inactive",
+                )
+            try:
+                lease = await self.registry_store.create_secret_lease(
+                    project_id=project_id,
+                    credential_ref_id=server.credential_ref_id,
+                    actor_id=actor_id,
+                    request=SecretLeaseCreateRequest(
+                        requester_type="tool_gateway",
+                        requester_ref=authorized_tool.tool_ref,
+                        purpose="resume approved MCP tool invocation",
+                        run_id=original_request.run_id,
+                        node_id=original_request.node_id,
+                        trace_id=original_request.trace_id,
+                        ttl_seconds=900,
+                    ),
+                )
+            except ToolRegistryResourceNotFoundError as exc:
+                invocation = await self.invocation_store.update_invocation_status(
+                    project_id=project_id,
+                    invocation_id=approval_task.invocation_id,
+                    actor_id=actor_id,
+                    status="failed",
+                    policy_decision="allowed",
+                    output_summary="MCP server credential reference is inactive",
+                    error_type="credential_reference_inactive",
+                    error_message="MCP server credential reference is inactive",
+                    credential_ref=server.credential_ref,
+                )
+                await _record_audit_event(
+                    self.audit_store,
+                    invocation=invocation,
+                    result="failure",
+                    action="tool_gateway.resume",
+                    actor_id=actor_id,
+                )
+                raise ToolGatewayServiceError(
+                    status_code=409,
+                    detail="MCP server credential reference is inactive",
+                ) from exc
+            lease_id = lease.id
+            lease_ref = lease.lease_ref
+
+        try:
+            call_result = await self.call_client.call_tool(
+                base_url=server.base_url,
+                transport=server.transport,
+                tool_name=authorized_tool.tool_name,
+                arguments=original_request.arguments,
+                lease_ref=lease_ref,
+                egress_allowed_hosts=server.egress_allowed_hosts,
+                egress_allowed_ports=server.egress_allowed_ports,
+                egress_proxy_mode=server.egress_proxy_mode,
+                egress_proxy_url=server.egress_proxy_url,
+                egress_dns_pinning_required=server.egress_dns_pinning_required,
+            )
+        except McpToolCallError as exc:
+            invocation = await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="failed",
+                policy_decision="allowed",
+                output_summary="MCP tool call failed",
+                error_type=exc.__class__.__name__,
+                error_message=_sanitize_error_message(str(exc)),
+                credential_ref=server.credential_ref,
+                secret_lease_id=lease_id,
+                secret_lease_ref=lease_ref,
+            )
+            await self.invocation_store.mark_approval_task_resumed(
+                project_id=project_id,
+                approval_task_id=approval_task_id,
+                actor_id=actor_id,
+            )
+            await _record_audit_event(
+                self.audit_store,
+                invocation=invocation,
+                result="failure",
+                action="tool_gateway.resume",
+                actor_id=actor_id,
+            )
+            raise ToolGatewayServiceError(status_code=502, detail=invocation.error_message) from exc
+
+        gateway_result = ToolGatewayResult(
+            content=call_result.content,
+            structured_content=call_result.structured_content,
+            is_error=call_result.is_error,
+        )
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        invocation = await self.invocation_store.update_invocation_status(
+            project_id=project_id,
+            invocation_id=approval_task.invocation_id,
+            actor_id=actor_id,
+            status="failed" if call_result.is_error else "success",
+            policy_decision="allowed",
+            output_summary=_summarize_payload(gateway_result.model_dump()),
+            duration_ms=duration_ms,
+            credential_ref=server.credential_ref,
+            secret_lease_id=lease_id,
+            secret_lease_ref=lease_ref,
+        )
+        resumed_task = await self.invocation_store.mark_approval_task_resumed(
+            project_id=project_id,
+            approval_task_id=approval_task_id,
+            actor_id=actor_id,
+        )
+        await _record_audit_event(
+            self.audit_store,
+            invocation=invocation,
+            result="failure" if call_result.is_error else "success",
+            action="tool_gateway.resume",
+            actor_id=actor_id,
+        )
+        await _record_approval_audit_event(
+            self.audit_store,
+            approval_task=resumed_task,
+            actor_id=actor_id,
+            action="tool_gateway.resume",
+            result="failure" if call_result.is_error else "success",
+        )
+        return _build_invocation_response(invocation, result=gateway_result)
+
 
 async def _record_inactive_credential_failure(
     audit_store: AuditEventStore,

@@ -22,9 +22,11 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowNodeRunResult,
     WorkflowPendingApproval,
     WorkflowRunCheckpointCreate,
+    WorkflowRunCheckpointRead,
     WorkflowRunCreate,
     WorkflowRunRequest,
     WorkflowRunResult,
+    WorkflowRunResumeRequest,
     WorkflowRunUpdate,
 )
 from backend.app.workflow_runtime.store import WorkflowRunStore
@@ -50,7 +52,7 @@ class WorkflowRuntimeError(RuntimeError):
 
 class WorkflowRuntimePendingApproval(RuntimeError):
     def __init__(self, pending_approval: WorkflowPendingApproval) -> None:
-        super().__init__("workflow run is pending human approval")
+        super().__init__("workflow run is pending approval")
         self.pending_approval = pending_approval
 
 
@@ -66,6 +68,15 @@ class ToolGatewayRuntimeClient(Protocol):
         project_id: UUID,
         actor_id: UUID,
         request: ToolInvocationRequest,
+    ) -> ToolInvocationResponse:
+        raise NotImplementedError
+
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
     ) -> ToolInvocationResponse:
         raise NotImplementedError
 
@@ -181,6 +192,143 @@ class WorkflowRuntimeRunner:
                 error_message=str(exc),
             )
 
+    async def resume(self, request: WorkflowRunResumeRequest) -> WorkflowRunResult:
+        _validate_version(request.version, request.project_id)
+        run_record = await self.run_store.get_run(
+            project_id=request.project_id,
+            run_id=request.run_id,
+        )
+        if run_record is None:
+            raise WorkflowRuntimeError("workflow run not found")
+        if run_record.status != "pending_approval":
+            raise WorkflowRuntimeError("workflow run is not pending approval")
+        if (
+            run_record.workflow_version_id != request.version.id
+            or run_record.definition_hash != request.version.definition_hash
+        ):
+            raise WorkflowRuntimeError("workflow run does not match workflow version")
+
+        pending_approval = _pending_approval_from_run(run_record)
+        workflow = request.version.definition
+        pending_node = _node_by_id(workflow, pending_approval.node_id)
+        checkpoints = await self.run_store.list_checkpoints(
+            project_id=request.project_id,
+            run_id=request.run_id,
+        )
+        pending_checkpoint = _latest_pending_checkpoint(checkpoints, pending_approval)
+        workflow_ref = _workflow_ref(workflow)
+        runtime = _RuntimeExecution(
+            request=WorkflowRunRequest(
+                project_id=request.project_id,
+                actor_id=request.actor_id,
+                version=request.version,
+                inputs=dict(pending_checkpoint.state.get("inputs", {})),
+                run_id=request.run_id,
+                trace_id=run_record.trace_id,
+            ),
+            workflow=workflow,
+            workflow_ref=workflow_ref,
+            run_id=request.run_id,
+            trace_id=run_record.trace_id,
+            run_store=self.run_store,
+            policy_store=self.policy_store,
+            trace_store=self.trace_store,
+            llm_runner=self.llm_runner,
+            tool_gateway=self.tool_gateway,
+            workflow_run_id=run_record.id,
+        )
+
+        try:
+            state = await runtime.resume_pending_node(
+                node=pending_node,
+                state=cast(WorkflowRuntimeState, dict(pending_checkpoint.state)),
+                pending_approval=pending_approval,
+                resume_request=request,
+            )
+            next_node_ids = _successor_node_ids(workflow, pending_node.id)
+            if next_node_ids:
+                graph = runtime.build_graph(start_node_ids=next_node_ids)
+                state = await graph.ainvoke(
+                    state,
+                    config={"configurable": {"thread_id": request.run_id}},
+                )
+            outputs = dict(state.get("outputs", {})) or _final_outputs_from_state(state)
+            updated_run = await self.run_store.update_run(
+                WorkflowRunUpdate(
+                    project_id=request.project_id,
+                    run_id=request.run_id,
+                    actor_id=request.actor_id,
+                    status="success",
+                    outputs_summary=_summarize_json(outputs),
+                )
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs=outputs,
+                node_results=runtime.node_results,
+            )
+        except WorkflowRuntimePendingApproval as exc:
+            updated_run = await self.run_store.update_run(
+                WorkflowRunUpdate(
+                    project_id=request.project_id,
+                    run_id=request.run_id,
+                    actor_id=request.actor_id,
+                    status="pending_approval",
+                    outputs_summary="",
+                    pending_approval=exc.pending_approval.model_dump(mode="json"),
+                )
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=runtime.node_results,
+                pending_approval=exc.pending_approval,
+            )
+        except ToolGatewayServiceError as exc:
+            if exc.status_code < 500:
+                raise WorkflowRuntimeError(exc.detail) from exc
+            updated_run = await self.run_store.update_run(
+                WorkflowRunUpdate(
+                    project_id=request.project_id,
+                    run_id=request.run_id,
+                    actor_id=request.actor_id,
+                    status="failed",
+                    outputs_summary="",
+                    error_type=exc.__class__.__name__,
+                    error_message=exc.detail,
+                )
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=runtime.node_results,
+                error_type=exc.__class__.__name__,
+                error_message=exc.detail,
+            )
+        except Exception as exc:
+            updated_run = await self.run_store.update_run(
+                WorkflowRunUpdate(
+                    project_id=request.project_id,
+                    run_id=request.run_id,
+                    actor_id=request.actor_id,
+                    status="failed",
+                    outputs_summary="",
+                    error_type=exc.__class__.__name__,
+                    error_message=str(exc),
+                )
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=runtime.node_results,
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+
 
 @dataclass
 class _RuntimeExecution:
@@ -200,7 +348,7 @@ class _RuntimeExecution:
     def __post_init__(self) -> None:
         self.node_results = []
 
-    def build_graph(self) -> Any:
+    def build_graph(self, *, start_node_ids: list[str] | None = None) -> Any:
         nodes_by_id = {node.id: node for node in self.workflow.nodes}
         builder = StateGraph(WorkflowRuntimeState)
         for node in self.workflow.nodes:
@@ -208,8 +356,14 @@ class _RuntimeExecution:
                 raise WorkflowRuntimeError(f"unsupported workflow node type: {node.type}")
             builder.add_node(node.id, self._node_callable(node))
 
-        start_node = next(node for node in self.workflow.nodes if node.type == "start")
-        builder.add_edge(START, start_node.id)
+        if start_node_ids is None:
+            start_node = next(node for node in self.workflow.nodes if node.type == "start")
+            builder.add_edge(START, start_node.id)
+        else:
+            for node_id in start_node_ids:
+                if node_id not in nodes_by_id:
+                    raise WorkflowRuntimeError(f"resume target node does not exist: {node_id}")
+                builder.add_edge(START, node_id)
         for node in self.workflow.nodes:
             if node.type == "condition":
                 builder.add_conditional_edges(
@@ -231,14 +385,70 @@ class _RuntimeExecution:
             builder.add_edge(end_node.id, END)
         return builder.compile()
 
+    async def resume_pending_node(
+        self,
+        *,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+        pending_approval: WorkflowPendingApproval,
+        resume_request: WorkflowRunResumeRequest,
+    ) -> WorkflowRuntimeState:
+        if pending_approval.node_id != node.id:
+            raise WorkflowRuntimeError("pending approval node does not match checkpoint")
+        started = time.perf_counter()
+        if pending_approval.approval_kind == "tool":
+            output = await self._resume_tool_node(
+                node=node,
+                pending_approval=pending_approval,
+                resume_request=resume_request,
+            )
+        else:
+            output = {
+                "status": "approved",
+                "decision": resume_request.decision,
+                "payload": resume_request.payload,
+                "approved_by": str(resume_request.actor_id),
+            }
+        next_state = _merge_node_output(state, node, output)
+        next_state.pop("pending_approval", None)
+        await self._record_checkpoint(
+            node=node,
+            status="success",
+            state=next_state,
+            output=output,
+        )
+        await self._record_trace_span(
+            node=node,
+            status="success",
+            started=started,
+            attributes={
+                "output_summary": _summarize_json(output),
+                "resume": True,
+                "approval_kind": pending_approval.approval_kind,
+            },
+            span_suffix=f"resume:{uuid4().hex}",
+        )
+        self.node_results.append(
+            WorkflowNodeRunResult(
+                node_id=node.id,
+                node_type=node.type,
+                status="success",
+                output=output,
+            )
+        )
+        return next_state
+
     def _node_callable(self, node: NodeDefinition) -> Any:
         async def run_node(state: WorkflowRuntimeState) -> WorkflowRuntimeState:
             started = time.perf_counter()
             await self._record_policy_event(node=node, decision="allowed", started=started)
             try:
                 output = await self._execute_node(node, state)
-                status = "pending_approval" if node.type == "human_approval" else "success"
+                pending_approval = _pending_approval_from_output(output)
+                status = "pending_approval" if pending_approval is not None else "success"
                 next_state = _merge_node_output(state, node, output)
+                if pending_approval is not None:
+                    next_state["pending_approval"] = pending_approval.model_dump(mode="json")
                 if node.type == "condition":
                     next_state["__aegis_condition_route__"] = output.get("route", "default")
                 if node.type == "end":
@@ -267,11 +477,8 @@ class _RuntimeExecution:
                         output=output,
                     )
                 )
-                if node.type == "human_approval":
-                    pending = output.get("pending_approval", {})
-                    raise WorkflowRuntimePendingApproval(
-                        WorkflowPendingApproval.model_validate(pending)
-                    )
+                if pending_approval is not None:
+                    raise WorkflowRuntimePendingApproval(pending_approval)
                 return next_state
             except WorkflowRuntimePendingApproval:
                 raise
@@ -381,7 +588,32 @@ class _RuntimeExecution:
                 tool_call_id=f"{node.id}_{uuid4().hex}",
             ),
         )
-        return _tool_response_to_output(response)
+        return _tool_response_to_output(response, node=node)
+
+    async def _resume_tool_node(
+        self,
+        *,
+        node: NodeDefinition,
+        pending_approval: WorkflowPendingApproval,
+        resume_request: WorkflowRunResumeRequest,
+    ) -> dict[str, Any]:
+        approval_task_id = (
+            resume_request.approval_task_id
+            or pending_approval.approval_task_id
+            or _approval_task_id_from_payload(pending_approval.payload)
+        )
+        if approval_task_id is None:
+            raise WorkflowRuntimeError("tool pending approval is missing approval task id")
+        response = await self.tool_gateway.resume_approval(
+            project_id=self.request.project_id,
+            actor_id=self.request.actor_id,
+            approval_task_id=approval_task_id,
+        )
+        if response.run_id and response.run_id != self.run_id:
+            raise WorkflowRuntimeError("resumed tool invocation does not match workflow run")
+        if response.node_id and response.node_id != node.id:
+            raise WorkflowRuntimeError("resumed tool invocation does not match workflow node")
+        return _tool_response_to_output(response, node=node)
 
     async def _record_policy_event(
         self,
@@ -453,9 +685,11 @@ class _RuntimeExecution:
         status: str,
         started: float,
         attributes: dict[str, Any],
+        span_suffix: str = "",
     ) -> None:
         now_nano = time.time_ns()
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        suffix = f":{span_suffix}" if span_suffix else ""
         await self.trace_store.record_span(
             RuntimeTraceSpanCreate(
                 project_id=self.request.project_id,
@@ -465,7 +699,7 @@ class _RuntimeExecution:
                 workflow_ref=self.workflow_ref,
                 node_id=node.id,
                 parent_span_id="",
-                span_id=f"workflow:{self.run_id}:{node.id}",
+                span_id=f"workflow:{self.run_id}:{node.id}{suffix}",
                 span_name=f"workflow.node.{node.type}",
                 span_kind="internal",
                 component="workflow_runtime",
@@ -482,7 +716,7 @@ class _RuntimeExecution:
                 links=[],
                 resource={"service.name": "aegis-flow-runtime"},
                 source_type="workflow_runtime_node",
-                source_id=f"{self.run_id}:{node.id}",
+                source_id=f"{self.run_id}:{node.id}{suffix}",
                 created_by=self.request.actor_id,
                 updated_by=self.request.actor_id,
             )
@@ -498,6 +732,72 @@ def _validate_version(version: WorkflowVersionRead, project_id: UUID) -> None:
 
 def _workflow_ref(workflow: WorkflowDefinition) -> str:
     return f"{workflow.workflow.id}:{workflow.workflow.version}"
+
+
+def _node_by_id(workflow: WorkflowDefinition, node_id: str) -> NodeDefinition:
+    for node in workflow.nodes:
+        if node.id == node_id:
+            return node
+    raise WorkflowRuntimeError(f"workflow node does not exist: {node_id}")
+
+
+def _successor_node_ids(workflow: WorkflowDefinition, node_id: str) -> list[str]:
+    return [
+        edge.target
+        for edge in workflow.edges
+        if edge.source == node_id and edge.kind in {"sequence", "resume"}
+    ]
+
+
+def _pending_approval_from_run(run: Any) -> WorkflowPendingApproval:
+    if not run.pending_approval:
+        raise WorkflowRuntimeError("workflow run is missing pending approval payload")
+    try:
+        return WorkflowPendingApproval.model_validate(run.pending_approval)
+    except ValueError as exc:
+        raise WorkflowRuntimeError("workflow run pending approval payload is invalid") from exc
+
+
+def _latest_pending_checkpoint(
+    checkpoints: list[WorkflowRunCheckpointRead],
+    pending_approval: WorkflowPendingApproval,
+) -> WorkflowRunCheckpointRead:
+    pending_checkpoints = [
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint.status == "pending_approval"
+        and checkpoint.node_id == pending_approval.node_id
+    ]
+    if not pending_checkpoints:
+        raise WorkflowRuntimeError("workflow run pending checkpoint is missing")
+    return pending_checkpoints[-1]
+
+
+def _pending_approval_from_output(output: dict[str, Any]) -> WorkflowPendingApproval | None:
+    pending = output.get("pending_approval")
+    if not isinstance(pending, dict):
+        return None
+    return WorkflowPendingApproval.model_validate(pending)
+
+
+def _approval_task_id_from_payload(payload: dict[str, Any]) -> UUID | None:
+    raw_value = payload.get("approval_task_id")
+    if not raw_value:
+        return None
+    if isinstance(raw_value, UUID):
+        return raw_value
+    try:
+        return UUID(str(raw_value))
+    except ValueError:
+        raise WorkflowRuntimeError("tool pending approval task id is invalid") from None
+
+
+def _final_outputs_from_state(state: WorkflowRuntimeState) -> dict[str, Any]:
+    return {
+        "inputs": dict(state.get("inputs", {})),
+        "nodes": dict(state.get("nodes", {})),
+        "last": dict(state.get("last", {})),
+    }
 
 
 def _merge_node_output(
@@ -541,6 +841,7 @@ def _build_pending_approval(
         node_name=node.name,
         approval_policy_ref=node.data.approval_policy_ref,
         message=_render_template(node.data.message_template, _template_context(state)),
+        approval_kind="human",
         payload={
             "workflow_ref": state.get("workflow_ref", ""),
             "node_id": node.id,
@@ -598,14 +899,36 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return {}
 
 
-def _tool_response_to_output(response: ToolInvocationResponse) -> dict[str, Any]:
+def _tool_response_to_output(
+    response: ToolInvocationResponse,
+    *,
+    node: NodeDefinition,
+) -> dict[str, Any]:
     if response.status == "pending_approval":
+        approval_task_id = response.approval_task.id if response.approval_task else None
+        pending = WorkflowPendingApproval(
+            node_id=node.id,
+            node_name=node.name,
+            approval_policy_ref="tool_gateway",
+            message=f"Tool {response.tool_ref} requires approval",
+            approval_kind="tool",
+            approval_task_id=approval_task_id,
+            payload={
+                "approval_task_id": str(approval_task_id) if approval_task_id else "",
+                "invocation_id": str(response.invocation_id),
+                "tool_call_id": response.tool_call_id,
+                "tool_ref": response.tool_ref,
+                "run_id": response.run_id,
+                "trace_id": response.trace_id,
+            },
+        )
         return {
             "status": response.status,
             "policy_decision": response.policy_decision,
             "approval_task": response.approval_task.model_dump(mode="json")
             if response.approval_task
             else None,
+            "pending_approval": pending.model_dump(mode="json"),
         }
     if response.status != "success":
         raise ToolGatewayServiceError(

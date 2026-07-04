@@ -55,7 +55,14 @@ async def test_workflow_runtime_store_persists_runs_and_sanitized_checkpoints(
                 status="running",
                 inputs_summary='{"message":"ok"}',
                 outputs_summary="",
-                pending_approval={"token": "raw-token"},
+                pending_approval={
+                    "node_id": "tool_1",
+                    "node_name": "Tool",
+                    "approval_policy_ref": "tool_gateway",
+                    "message": "approve",
+                    "approval_kind": "tool",
+                    "payload": {"approval_task_id": str(uuid4()), "token": "raw-token"},
+                },
                 created_by=actor_id,
                 updated_by=actor_id,
             )
@@ -72,7 +79,13 @@ async def test_workflow_runtime_store_persists_runs_and_sanitized_checkpoints(
                 node_id="llm_1",
                 node_type="llm",
                 status="success",
-                state={"authorization": "Bearer raw-token", "safe": "ok"},
+                state={
+                    "authorization": "Bearer raw-token",
+                    "pending_approval": {
+                        "payload": {"approval_task_id": "task-1", "token": "raw-token"}
+                    },
+                    "safe": "ok",
+                },
                 output={"secret": "raw-token", "summary": "done"},
                 created_by=actor_id,
                 updated_by=actor_id,
@@ -91,7 +104,12 @@ async def test_workflow_runtime_store_persists_runs_and_sanitized_checkpoints(
 
     assert run.project_id == project_id
     assert updated.status == "success"
+    assert isinstance(run.pending_approval["payload"], dict)
+    assert run.pending_approval["payload"]["token"] == "[redacted]"
     assert checkpoint.state["authorization"] == "[redacted]"
+    assert isinstance(checkpoint.state["pending_approval"]["payload"], dict)
+    assert checkpoint.state["pending_approval"]["payload"]["approval_task_id"] == "task-1"
+    assert checkpoint.state["pending_approval"]["payload"]["token"] == "[redacted]"
     assert checkpoint.output["secret"] == "[redacted]"
     assert checkpoints == [checkpoint]
     assert "raw-token" not in str(checkpoints)

@@ -12,7 +12,11 @@ from backend.app.api.dependencies import (
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
-from backend.app.workflow_runtime.schemas import WorkflowRunRequest, WorkflowRunResult
+from backend.app.workflow_runtime.schemas import (
+    WorkflowRunRequest,
+    WorkflowRunResult,
+    WorkflowRunResumeRequest,
+)
 from backend.app.workflows.schemas import WorkflowPublishGateResult, WorkflowVersionRead
 from backend.app.workflows.yaml_io import WorkflowImportAnalysis, WorkflowImportDiff
 from backend.tests.test_workflow_runtime import workflow_with_human_approval
@@ -59,6 +63,7 @@ class InMemoryVersionStore:
 class RecordingRuntimeRunner:
     def __init__(self) -> None:
         self.requests: list[WorkflowRunRequest] = []
+        self.resume_requests: list[WorkflowRunResumeRequest] = []
 
     async def run(self, request: WorkflowRunRequest) -> WorkflowRunResult:
         self.requests.append(request)
@@ -72,6 +77,23 @@ class RecordingRuntimeRunner:
             trace_id=request.trace_id or "trace-api",
             status="success",
             outputs={"ok": True},
+            node_results=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def resume(self, request: WorkflowRunResumeRequest) -> WorkflowRunResult:
+        self.resume_requests.append(request)
+        now = datetime.now(UTC)
+        return WorkflowRunResult(
+            id=uuid4(),
+            project_id=request.project_id,
+            workflow_version_id=request.version.id,
+            workflow_ref=f"{request.version.workflow_id}:{request.version.version}",
+            run_id=request.run_id,
+            trace_id="trace-api",
+            status="success",
+            outputs={"resumed": True},
             node_results=[],
             created_at=now,
             updated_at=now,
@@ -130,6 +152,56 @@ def test_workflow_runtime_api_runs_published_version_and_audits() -> None:
     assert len(runner.requests) == 1
     assert runner.requests[0].inputs == {"change_id": "CHG-123"}
     assert audit_store.events[-1]["action"] == "workflow.run.start"
+    metadata = audit_store.events[-1]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["status"] == "success"
+
+
+def test_workflow_runtime_api_resume_requires_workflow_run_permission() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    client, _, _ = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:view"]),
+        version=version,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/workflows/versions/{version.id}/runs/run-api/resume",
+        json={"decision": "approved"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing required project permission"}
+
+
+def test_workflow_runtime_api_resumes_run_and_audits() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    approval_task_id = uuid4()
+    client, runner, audit_store = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:run"]),
+        version=version,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/workflows/versions/{version.id}/runs/run-api/resume",
+        json={
+            "decision": "approved",
+            "payload": {"reason": "ok"},
+            "approval_task_id": str(approval_task_id),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert len(runner.resume_requests) == 1
+    assert runner.resume_requests[0].run_id == "run-api"
+    assert runner.resume_requests[0].approval_task_id == approval_task_id
+    assert audit_store.events[-1]["action"] == "workflow.run.resume"
     metadata = audit_store.events[-1]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["status"] == "success"

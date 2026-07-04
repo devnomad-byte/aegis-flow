@@ -8,6 +8,8 @@ from backend.app.workflows.schemas import WorkflowVersionRead
 
 WorkflowRunStatus = Literal["running", "success", "failed", "pending_approval", "cancelled"]
 WorkflowNodeStatus = Literal["success", "failed", "pending_approval", "skipped"]
+WorkflowApprovalKind = Literal["human", "tool"]
+WorkflowApprovalDecision = Literal["approved"]
 
 
 class WorkflowRunRequest(BaseModel):
@@ -29,6 +31,26 @@ class WorkflowRunApiRequest(BaseModel):
     trace_id: str = Field(default="", max_length=160)
 
 
+class WorkflowRunResumeRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    actor_id: UUID
+    version: WorkflowVersionRead
+    run_id: str = Field(min_length=1, max_length=160)
+    decision: WorkflowApprovalDecision = "approved"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    approval_task_id: UUID | None = None
+
+
+class WorkflowRunResumeApiRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: WorkflowApprovalDecision = "approved"
+    payload: dict[str, Any] = Field(default_factory=dict)
+    approval_task_id: UUID | None = None
+
+
 class WorkflowPendingApproval(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -36,6 +58,8 @@ class WorkflowPendingApproval(BaseModel):
     node_name: str
     approval_policy_ref: str
     message: str
+    approval_kind: WorkflowApprovalKind = "human"
+    approval_task_id: UUID | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

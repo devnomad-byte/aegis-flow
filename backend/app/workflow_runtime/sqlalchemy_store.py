@@ -4,7 +4,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.observability.sqlalchemy_store import sanitize_trace_value
 from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
 from backend.app.workflow_runtime.schemas import (
     WorkflowRunCheckpointCreate,
@@ -23,7 +22,7 @@ class SqlAlchemyWorkflowRunStore:
         run = WorkflowRun(
             **request.model_copy(
                 update={
-                    "pending_approval": sanitize_trace_value(request.pending_approval),
+                    "pending_approval": _sanitize_runtime_json(request.pending_approval),
                 }
             ).model_dump()
         )
@@ -38,7 +37,7 @@ class SqlAlchemyWorkflowRunStore:
         run.outputs_summary = request.outputs_summary
         run.error_type = request.error_type
         run.error_message = request.error_message
-        run.pending_approval = sanitize_trace_value(request.pending_approval)
+        run.pending_approval = _sanitize_runtime_json(request.pending_approval)
         run.updated_by = request.actor_id
         await self._session.commit()
         await self._session.refresh(run)
@@ -104,7 +103,39 @@ class SqlAlchemyWorkflowRunStore:
 
 
 def _sanitize_checkpoint_json(value: dict[str, Any]) -> dict[str, Any]:
-    sanitized = sanitize_trace_value(value)
+    sanitized = _sanitize_runtime_json(value)
     if isinstance(sanitized, dict):
         return sanitized
     return {}
+
+
+def _sanitize_runtime_json(value: Any, *, parent_key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_runtime_json(item, parent_key=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_runtime_json(item, parent_key=parent_key) for item in value]
+    if isinstance(value, str) and _is_runtime_secret_key(parent_key):
+        return "[redacted]"
+    return value
+
+
+def _is_runtime_secret_key(key: str) -> bool:
+    normalized = key.lower()
+    return any(
+        token in normalized
+        for token in {
+            "api_key",
+            "apikey",
+            "auth_token",
+            "authorization",
+            "bearer",
+            "password",
+            "secret",
+            "secret_lease_id",
+            "secret_lease_ref",
+            "token",
+        }
+    )
