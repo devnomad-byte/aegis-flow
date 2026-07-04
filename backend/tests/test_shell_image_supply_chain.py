@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, MutableMapping
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
 from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
+    NotationCliEvidenceProvider,
     ShellImageCommandRunner,
     ShellImageEvidenceError,
     ShellImageEvidenceResult,
@@ -237,6 +239,123 @@ async def test_trivy_provider_uses_policy_blocked_severities(
     assert result.vulnerability_status == "failed"
     assert result.evidence["vulnerabilities"]["blocked_severities"] == ["LOW"]
     assert result.evidence["vulnerabilities"]["blocked_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_notation_provider_writes_ephemeral_trust_policy_and_uses_digest_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    trust_policy = {
+        "version": "1.0",
+        "trustPolicies": [
+            {
+                "name": "aegis-runtime",
+                "registryScopes": ["registry.example/aegis/runtime"],
+                "signatureVerification": {"level": "strict"},
+                "trustStores": ["ca:aegis-flow"],
+                "trustedIdentities": ["*"],
+            }
+        ],
+    }
+    runner = RecordingRunner()
+    monkeypatch.setattr(
+        "backend.app.tool_registry.image_evidence.shutil.which",
+        lambda _: "notation",
+    )
+    provider = NotationCliEvidenceProvider(
+        trust_policy=trust_policy,
+        work_dir=str(tmp_path),
+        runner=runner,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime:7-alpine",
+        image_digest="sha256:" + ("f" * 64),
+    )
+
+    assert result.policy_decision == "approved"
+    assert result.signature_status == "passed"
+    command = runner.commands[0]
+    assert command.argv == (
+        "notation",
+        "verify",
+        "registry.example/aegis/runtime:7-alpine@sha256:" + ("f" * 64),
+    )
+    assert command.env is not None
+    assert "XDG_CONFIG_HOME" in command.env
+    assert "ANTHROPIC_AUTH_TOKEN" not in command.env
+    assert "OPENAI_COMPATIBLE_AUTH_TOKEN" not in command.env
+    assert runner.notation_trust_policy == trust_policy
+    assert runner.notation_trust_policy_read_only is True
+
+
+@pytest.mark.asyncio
+async def test_notation_provider_rejects_incomplete_trust_policy_without_running_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    runner = RecordingRunner()
+    monkeypatch.setattr(
+        "backend.app.tool_registry.image_evidence.shutil.which",
+        lambda _: "notation",
+    )
+    provider = NotationCliEvidenceProvider(
+        trust_policy={"version": "1.0", "trustPolicies": []},
+        work_dir=str(tmp_path),
+        runner=runner,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime:7-alpine",
+        image_digest="sha256:" + ("f" * 64),
+    )
+
+    assert result.policy_decision == "rejected"
+    assert result.signature_status == "failed"
+    assert "trust policy" in result.decision_reason.lower()
+    assert runner.commands == []
+
+
+@pytest.mark.asyncio
+async def test_notation_provider_sanitizes_verification_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    runner = RecordingRunner(error=ShellImageEvidenceError("token leaked by notation"))
+    monkeypatch.setattr(
+        "backend.app.tool_registry.image_evidence.shutil.which",
+        lambda _: "notation",
+    )
+    provider = NotationCliEvidenceProvider(
+        trust_policy={
+            "version": "1.0",
+            "trustPolicies": [
+                {
+                    "name": "aegis-runtime",
+                    "registryScopes": ["*"],
+                    "signatureVerification": {"level": "strict"},
+                    "trustStores": ["ca:aegis-flow"],
+                    "trustedIdentities": ["*"],
+                }
+            ],
+        },
+        work_dir=str(tmp_path),
+        runner=runner,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime@sha256:" + ("f" * 64),
+        image_digest="sha256:" + ("f" * 64),
+    )
+
+    assert result.policy_decision == "rejected"
+    assert result.signature_status == "failed"
+    assert "token leaked" not in result.decision_reason
+    assert result.evidence["signature"] == {
+        "tool": "notation",
+        "status": "failed",
+    }
 
 
 AsgiApp = Callable[
@@ -736,6 +855,8 @@ class RecordingRunner(ShellImageCommandRunner):
         self.commands: list[ShellImageToolCommand] = []
         self.error = error
         self.json_results = json_results or []
+        self.notation_trust_policy: dict[str, Any] | None = None
+        self.notation_trust_policy_read_only = False
 
     async def run_json(self, command: ShellImageToolCommand) -> dict[str, Any]:
         self.commands.append(command)
@@ -747,6 +868,10 @@ class RecordingRunner(ShellImageCommandRunner):
 
     async def run_text(self, command: ShellImageToolCommand) -> str:
         self.commands.append(command)
+        if command.env is not None and "XDG_CONFIG_HOME" in command.env:
+            policy_path = Path(command.env["XDG_CONFIG_HOME"]) / "notation" / "trustpolicy.oci.json"
+            self.notation_trust_policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            self.notation_trust_policy_read_only = not policy_path.stat().st_mode & 0o222
         if self.error is not None:
             raise self.error
         return ""

@@ -4,6 +4,7 @@ from ipaddress import ip_address
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
 from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
@@ -1906,6 +1907,76 @@ def test_tool_registry_shell_image_policy_dry_run_allows_would_reject_template()
     assert admission_metadata["policy_decision"] == "would_reject"
     assert admission_metadata["enforcement_mode"] == "dry_run"
     assert admission_metadata["cosign_required"] is True
+
+
+def test_tool_registry_shell_image_policy_runs_notation_provider_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    digest = "sha256:" + ("9" * 64)
+    monkeypatch.setattr(
+        "backend.app.tool_registry.image_evidence.shutil.which",
+        lambda _: None,
+    )
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        digest_resolver=StaticDigestResolver(
+            OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=digest,
+                computed_digest=digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            )
+        ),
+    )
+
+    policy_response = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy",
+        json={
+            "enforcement_mode": "dry_run",
+            "notation_enabled": True,
+            "notation_trust_policy": {
+                "version": "1.0",
+                "trustPolicies": [
+                    {
+                        "name": "runtime-images",
+                        "registryScopes": ["registry.example/aegis/runtime"],
+                        "signatureVerification": {"level": "strict"},
+                        "trustStores": ["ca:aegis-runtime"],
+                        "trustedIdentities": ["x509.subject: CN=SecureBuilder"],
+                    }
+                ],
+            },
+        },
+    )
+    admission = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/resolve",
+        json={
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+        },
+    )
+
+    assert policy_response.status_code == 200
+    assert admission.status_code == 200
+    body = admission.json()
+    assert body["signature_status"] == "failed"
+    assert body["policy_decision"] == "would_reject"
+    assert body["evidence"]["signature"] == {"tool": "notation", "status": "failed"}
+    rendered = admission.text + repr(audit_store.events)
+    assert "SecureBuilder" not in rendered
+    assert "trustPolicies" not in rendered
+    admission_metadata = cast(dict[str, object], audit_store.events[-1]["metadata"])
+    assert admission_metadata["policy_decision"] == "would_reject"
+    assert admission_metadata["enforcement_mode"] == "dry_run"
 
 
 def test_tool_registry_shell_image_admission_records_real_evidence_statuses_safely() -> None:

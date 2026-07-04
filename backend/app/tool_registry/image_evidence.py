@@ -1,7 +1,10 @@
 import asyncio
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol
 
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
@@ -60,6 +63,7 @@ class StaticShellImageEvidenceProvider:
 class ShellImageToolCommand:
     argv: tuple[str, ...]
     timeout_seconds: float
+    env: dict[str, str] | None = None
 
 
 class ShellImageCommandRunner(Protocol):
@@ -90,6 +94,7 @@ class AsyncSubprocessJsonRunner:
                 *command.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_build_tool_process_env(command.env),
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
@@ -174,6 +179,57 @@ class CosignCliEvidenceProvider:
                 argv.extend(["--certificate-oidc-issuer", self.certificate_oidc_issuer])
         argv.append(target)
         return ShellImageToolCommand(argv=tuple(argv), timeout_seconds=self.timeout_seconds)
+
+
+@dataclass(frozen=True)
+class NotationCliEvidenceProvider:
+    notation_command: str = "notation"
+    timeout_seconds: float = 120.0
+    trust_policy: dict[str, Any] = field(default_factory=dict)
+    work_dir: str = r"D:\agent-platform-cache\notation"
+    runner: ShellImageCommandRunner = field(default_factory=AsyncSubprocessJsonRunner)
+
+    async def collect(self, *, image_ref: str, image_digest: str) -> ShellImageEvidenceResult:
+        if not _has_notation_trust_policy(self.trust_policy):
+            return _failed_notation_result("Notation trust policy is not configured")
+        if shutil.which(self.notation_command) is None:
+            return _failed_notation_result("Notation executable is not available")
+
+        with TemporaryDirectory(
+            prefix="aegis-notation-",
+            dir=str(_ensure_notation_work_dir(self.work_dir)),
+        ) as work_dir:
+            config_home = Path(work_dir) / "config-home"
+            notation_config = config_home / "notation"
+            notation_config.mkdir(parents=True, exist_ok=True)
+            trust_policy_path = notation_config / "trustpolicy.oci.json"
+            trust_policy_path.write_text(
+                json.dumps(self.trust_policy, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            trust_policy_path.chmod(0o444)
+
+            command = ShellImageToolCommand(
+                argv=(
+                    self.notation_command,
+                    "verify",
+                    _image_digest_target(image_ref, image_digest),
+                ),
+                timeout_seconds=self.timeout_seconds,
+                env={"XDG_CONFIG_HOME": str(config_home)},
+            )
+            try:
+                await self.runner.run_text(command)
+            except ShellImageEvidenceError as exc:
+                message = _sanitize_tool_error(str(exc))
+                return _failed_notation_result(message or "Notation signature verification failed")
+
+        return ShellImageEvidenceResult(
+            signature_status="passed",
+            policy_decision="approved",
+            decision_reason="Notation signature verification passed",
+            evidence={"signature": {"tool": "notation", "status": "passed"}},
+        )
 
 
 @dataclass(frozen=True)
@@ -364,6 +420,66 @@ def _iter_trivy_vulnerabilities(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _sanitize_tool_error(message: str) -> str:
     lowered = message.lower()
-    if any(secret_word in lowered for secret_word in ("token", "password", "secret", "api_key")):
+    if any(
+        secret_word in lowered
+        for secret_word in (
+            "token",
+            "password",
+            "secret",
+            "api_key",
+            "apikey",
+            "authorization",
+            "credential",
+            "private_key",
+            "privatekey",
+        )
+    ):
         return "supply chain tool failed with sensitive output redacted"
     return message.strip()[:500]
+
+
+def _build_tool_process_env(overrides: dict[str, str] | None) -> dict[str, str] | None:
+    if not overrides:
+        return None
+    allowed_names = {
+        "COMSPEC",
+        "HOME",
+        "PATH",
+        "Path",
+        "PATHEXT",
+        "SystemDrive",
+        "SystemRoot",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    }
+    env = {name: value for name, value in os.environ.items() if name in allowed_names}
+    env.update(overrides)
+    return env
+
+
+def _has_notation_trust_policy(trust_policy: dict[str, Any]) -> bool:
+    if trust_policy.get("version") != "1.0":
+        return False
+    trust_policies = trust_policy.get("trustPolicies")
+    return isinstance(trust_policies, list) and bool(trust_policies)
+
+
+def _ensure_notation_work_dir(work_dir: str) -> Path:
+    path = Path(work_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _image_digest_target(image_ref: str, image_digest: str) -> str:
+    return image_ref if "@sha256:" in image_ref else f"{image_ref}@{image_digest}"
+
+
+def _failed_notation_result(reason: str) -> ShellImageEvidenceResult:
+    return ShellImageEvidenceResult(
+        signature_status="failed",
+        policy_decision="rejected",
+        decision_reason=reason,
+        evidence={"signature": {"tool": "notation", "status": "failed"}},
+    )

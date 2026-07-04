@@ -20,6 +20,7 @@ from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
     NoopShellImageEvidenceProvider,
+    NotationCliEvidenceProvider,
     ShellImageEvidenceProvider,
     TrivyCliEvidenceProvider,
     merge_evidence_providers,
@@ -823,6 +824,15 @@ def _policy_aware_evidence_provider(
 ) -> ShellImageEvidenceProvider:
     settings = AppSettings().shell_image_supply_chain
     providers = [base_provider]
+    if policy.notation_enabled:
+        providers.append(
+            NotationCliEvidenceProvider(
+                notation_command=settings.notation_command,
+                timeout_seconds=settings.scan_timeout_seconds,
+                trust_policy=policy.notation_trust_policy,
+                work_dir=settings.notation_work_dir,
+            )
+        )
     if settings.trivy_enabled:
         providers.append(
             TrivyCliEvidenceProvider(

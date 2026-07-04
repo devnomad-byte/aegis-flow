@@ -96,6 +96,8 @@ class ShellImageSupplyChainSettings(BaseSettings):
     cosign_certificate_identity: str = ""
     cosign_certificate_oidc_issuer: str = ""
     cosign_key_ref: str = ""
+    notation_command: str = "notation"
+    notation_work_dir: str = r"D:\agent-platform-cache\notation"
     scan_timeout_seconds: float = 120.0
     blocked_severities: str = "HIGH,CRITICAL"
 
