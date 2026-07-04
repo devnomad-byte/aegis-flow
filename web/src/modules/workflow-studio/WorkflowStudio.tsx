@@ -1,6 +1,7 @@
 import "@xyflow/react/dist/style.css";
 
-import { type ComponentType, useCallback, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ComponentType, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Background,
   Controls,
@@ -28,6 +29,23 @@ import {
 
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
+  WorkflowPublishGateError,
+  archiveWorkflowVersion,
+  listWorkflowDrafts,
+  listWorkflowVersions,
+  publishCheckWorkflowDraft,
+  publishWorkflowDraft,
+  restoreWorkflowVersionAsDraft,
+  updateWorkflowDraft,
+  workflowDraftsQueryKey,
+  workflowVersionsQueryKey,
+  type WorkflowDraftListResponse,
+  type WorkflowDraftRead,
+  type WorkflowPublishGateResult,
+  type WorkflowVersionListResponse,
+  type WorkflowVersionRead,
+} from "./workflowApi";
+import {
   buildImportPreviewSummary,
   createWorkflowEdge,
   createWorkflowNode,
@@ -51,6 +69,7 @@ import type {
   NodeType,
   WorkflowDefinition,
   WorkflowFlowNode,
+  WorkflowImportAnalysis,
   WorkflowImportPreview,
 } from "./workflowTypes";
 
@@ -84,6 +103,11 @@ type EdgeComposerState = {
   source: string;
   target: string;
   kind: EdgeKind;
+};
+
+type PublishStatus = {
+  kind: "idle" | "checked" | "published" | "restored" | "archived" | "error";
+  message: string;
 };
 
 const nodeTypes = {
@@ -146,8 +170,10 @@ const EDGE_KIND_OPTIONS: Array<{ label: string; value: EdgeKind }> = [
   { label: "loop", value: "loop" },
   { label: "resume", value: "resume" },
 ];
+const EMPTY_DRAFTS: WorkflowDraftRead[] = [];
 
 export function WorkflowStudio({ project }: WorkflowStudioProps) {
+  const queryClient = useQueryClient();
   const [workflow, setWorkflow] = useState<WorkflowDefinition>(SAMPLE_WORKFLOW);
   const [selectedNodeId, setSelectedNodeId] = useState<string>(
     SAMPLE_WORKFLOW.nodes.find((node) => node.type === "llm")?.id ?? SAMPLE_WORKFLOW.nodes[1].id,
@@ -161,6 +187,16 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     buildDefaultEdgeComposer(SAMPLE_WORKFLOW),
   );
   const [edgeComposerError, setEdgeComposerError] = useState<string | null>(null);
+  const [releaseNote, setReleaseNote] = useState("");
+  const [archiveReason, setArchiveReason] = useState("");
+  const [confirmArchiveVersionId, setConfirmArchiveVersionId] = useState("");
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [publishGateResult, setPublishGateResult] = useState<WorkflowPublishGateResult | null>(null);
+  const [publishCheckAnalysis, setPublishCheckAnalysis] = useState<WorkflowImportAnalysis | null>(null);
+  const [publishStatus, setPublishStatus] = useState<PublishStatus>({
+    kind: "idle",
+    message: "",
+  });
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([
     { time: "00:00.000", label: "Workflow DSL loaded", state: "ok" },
     { time: "00:00.146", label: "Project catalog analyzed", state: "ok" },
@@ -171,6 +207,56 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
     () => (preview ? buildImportPreviewSummary(preview.analysis) : null),
     [preview],
   );
+  const draftsQueryKey = workflowDraftsQueryKey(project.projectId);
+  const draftsQuery = useQuery({
+    queryFn: () => listWorkflowDrafts(project.projectId),
+    queryKey: draftsQueryKey,
+  });
+  const drafts = draftsQuery.data?.drafts ?? EMPTY_DRAFTS;
+  const activeDraft = useMemo(
+    () =>
+      drafts.find(
+        (draft) =>
+          draft.workflow_id === workflow.workflow.id &&
+          draft.version === workflow.workflow.version,
+      ) ??
+      drafts.find((draft) => draft.workflow_id === workflow.workflow.id) ??
+      drafts[0] ??
+      null,
+    [drafts, workflow.workflow.id, workflow.workflow.version],
+  );
+  useEffect(() => {
+    if (!activeDraft) {
+      return;
+    }
+    if (
+      workflow.workflow.id === SAMPLE_WORKFLOW.workflow.id &&
+      activeDraft.workflow_id !== workflow.workflow.id
+    ) {
+      setWorkflow(activeDraft.definition);
+      setSelectedNodeId(activeDraft.definition.nodes[0]?.id ?? "");
+      setSelectedEdgeId("");
+      setEdgeComposer(buildDefaultEdgeComposer(activeDraft.definition));
+      setPreview((currentPreview) =>
+        currentPreview
+          ? { ...currentPreview, analysis: activeDraft.analysis, workflow: activeDraft.definition }
+          : { analysis: activeDraft.analysis, workflow: activeDraft.definition },
+      );
+    }
+  }, [activeDraft, workflow.workflow.id]);
+
+  const versionWorkflowId = activeDraft?.workflow_id ?? workflow.workflow.id;
+  const versionsQueryKey = workflowVersionsQueryKey(project.projectId, versionWorkflowId);
+  const versionsQuery = useQuery({
+    enabled: Boolean(versionWorkflowId),
+    queryFn: () => listWorkflowVersions(project.projectId, versionWorkflowId),
+    queryKey: versionsQueryKey,
+  });
+  const versions = versionsQuery.data?.versions ?? [];
+  const selectedVersion =
+    versions.find((version) => version.id === selectedVersionId) ??
+    versions.find((version) => version.status === "published") ??
+    null;
 
   const flow = useMemo(() => workflowToFlow(workflow, preview?.analysis), [preview?.analysis, workflow]);
   const flowEdges = useMemo(
@@ -197,6 +283,139 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
   const selectedLlmTraceEvents = sampleLlmTraceEvents.filter(
     (event) => event.nodeId === selectedNode.id,
   );
+
+  const publishCheckMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeDraft) {
+        throw new Error("No active workflow draft is available for publish-check.");
+      }
+      const savedDraft = await updateWorkflowDraft(
+        project.projectId,
+        activeDraft.id,
+        ensureWorkflowV2(workflow),
+      );
+      const analysis = await publishCheckWorkflowDraft(project.projectId, savedDraft.id);
+      return { analysis, savedDraft };
+    },
+    onSuccess: ({ analysis, savedDraft }) => {
+      setWorkflow(savedDraft.definition);
+      setPublishCheckAnalysis(analysis);
+      setPublishGateResult(null);
+      setPublishStatus({
+        kind: "checked",
+        message: analysis.can_publish_or_run ? "发布门禁通过" : "发布门禁未通过",
+      });
+      setPreview((currentPreview) =>
+        currentPreview
+          ? { ...currentPreview, analysis, workflow: savedDraft.definition }
+          : { analysis, workflow: savedDraft.definition },
+      );
+      void queryClient.invalidateQueries({ queryKey: draftsQueryKey });
+    },
+    onError: (error) => {
+      setPublishStatus({ kind: "error", message: getErrorMessage(error) });
+    },
+  });
+  const publishMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeDraft) {
+        throw new Error("No active workflow draft is available for publish.");
+      }
+      const savedDraft = await updateWorkflowDraft(
+        project.projectId,
+        activeDraft.id,
+        ensureWorkflowV2(workflow),
+      );
+      const version = await publishWorkflowDraft(project.projectId, savedDraft.id, {
+        release_note: releaseNote,
+      });
+      return { savedDraft, version };
+    },
+    onSuccess: ({ savedDraft, version }) => {
+      setWorkflow(savedDraft.definition);
+      setSelectedVersionId(version.id);
+      setPublishGateResult(null);
+      setReleaseNote("");
+      setPublishStatus({
+        kind: "published",
+        message: `Published version ${version.version}`,
+      });
+      void queryClient.invalidateQueries({ queryKey: draftsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: versionsQueryKey });
+    },
+    onError: (error) => {
+      if (error instanceof WorkflowPublishGateError) {
+        setPublishGateResult(error.gateResult);
+        setPublishStatus({ kind: "error", message: "发布门禁未通过" });
+        return;
+      }
+      setPublishStatus({ kind: "error", message: getErrorMessage(error) });
+    },
+  });
+  const restoreMutation = useMutation({
+    mutationFn: (version: WorkflowVersionRead) =>
+      restoreWorkflowVersionAsDraft(project.projectId, version.id, {
+        release_note: `Restore published version ${version.version}`,
+      }),
+    onSuccess: (draft) => {
+      setWorkflow(draft.definition);
+      setSelectedNodeId(draft.definition.nodes[0]?.id ?? "");
+      setSelectedEdgeId("");
+      setEdgeComposer(buildDefaultEdgeComposer(draft.definition));
+      setPublishGateResult(null);
+      setPublishCheckAnalysis(draft.analysis);
+      setPublishStatus({
+        kind: "restored",
+        message: `Restored as draft v${draft.version}`,
+      });
+      queryClient.setQueryData<WorkflowDraftListResponse>(draftsQueryKey, (current) => {
+        const currentDrafts = current?.drafts ?? EMPTY_DRAFTS;
+        const nextDrafts = currentDrafts.some((currentDraft) => currentDraft.id === draft.id)
+          ? currentDrafts.map((currentDraft) => (currentDraft.id === draft.id ? draft : currentDraft))
+          : [draft, ...currentDrafts];
+
+        return { drafts: nextDrafts };
+      });
+      void queryClient.invalidateQueries({ queryKey: draftsQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: workflowVersionsQueryKey(project.projectId, draft.workflow_id),
+      });
+    },
+    onError: (error) => {
+      setPublishStatus({ kind: "error", message: getErrorMessage(error) });
+    },
+  });
+  const archiveMutation = useMutation({
+    mutationFn: (version: WorkflowVersionRead) =>
+      archiveWorkflowVersion(project.projectId, version.id, { reason: archiveReason }),
+    onSuccess: (version) => {
+      setArchiveReason("");
+      setConfirmArchiveVersionId("");
+      if (selectedVersionId === version.id) {
+        setSelectedVersionId("");
+      }
+      setPublishStatus({
+        kind: "archived",
+        message: `Archived version ${version.version}`,
+      });
+      queryClient.setQueryData<WorkflowVersionListResponse>(versionsQueryKey, (current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          count: current.count,
+          versions: current.versions.map((currentVersion) =>
+            currentVersion.id === version.id ? version : currentVersion,
+          ),
+        };
+      });
+      void queryClient.invalidateQueries({ queryKey: versionsQueryKey });
+    },
+    onError: (error) => {
+      setPublishStatus({ kind: "error", message: getErrorMessage(error) });
+    },
+  });
 
   const handlePreviewImport = useCallback(() => {
     try {
@@ -502,6 +721,36 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
       <aside className="aegis-inspector workflow-inspector">
         <div className="telemetry">导入预览</div>
         <h2>{workflow.workflow.name}</h2>
+        <PublishPanel
+          activeDraft={activeDraft}
+          archiveMutationPending={archiveMutation.isPending}
+          archiveReason={archiveReason}
+          confirmArchiveVersionId={confirmArchiveVersionId}
+          draftsError={draftsQuery.error}
+          onArchive={(version) => archiveMutation.mutate(version)}
+          onArchiveReasonChange={setArchiveReason}
+          onCancelArchive={() => {
+            setArchiveReason("");
+            setConfirmArchiveVersionId("");
+          }}
+          onPublish={() => publishMutation.mutate()}
+          onPublishCheck={() => publishCheckMutation.mutate()}
+          onReleaseNoteChange={setReleaseNote}
+          onRestore={(version) => restoreMutation.mutate(version)}
+          onSelectVersion={setSelectedVersionId}
+          onStartArchive={(version) => setConfirmArchiveVersionId(version.id)}
+          publishCheckAnalysis={publishCheckAnalysis}
+          publishGateResult={publishGateResult}
+          publishMutationPending={publishMutation.isPending}
+          publishStatus={publishStatus}
+          releaseNote={releaseNote}
+          restoreMutationPending={restoreMutation.isPending}
+          selectedVersion={selectedVersion}
+          selectedVersionId={selectedVersionId}
+          versions={versions}
+          versionsError={versionsQuery.error}
+          workflow={workflow}
+        />
         <PreviewPanel error={previewError} summary={previewSummary} />
 
         <section className="inspector-section">
@@ -829,6 +1078,234 @@ function LlmControlsPanel({
   );
 }
 
+function PublishPanel({
+  activeDraft,
+  archiveMutationPending,
+  archiveReason,
+  confirmArchiveVersionId,
+  draftsError,
+  onArchive,
+  onArchiveReasonChange,
+  onCancelArchive,
+  onPublish,
+  onPublishCheck,
+  onReleaseNoteChange,
+  onRestore,
+  onSelectVersion,
+  onStartArchive,
+  publishCheckAnalysis,
+  publishGateResult,
+  publishMutationPending,
+  publishStatus,
+  releaseNote,
+  restoreMutationPending,
+  selectedVersion,
+  selectedVersionId,
+  versions,
+  versionsError,
+  workflow,
+}: {
+  activeDraft: WorkflowDraftRead | null;
+  archiveMutationPending: boolean;
+  archiveReason: string;
+  confirmArchiveVersionId: string;
+  draftsError: Error | null;
+  onArchive: (version: WorkflowVersionRead) => void;
+  onArchiveReasonChange: (value: string) => void;
+  onCancelArchive: () => void;
+  onPublish: () => void;
+  onPublishCheck: () => void;
+  onReleaseNoteChange: (value: string) => void;
+  onRestore: (version: WorkflowVersionRead) => void;
+  onSelectVersion: (versionId: string) => void;
+  onStartArchive: (version: WorkflowVersionRead) => void;
+  publishCheckAnalysis: WorkflowImportAnalysis | null;
+  publishGateResult: WorkflowPublishGateResult | null;
+  publishMutationPending: boolean;
+  publishStatus: PublishStatus;
+  releaseNote: string;
+  restoreMutationPending: boolean;
+  selectedVersion: WorkflowVersionRead | null;
+  selectedVersionId: string;
+  versions: WorkflowVersionRead[];
+  versionsError: Error | null;
+  workflow: WorkflowDefinition;
+}) {
+  const hasPublishedRunTarget = selectedVersion?.status === "published";
+  const gateReasons = publishGateResult?.reasons ?? [];
+  const publishCheckMissingLabels =
+    publishCheckAnalysis?.missing_references.map(
+      (reference) => `${reference.reference_type}: ${reference.reference}`,
+    ) ?? [];
+
+  return (
+    <section className="inspector-section workflow-release-panel" aria-label="Workflow Release">
+      <div className="telemetry">Workflow Release</div>
+      <div className="release-state-grid">
+        <DetailItem label="draft" value={activeDraft ? `v${activeDraft.version}` : "unavailable"} />
+        <DetailItem label="workflow" value={workflow.workflow.id} />
+        <DetailItem label="versions" value={String(versions.length)} />
+      </div>
+      {draftsError ? (
+        <div className="preview-alert preview-alert-danger">{getErrorMessage(draftsError)}</div>
+      ) : null}
+      {versionsError ? (
+        <div className="preview-alert preview-alert-danger">{getErrorMessage(versionsError)}</div>
+      ) : null}
+      {!activeDraft ? (
+        <div className="preview-alert">No active workflow draft from API; publish actions are disabled.</div>
+      ) : null}
+      {publishStatus.message ? (
+        <div
+          className={
+            publishStatus.kind === "error"
+              ? "preview-alert preview-alert-danger"
+              : "preview-alert preview-alert-success"
+          }
+        >
+          {publishStatus.message}
+        </div>
+      ) : null}
+      {publishCheckMissingLabels.length ? (
+        <div className="publish-gate-list">
+          <strong>Publish-check references</strong>
+          {publishCheckMissingLabels.map((label) => (
+            <span className="publish-gate-reason publish-gate-blocker" key={label}>
+              {label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {gateReasons.length ? (
+        <div className="publish-gate-list">
+          <strong>Gate reasons</strong>
+          {gateReasons.map((reason) => (
+            <div
+              className={`publish-gate-reason publish-gate-${reason.severity}`}
+              key={`${reason.code}-${reason.reference}-${reason.node_id}`}
+            >
+              <span className="telemetry">{reason.code}</span>
+              <span>{reason.message}</span>
+              <small>
+                {reason.reference_type} {reason.reference} {reason.node_id ? `/ ${reason.node_id}` : ""}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <TextControl label="Release note" onChange={onReleaseNoteChange} value={releaseNote} />
+      <div className="release-action-row">
+        <button
+          className="toolbar-button"
+          disabled={!activeDraft}
+          onClick={onPublishCheck}
+          type="button"
+        >
+          <FileSearch aria-hidden="true" size={16} />
+          发布检查
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={!activeDraft || publishMutationPending}
+          onClick={onPublish}
+          type="button"
+        >
+          <ShieldCheck aria-hidden="true" size={16} />
+          发布版本
+        </button>
+      </div>
+      <div
+        className={
+          hasPublishedRunTarget
+            ? "preview-alert preview-alert-success"
+            : "preview-alert preview-alert-danger"
+        }
+      >
+        {hasPublishedRunTarget
+          ? `Run binds to version ${selectedVersion.version} / ${shortHash(selectedVersion.definition_hash)}`
+          : "No published version selected for run"}
+      </div>
+      <div className="version-history-list" aria-label="Workflow Version History">
+        <strong>Version History</strong>
+        {!versions.length ? <div className="global-empty-row">No published versions yet</div> : null}
+        {versions.map((version) => {
+          const isSelected = version.id === selectedVersionId || selectedVersion?.id === version.id;
+          const isConfirmingArchive = confirmArchiveVersionId === version.id;
+
+          return (
+            <div
+              className={
+                isSelected
+                  ? "version-history-row version-history-row-selected"
+                  : "version-history-row"
+              }
+              key={version.id}
+            >
+              <button
+                className="version-history-main"
+                onClick={() => onSelectVersion(version.id)}
+                type="button"
+              >
+                <span>
+                  <strong>v{version.version}</strong>
+                  <small>{version.release_note || "No release note"}</small>
+                </span>
+                <span className={`status-pill status-version-${version.status}`}>
+                  {version.status}
+                </span>
+              </button>
+              <div className="version-history-meta">
+                <span className="telemetry">{shortHash(version.definition_hash)}</span>
+                <span>{formatDateTime(version.created_at)}</span>
+                <span>{version.gate_result.reasons.length} gate reasons</span>
+              </div>
+              <div className="release-action-row">
+                <button
+                  className="toolbar-button"
+                  disabled={restoreMutationPending}
+                  onClick={() => onRestore(version)}
+                  type="button"
+                >
+                  Restore version {version.version} as draft
+                </button>
+                {isConfirmingArchive ? (
+                  <>
+                    <TextControl
+                      label="Archive reason"
+                      onChange={onArchiveReasonChange}
+                      value={archiveReason}
+                    />
+                    <button
+                      className="toolbar-button toolbar-button-danger"
+                      disabled={!archiveReason.trim() || archiveMutationPending}
+                      onClick={() => onArchive(version)}
+                      type="button"
+                    >
+                      Confirm archive version {version.version}
+                    </button>
+                    <button className="toolbar-button" onClick={onCancelArchive} type="button">
+                      Cancel archive
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="toolbar-button toolbar-button-danger"
+                    disabled={version.status === "archived"}
+                    onClick={() => onStartArchive(version)}
+                    type="button"
+                  >
+                    Archive version {version.version}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function SelectControl({
   label,
   onChange,
@@ -939,6 +1416,25 @@ function Metric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "Unknown workflow error";
+}
+
+function shortHash(hash: string) {
+  return hash.length > 18 ? `${hash.slice(0, 18)}...` : hash;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toISOString().replace(".000Z", "Z");
 }
 
 function PreviewPanel({

@@ -923,6 +923,103 @@ select {
   overflow-wrap: anywhere;
 }
 
+.workflow-release-panel {
+  gap: var(--space-md);
+}
+
+.release-state-grid {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.release-action-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.publish-gate-list,
+.version-history-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.publish-gate-reason {
+  background: rgba(24, 33, 31, 0.86);
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  overflow-wrap: anywhere;
+}
+
+.publish-gate-blocker {
+  border-left-color: var(--color-danger);
+}
+
+.publish-gate-warning {
+  border-left-color: var(--color-warning);
+}
+
+.publish-gate-reason small,
+.version-history-main small,
+.version-history-meta {
+  color: var(--color-text-muted);
+}
+
+.version-history-row {
+  background: rgba(16, 22, 21, 0.76);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+}
+
+.version-history-row-selected {
+  border-color: rgba(46, 243, 197, 0.7);
+}
+
+.version-history-main {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--color-text);
+  cursor: pointer;
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: space-between;
+  padding: 0;
+  text-align: left;
+}
+
+.version-history-main span:first-child {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.version-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: var(--space-sm);
+}
+
+.status-version-published {
+  background: rgba(46, 243, 197, 0.14);
+  color: var(--color-accent);
+}
+
+.status-version-archived {
+  background: rgba(111, 129, 122, 0.18);
+  color: var(--color-text-muted);
+}
+
 .edge-composer-grid {
   display: grid;
   gap: var(--space-sm);

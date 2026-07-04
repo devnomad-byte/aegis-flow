@@ -1,15 +1,38 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WorkflowStudio } from "./WorkflowStudio";
 import { defaultProjectContext } from "../../shell/projectContext";
+
+const projectUuid = "11111111-1111-4111-8111-111111111111";
+const accountUuid = "22222222-2222-4222-8222-222222222222";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function renderWorkflowStudio() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false },
+    },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <WorkflowStudio project={defaultProjectContext} />
+    </QueryClientProvider>,
+  );
+}
 
 describe("WorkflowStudio", () => {
   it("previews imported YAML, applies it to the canvas, renames a node, and exports YAML", async () => {
     const user = userEvent.setup();
 
-    render(<WorkflowStudio project={defaultProjectContext} />);
+    renderWorkflowStudio();
 
     expect(screen.getByText("Workflow Canvas")).toBeInTheDocument();
     expect(screen.getByText("根因分析 Agent")).toBeInTheDocument();
@@ -39,7 +62,7 @@ describe("WorkflowStudio", () => {
   it("edits LLM node controls and shows model usage in the trace timeline", async () => {
     const user = userEvent.setup();
 
-    render(<WorkflowStudio project={defaultProjectContext} />);
+    renderWorkflowStudio();
 
     const nodeName = await screen.findByLabelText(/节点名称|鑺傜偣鍚嶇О/);
     await user.clear(nodeName);
@@ -73,7 +96,7 @@ describe("WorkflowStudio", () => {
   it("shows YAML v2 import diff and exports preserved loop metadata", async () => {
     const user = userEvent.setup();
 
-    render(<WorkflowStudio project={defaultProjectContext} />);
+    renderWorkflowStudio();
 
     const yamlEditor = screen.getByLabelText("Workflow YAML");
     await user.clear(yamlEditor);
@@ -176,7 +199,7 @@ edges:
   it("adds nodes from the library, edits a loop edge, deletes canvas items, and exports v2 YAML", async () => {
     const user = userEvent.setup();
 
-    render(<WorkflowStudio project={defaultProjectContext} />);
+    renderWorkflowStudio();
 
     await user.click(screen.getByRole("button", { name: "Add Condition node" }));
     await user.click(screen.getByRole("button", { name: "Add End node" }));
@@ -219,4 +242,271 @@ edges:
     exportedYaml = screen.getByLabelText("导出的 Workflow YAML") as HTMLTextAreaElement;
     expect(exportedYaml.value).not.toContain("condition_1");
   });
+
+  it("checks publish gates, publishes versions, restores drafts, and archives with confirmation", async () => {
+    const user = userEvent.setup();
+    let restoredDraft: ReturnType<typeof makeDraft> | null = null;
+    let versionStatus: "published" | "archived" = "published";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+
+      if (url.endsWith("/workflows/drafts") && !init) {
+        return jsonResponse({
+          drafts: [
+            ...(restoredDraft ? [restoredDraft] : []),
+            makeDraft({
+              id: "33333333-3333-4333-8333-333333333333",
+              status: "draft",
+              version: 1,
+            }),
+          ],
+        });
+      }
+      if (url.endsWith("/workflows/versions?workflow_id=ops_incident_triage") && !init) {
+        return jsonResponse({
+          count: 1,
+          versions: [
+            makeVersion({
+              definitionHash: "sha256:published-v1",
+              id: "44444444-4444-4444-8444-444444444444",
+              releaseNote: "Initial guarded release",
+              status: versionStatus,
+              version: 1,
+            }),
+          ],
+        });
+      }
+      if (url.endsWith("/drafts/33333333-3333-4333-8333-333333333333") && init?.method === "PUT") {
+        return jsonResponse(makeDraft({ id: "33333333-3333-4333-8333-333333333333", version: 1 }));
+      }
+      if (url.endsWith("/drafts/55555555-5555-4555-8555-555555555555") && init?.method === "PUT") {
+        return jsonResponse(
+          makeDraft({
+            id: "55555555-5555-4555-8555-555555555555",
+            name: "Restored incident workflow",
+            version: 2,
+          }),
+        );
+      }
+      if (url.endsWith("/publish-check")) {
+        return jsonResponse({
+          can_create_draft: true,
+          can_publish_or_run: false,
+          import_diff: {
+            added_edges: [],
+            added_nodes: [],
+            changed_tool_groups: [],
+            has_breaking_changes: false,
+            modified_nodes: [],
+            removed_edges: [],
+            removed_nodes: [],
+          },
+          missing_references: [
+            { reference: "collect-pod-logs@1", reference_type: "shell_template" },
+          ],
+          permission_impact: {
+            approval_required: false,
+            environments: ["staging"],
+            mcp_servers: [],
+            risk_levels: ["medium"],
+            shell_templates: ["collect-pod-logs@1"],
+            tool_groups: [],
+          },
+        });
+      }
+      if (url.endsWith("/publish")) {
+        return jsonResponse(
+          {
+            detail: {
+              can_publish: false,
+              reasons: [
+                {
+                  code: "missing_reference",
+                  message: "Shell template collect-pod-logs@1 is missing",
+                  node_id: "shell_1",
+                  reference: "collect-pod-logs@1",
+                  reference_type: "shell_template",
+                  severity: "blocker",
+                },
+              ],
+            },
+          },
+          { status: 422 },
+        );
+      }
+      if (url.endsWith("/versions/44444444-4444-4444-8444-444444444444/restore-draft")) {
+        restoredDraft = makeDraft({
+          id: "55555555-5555-4555-8555-555555555555",
+          name: "Restored incident workflow",
+          version: 2,
+        });
+        return jsonResponse(
+          restoredDraft,
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/versions/44444444-4444-4444-8444-444444444444/archive")) {
+        versionStatus = "archived";
+        return jsonResponse(
+          makeVersion({
+            definitionHash: "sha256:published-v1",
+            id: "44444444-4444-4444-8444-444444444444",
+            releaseNote: "Initial guarded release",
+            status: "archived",
+            version: 1,
+          }),
+        );
+      }
+
+      return jsonResponse({ detail: `Unexpected request ${url}` }, { status: 500 });
+    });
+
+    renderWorkflowStudio();
+
+    expect(await screen.findByText("Workflow Release")).toBeInTheDocument();
+    expect(await screen.findByText("Initial guarded release")).toBeInTheDocument();
+    expect(screen.getByText(/Run binds to version 1/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "发布检查" }));
+    expect((await screen.findAllByText("shell_template: collect-pod-logs@1")).length).toBeGreaterThan(0);
+    expect(screen.getByText("发布门禁未通过")).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Release note"));
+    await user.type(screen.getByLabelText("Release note"), "Ship guarded workflow");
+    await user.click(screen.getByRole("button", { name: "发布版本" }));
+
+    expect(await screen.findByText("missing_reference")).toBeInTheDocument();
+    expect(screen.getByText("Shell template collect-pod-logs@1 is missing")).toBeInTheDocument();
+    expect(screen.queryByText(/raw prompt/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Restore version 1 as draft" }));
+    expect(await screen.findByText("Restored incident workflow")).toBeInTheDocument();
+    expect(screen.getByText(/Restored as draft v2/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "发布检查" }));
+    const restoredDraftUpdateCall = fetchMock.mock.calls.some(
+      ([url, init]) =>
+        String(url).includes("/workflows/drafts/55555555-5555-4555-8555-555555555555") &&
+        init?.method === "PUT",
+    );
+    expect(restoredDraftUpdateCall).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Archive version 1" }));
+    await user.type(screen.getByLabelText("Archive reason"), "Superseded by restored draft");
+    await user.click(screen.getByRole("button", { name: "Confirm archive version 1" }));
+
+    expect(await screen.findByText("archived")).toBeInTheDocument();
+    expect(screen.getByText(/No published version selected for run/)).toBeInTheDocument();
+
+    const updateCalls = fetchMock.mock.calls.filter(
+      ([url, init]) => String(url).includes("/workflows/drafts/") && init?.method === "PUT",
+    );
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
+    const publishCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/publish"));
+    expect(JSON.parse(String(publishCall?.[1]?.body))).toEqual({
+      release_note: "Ship guarded workflow",
+    });
+  });
 });
+
+function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }) {
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+}
+
+function makeDraft({
+  id,
+  name = "Kubernetes incident workflow",
+  status = "draft",
+  version,
+}: {
+  id: string;
+  name?: string;
+  status?: "draft" | "published" | "archived";
+  version: number;
+}) {
+  return {
+    analysis: {
+      can_create_draft: true,
+      can_publish_or_run: true,
+      import_diff: {
+        added_edges: [],
+        added_nodes: [],
+        changed_tool_groups: [],
+        has_breaking_changes: false,
+        modified_nodes: [],
+        removed_edges: [],
+        removed_nodes: [],
+      },
+      missing_references: [],
+      permission_impact: {
+        approval_required: false,
+        environments: ["staging"],
+        mcp_servers: ["cluster-observability"],
+        risk_levels: ["medium"],
+        shell_templates: [],
+        tool_groups: ["kubernetes-readonly"],
+      },
+    },
+    can_publish_or_run: true,
+    created_at: "2026-07-04T08:00:00Z",
+    created_by: accountUuid,
+    definition: {
+      schema_version: "workflow.dsl/v0.2",
+      workflow: {
+        id: "ops_incident_triage",
+        name,
+        project_id: "ops-command",
+        status,
+        version,
+      },
+      nodes: [
+        { id: "start_1", name: "Start", type: "start" },
+        { id: "end_1", name: "End", type: "end" },
+      ],
+      edges: [{ source: "start_1", target: "end_1", kind: "sequence" }],
+    },
+    id,
+    name,
+    project_id: projectUuid,
+    status,
+    updated_at: "2026-07-04T08:00:00Z",
+    updated_by: accountUuid,
+    version,
+    workflow_id: "ops_incident_triage",
+  };
+}
+
+function makeVersion({
+  definitionHash,
+  id,
+  releaseNote,
+  status,
+  version,
+}: {
+  definitionHash: string;
+  id: string;
+  releaseNote: string;
+  status: "published" | "archived";
+  version: number;
+}) {
+  return {
+    ...makeDraft({
+      id,
+      status,
+      version,
+    }),
+    archived_at: status === "archived" ? "2026-07-04T09:00:00Z" : null,
+    archived_by: status === "archived" ? accountUuid : null,
+    definition_hash: definitionHash,
+    gate_result: {
+      can_publish: true,
+      reasons: [],
+    },
+    published_by: accountUuid,
+    release_note: releaseNote,
+    status,
+  };
+}
