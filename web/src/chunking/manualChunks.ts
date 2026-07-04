@@ -28,6 +28,7 @@ const featureChunkRules: Array<{ chunk: string; markers: string[] }> = [
   { chunk: "project-command-center", markers: ["/src/modules/project-command-center/"] },
   { chunk: "model-gateway", markers: ["/src/modules/model-gateway/"] },
   { chunk: "prompt-library", markers: ["/src/modules/prompt-library/"] },
+  { chunk: "tool-registry", markers: ["/src/modules/tool-registry/"] },
   { chunk: "tool-gateway", markers: ["/src/modules/tool-gateway/"] },
 ];
 

@@ -10,6 +10,11 @@ from backend.app.api.dependencies import (
     get_project_access_provider,
     get_tool_registry_store,
 )
+from backend.app.execution.shell_policy import (
+    ShellTemplatePolicyInput,
+    build_shell_template_preview,
+    validate_shell_template_policy,
+)
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
@@ -31,6 +36,9 @@ from backend.app.tool_registry.schemas import (
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellTemplateCreateRequest,
+    ShellTemplatePolicySummary,
+    ShellTemplatePreviewRequest,
+    ShellTemplatePreviewResponse,
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
@@ -79,6 +87,7 @@ class InMemoryToolRegistryStore:
         self.tool_definitions: dict[UUID, list[ToolDefinitionRead]] = {}
         self.tool_groups: dict[UUID, list[ToolGroupRead]] = {}
         self.tool_group_items: dict[UUID, list[ToolGroupItemRead]] = {}
+        self.shell_templates: dict[UUID, list[ShellTemplateRead]] = {}
         self.fail_next_sync = False
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
@@ -559,11 +568,26 @@ class InMemoryToolRegistryStore:
         template_ref = str(request.template_ref)
         template_version = int(request.template_version)
         reference = f"{template_ref}@{template_version}"
+        validate_shell_template_policy(
+            ShellTemplatePolicyInput(
+                project_id=project_id,
+                template_ref=template_ref,
+                template_version=template_version,
+                risk_level=str(request.risk_level),
+                environment_key=str(request.environment_key),
+                image_ref=str(request.image_ref),
+                image_digest=str(request.image_digest),
+                entrypoint=str(request.entrypoint),
+                argv_template=list(request.argv_template),
+                parameter_schema=dict(request.parameter_schema),
+                timeout_seconds=int(request.timeout_seconds),
+            )
+        )
         catalog = self.catalogs.get(project_id, ProjectResourceCatalog())
         self.catalogs[project_id] = catalog.model_copy(
             update={"shell_templates": catalog.shell_templates | frozenset({reference})}
         )
-        return ShellTemplateRead(
+        template = ShellTemplateRead(
             **_resource(
                 project_id,
                 actor_id,
@@ -581,6 +605,75 @@ class InMemoryToolRegistryStore:
                 timeout_seconds=int(request.timeout_seconds),
             )
         )
+        self.shell_templates.setdefault(project_id, []).append(template)
+        return template
+
+    async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
+        return self.shell_templates.get(project_id, [])
+
+    async def preview_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellTemplatePreviewRequest,
+    ) -> ShellTemplatePreviewResponse:
+        template = await self.get_active_shell_template(
+            project_id=project_id,
+            template_ref=request.template_ref,
+            template_version=request.template_version,
+        )
+        if template is None:
+            raise ToolRegistryResourceNotFoundError("shell template not found")
+        preview = build_shell_template_preview(
+            ShellTemplatePolicyInput(
+                project_id=template.project_id,
+                template_ref=template.template_ref,
+                template_version=template.template_version,
+                risk_level=template.risk_level,
+                environment_key=template.environment_key,
+                image_ref=template.image_ref,
+                image_digest=template.image_digest,
+                entrypoint=template.entrypoint,
+                argv_template=template.argv_template,
+                parameter_schema=template.parameter_schema,
+                timeout_seconds=template.timeout_seconds,
+            ),
+            parameters=request.parameters,
+            run_id=request.run_id,
+            trace_id=request.trace_id,
+        )
+        return ShellTemplatePreviewResponse(
+            template_ref=template.template_ref,
+            template_version=template.template_version,
+            rendered_argv=preview.rendered_argv,
+            command_preview=preview.command_preview,
+            command_hash=preview.command_hash,
+            sandbox=preview.sandbox,
+            policy=ShellTemplatePolicySummary(
+                approval_required=preview.policy.approval_required,
+                digest_required=preview.policy.digest_required,
+                allowlisted=preview.policy.allowlisted,
+                reasons=preview.policy.reasons,
+            ),
+            trace_link=preview.trace_link,
+        )
+
+    async def get_active_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        template_version: int,
+    ) -> ShellTemplateRead | None:
+        for template in self.shell_templates.get(project_id, []):
+            if (
+                template.template_ref == template_ref
+                and template.template_version == template_version
+                and template.status == "active"
+            ):
+                return template
+        return None
 
 
 class InMemoryAuditEventStore:
@@ -816,7 +909,7 @@ def test_tool_registry_shell_template_accepts_execution_metadata() -> None:
             "risk_level": "low",
             "environment_key": "test",
             "image_ref": "redis:7-alpine",
-            "image_digest": "sha256:test-image",
+            "image_digest": "sha256:" + ("1" * 64),
             "entrypoint": "/bin/sh",
             "argv_template": ["-lc", "echo {{message}}"],
             "parameter_schema": {
@@ -833,7 +926,7 @@ def test_tool_registry_shell_template_accepts_execution_metadata() -> None:
     payload = response.json()
     assert payload["template_ref"] == "echo-shell"
     assert payload["image_ref"] == "redis:7-alpine"
-    assert payload["image_digest"] == "sha256:test-image"
+    assert payload["image_digest"] == "sha256:" + ("1" * 64)
     assert payload["entrypoint"] == "/bin/sh"
     assert payload["argv_template"] == ["-lc", "echo {{message}}"]
     assert payload["parameter_schema"]["required"] == ["message"]
@@ -1205,6 +1298,139 @@ def test_tool_registry_resources_bind_credential_refs_without_exposing_secrets()
     assert shell_response.json()["credential_ref"] == "vault://ops/k8s/readonly"
     assert "token-value" not in mcp_response.text
     assert "token-value" not in shell_response.text
+
+
+def test_tool_registry_enforces_shell_template_image_policy_on_create() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+    valid_digest = "sha256:" + ("a" * 64)
+
+    missing_digest = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "diag-missing-digest",
+            "template_version": 1,
+            "name": "Diagnostics Missing Digest",
+            "risk_level": "low",
+            "environment_key": "test",
+            "image_ref": "redis:7-alpine",
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo {{message}}"],
+            "parameter_schema": {"type": "object"},
+            "timeout_seconds": 10,
+        },
+    )
+    disallowed_image = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "diag-disallowed-image",
+            "template_version": 1,
+            "name": "Diagnostics Disallowed Image",
+            "risk_level": "low",
+            "environment_key": "test",
+            "image_ref": "alpine:3.20",
+            "image_digest": valid_digest,
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo {{message}}"],
+            "parameter_schema": {"type": "object"},
+            "timeout_seconds": 10,
+        },
+    )
+    latest_image = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "diag-latest-image",
+            "template_version": 1,
+            "name": "Diagnostics Latest Image",
+            "risk_level": "low",
+            "environment_key": "test",
+            "image_ref": "redis:latest",
+            "image_digest": valid_digest,
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo {{message}}"],
+            "parameter_schema": {"type": "object"},
+            "timeout_seconds": 10,
+        },
+    )
+
+    assert missing_digest.status_code == 400
+    assert missing_digest.json()["detail"] == "Shell template image digest is required"
+    assert disallowed_image.status_code == 400
+    assert disallowed_image.json()["detail"] == "Shell template image is not allowlisted"
+    assert latest_image.status_code == 400
+    assert latest_image.json()["detail"] == "Shell template image tag latest is forbidden"
+
+
+def test_tool_registry_lists_and_previews_shell_templates_without_leaking_secrets() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    valid_digest = "sha256:" + ("b" * 64)
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates",
+        json={
+            "template_ref": "k8s-log-collector",
+            "template_version": 3,
+            "name": "日志采集",
+            "risk_level": "high",
+            "environment_key": "prod",
+            "image_ref": "redis:7-alpine",
+            "image_digest": valid_digest,
+            "entrypoint": "/bin/sh",
+            "argv_template": ["-lc", "echo {{message}} && echo token={{token}}"],
+            "parameter_schema": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "token": {"type": "string"},
+                },
+                "required": ["message", "token"],
+                "additionalProperties": False,
+            },
+            "timeout_seconds": 20,
+        },
+    )
+
+    list_response = client.get(f"/api/v1/projects/{project.id}/tool-registry/shell-templates")
+    preview_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-templates/preview",
+        json={
+            "template_ref": "k8s-log-collector",
+            "template_version": 3,
+            "parameters": {"message": "hello", "token": "raw-token-value"},
+            "run_id": "run-shell-preview",
+            "trace_id": "trace-shell-preview",
+        },
+    )
+
+    assert create_response.status_code == 201
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["template_ref"] == "k8s-log-collector"
+    assert preview_response.status_code == 200
+    body = preview_response.json()
+    assert body["template_ref"] == "k8s-log-collector"
+    assert body["rendered_argv"] == ["-lc", "echo hello && echo token=[redacted]"]
+    assert body["command_hash"].startswith("sha256:")
+    assert body["sandbox"]["network_mode"] == "none"
+    assert body["policy"]["approval_required"] is True
+    assert body["trace_link"].endswith("run_id=run-shell-preview&trace_id=trace-shell-preview")
+    assert "raw-token-value" not in preview_response.text
+    assert [event["action"] for event in audit_store.events][-3:] == [
+        "tool_registry.shell_template.create",
+        "tool_registry.shell_template.list",
+        "tool_registry.shell_template.preview",
+    ]
 
 
 def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:

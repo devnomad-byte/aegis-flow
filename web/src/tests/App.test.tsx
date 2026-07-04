@@ -72,6 +72,18 @@ describe("App", () => {
     expect(await screen.findByText("POLICY EDITOR")).toBeInTheDocument();
   });
 
+  it("renders tool registry for the project tools route", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    render(<App initialPath="/projects/ops-command/tools" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Shell Template Governance" })).toBeInTheDocument();
+    expect(await screen.findByText("No shell templates configured")).toBeInTheDocument();
+  });
+
   it("renders prompt library settings for the project prompt route", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);

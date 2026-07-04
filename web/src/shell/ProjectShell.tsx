@@ -21,7 +21,7 @@ const navItems = [
   { label: "Project Command", icon: LayoutDashboard, route: "command" },
   { label: "Workflow Studio", icon: GitBranch, route: "workflows" },
   { label: "Agent Console", icon: Bot, route: "workflows" },
-  { label: "Tool Registry", icon: Boxes, route: "workflows" },
+  { label: "Tool Registry", icon: Boxes, route: "tool-registry" },
   { label: "Run Observatory", icon: Activity, route: "runs" },
   { label: "Debug Chat", icon: MessageSquareText, route: "workflows" },
   { label: "Policy Center", icon: ShieldCheck, route: "workflows" },
@@ -38,6 +38,7 @@ type ProjectShellProps = {
 const ProjectFeatureComponents = {
   command: lazy(PROJECT_FEATURE_LOADERS.command),
   workflows: lazy(PROJECT_FEATURE_LOADERS.workflows),
+  "tool-registry": lazy(PROJECT_FEATURE_LOADERS["tool-registry"]),
   "model-gateway-settings": lazy(PROJECT_FEATURE_LOADERS["model-gateway-settings"]),
   "prompt-library": lazy(PROJECT_FEATURE_LOADERS["prompt-library"]),
   runs: lazy(PROJECT_FEATURE_LOADERS.runs),
@@ -63,6 +64,7 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
             const isActive =
               (view === "command" && item.route === "command") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
+              (view === "tool-registry" && item.route === "tool-registry") ||
               (view === "runs" && item.route === "runs") ||
               (view === "model-gateway-settings" && item.route === "model-gateway-settings") ||
               (view === "prompt-library" && item.route === "prompt-library");
@@ -89,6 +91,13 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId/runs",
+                    });
+                    return;
+                  }
+                  if (item.route === "tool-registry") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/tools",
                     });
                     return;
                   }
@@ -161,6 +170,8 @@ function getFeatureLabel(view: ProjectFeatureView) {
       return "Project Command Center";
     case "workflows":
       return "Workflow Studio";
+    case "tool-registry":
+      return "Tool Registry";
     case "model-gateway-settings":
       return "Model Gateway";
     case "prompt-library":

@@ -5,6 +5,7 @@ import type { ProjectContext } from "./projectContext";
 export type ProjectFeatureView =
   | "command"
   | "workflows"
+  | "tool-registry"
   | "model-gateway-settings"
   | "prompt-library"
   | "runs";
@@ -22,6 +23,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   workflows: () =>
     import("../modules/workflow-studio/WorkflowStudio").then((module) => ({
       default: module.WorkflowStudio,
+    })),
+  "tool-registry": () =>
+    import("../modules/tool-registry/ProjectToolRegistry").then((module) => ({
+      default: module.ProjectToolRegistry,
     })),
   "model-gateway-settings": () =>
     import("../modules/model-gateway/ProjectModelGatewaySettings").then((module) => ({

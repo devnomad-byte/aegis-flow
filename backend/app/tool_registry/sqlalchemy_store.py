@@ -6,6 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.execution.shell_policy import (
+    ShellTemplatePolicyInput,
+    build_shell_template_preview,
+    validate_shell_template_policy,
+)
 from backend.app.security.egress_policy import (
     EgressPolicy,
     EgressPolicyViolation,
@@ -49,6 +54,9 @@ from backend.app.tool_registry.schemas import (
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellTemplateCreateRequest,
+    ShellTemplatePolicySummary,
+    ShellTemplatePreviewRequest,
+    ShellTemplatePreviewResponse,
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
@@ -207,6 +215,9 @@ class SqlAlchemyToolRegistryStore:
             project_id=project_id,
             credential_ref=request.credential_ref,
         )
+        validate_shell_template_policy(
+            _policy_input_from_shell_request(project_id=project_id, request=request)
+        )
         resource = ToolRegistryShellTemplate(
             project_id=project_id,
             template_ref=request.template_ref,
@@ -227,6 +238,17 @@ class SqlAlchemyToolRegistryStore:
         )
         return ShellTemplateRead.model_validate(await self._insert(resource))
 
+    async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryShellTemplate)
+            .where(ToolRegistryShellTemplate.project_id == project_id)
+            .order_by(
+                ToolRegistryShellTemplate.template_ref,
+                ToolRegistryShellTemplate.template_version.desc(),
+            )
+        )
+        return [ShellTemplateRead.model_validate(resource) for resource in result.all()]
+
     async def get_active_shell_template(
         self,
         *,
@@ -246,6 +268,42 @@ class SqlAlchemyToolRegistryStore:
         if template is None:
             return None
         return ShellTemplateRead.model_validate(template)
+
+    async def preview_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellTemplatePreviewRequest,
+    ) -> ShellTemplatePreviewResponse:
+        template = await self.get_active_shell_template(
+            project_id=project_id,
+            template_ref=request.template_ref,
+            template_version=request.template_version,
+        )
+        if template is None:
+            raise ToolRegistryResourceNotFoundError("shell template not found")
+        preview = build_shell_template_preview(
+            _policy_input_from_shell_read(template),
+            parameters=request.parameters,
+            run_id=request.run_id,
+            trace_id=request.trace_id,
+        )
+        return ShellTemplatePreviewResponse(
+            template_ref=template.template_ref,
+            template_version=template.template_version,
+            rendered_argv=preview.rendered_argv,
+            command_preview=preview.command_preview,
+            command_hash=preview.command_hash,
+            sandbox=preview.sandbox,
+            policy=ShellTemplatePolicySummary(
+                approval_required=preview.policy.approval_required,
+                digest_required=preview.policy.digest_required,
+                allowlisted=preview.policy.allowlisted,
+                reasons=preview.policy.reasons,
+            ),
+            trace_link=preview.trace_link,
+        )
 
     async def create_credential_ref(
         self,
@@ -1093,6 +1151,42 @@ def _highest_risk_level(risk_levels: list[str | None]) -> str:
     if not cleaned:
         return "low"
     return max(cleaned, key=lambda risk_level: order.get(risk_level, 0))
+
+
+def _policy_input_from_shell_request(
+    *,
+    project_id: UUID,
+    request: ShellTemplateCreateRequest,
+) -> ShellTemplatePolicyInput:
+    return ShellTemplatePolicyInput(
+        project_id=project_id,
+        template_ref=request.template_ref,
+        template_version=request.template_version,
+        risk_level=request.risk_level,
+        environment_key=request.environment_key,
+        image_ref=request.image_ref,
+        image_digest=request.image_digest,
+        entrypoint=request.entrypoint,
+        argv_template=request.argv_template,
+        parameter_schema=request.parameter_schema,
+        timeout_seconds=request.timeout_seconds,
+    )
+
+
+def _policy_input_from_shell_read(template: ShellTemplateRead) -> ShellTemplatePolicyInput:
+    return ShellTemplatePolicyInput(
+        project_id=template.project_id,
+        template_ref=template.template_ref,
+        template_version=template.template_version,
+        risk_level=template.risk_level,
+        environment_key=template.environment_key,
+        image_ref=template.image_ref,
+        image_digest=template.image_digest,
+        entrypoint=template.entrypoint,
+        argv_template=template.argv_template,
+        parameter_schema=template.parameter_schema,
+        timeout_seconds=template.timeout_seconds,
+    )
 
 
 def _authorized_context_matches(

@@ -8,7 +8,6 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
-from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.execution.schemas import (
@@ -16,6 +15,14 @@ from backend.app.execution.schemas import (
     HttpInvocationStatus,
     ShellInvocationCreate,
     ShellInvocationStatus,
+)
+from backend.app.execution.shell_policy import (
+    ShellTemplatePolicyError,
+    ShellTemplatePolicyInput,
+    hash_command,
+    render_template_args,
+    validate_shell_parameters,
+    validate_shell_template_policy,
 )
 from backend.app.execution.shell_runner import (
     DockerSandboxPolicy,
@@ -223,14 +230,14 @@ class ShellExecutionGatewayService:
         _validate_parameters(template, request.parameters)
 
         invocation_id = f"shell_{uuid4().hex}"
-        argv = [_render_template_arg(item, request.parameters) for item in template.argv_template]
+        argv = render_template_args(template.argv_template, request.parameters)
         invocation = ScriptTemplateInvocation(
             image_ref=template.image_ref,
             entrypoint=template.entrypoint,
             argv=argv,
         )
         command = build_docker_run_command(invocation, self.sandbox_policy)
-        command_hash = _command_hash(command)
+        command_hash = hash_command(command)
         started = time.perf_counter()
         status: ShellInvocationStatus = "success"
         exit_code: int | None = None
@@ -429,33 +436,31 @@ def _validate_executable_template(
         raise ShellExecutionGatewayError("shell template environment does not match node")
     if not template.image_ref or not template.entrypoint or not template.argv_template:
         raise ShellExecutionGatewayError("shell template is missing executable metadata")
+    try:
+        validate_shell_template_policy(
+            ShellTemplatePolicyInput(
+                project_id=template.project_id,
+                template_ref=template.template_ref,
+                template_version=template.template_version,
+                risk_level=template.risk_level,
+                environment_key=template.environment_key,
+                image_ref=template.image_ref,
+                image_digest=template.image_digest,
+                entrypoint=template.entrypoint,
+                argv_template=template.argv_template,
+                parameter_schema=template.parameter_schema,
+                timeout_seconds=template.timeout_seconds,
+            )
+        )
+    except ShellTemplatePolicyError as exc:
+        raise ShellExecutionGatewayError(str(exc)) from exc
 
 
 def _validate_parameters(template: ShellTemplateRead, parameters: dict[str, Any]) -> None:
-    if not template.parameter_schema:
-        return
     try:
-        Draft202012Validator(template.parameter_schema).validate(parameters)
-    except ValidationError as exc:
-        raise ShellExecutionGatewayError(
-            f"shell template parameters are invalid: {exc.message}"
-        ) from exc
-
-
-def _render_template_arg(template: str, parameters: dict[str, Any]) -> str:
-    rendered = template
-    for key, value in parameters.items():
-        if isinstance(value, (dict, list)):
-            replacement = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        else:
-            replacement = "" if value is None else str(value)
-        rendered = rendered.replace(f"{{{{{key}}}}}", replacement)
-    return rendered
-
-
-def _command_hash(command: list[str]) -> str:
-    payload = json.dumps(command, ensure_ascii=False, separators=(",", ":"))
-    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+        validate_shell_parameters(template.parameter_schema, parameters)
+    except ShellTemplatePolicyError as exc:
+        raise ShellExecutionGatewayError(str(exc)) from exc
 
 
 def _summarize_output(value: str, *, limit: int = 2000) -> str:

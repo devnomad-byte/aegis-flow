@@ -145,6 +145,39 @@ async def test_shell_execution_gateway_rejects_invalid_parameters_before_docker(
 
 
 @pytest.mark.asyncio
+async def test_shell_execution_gateway_rejects_unpinned_image_before_docker() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    invocation_store = RecordingShellInvocationStore()
+    command_executor = RecordingCommandExecutor(
+        result=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    )
+    template = shell_template(project_id=project_id, actor_id=actor_id).model_copy(
+        update={"image_digest": ""}
+    )
+    gateway = ShellExecutionGatewayService(
+        template_store=InMemoryShellTemplateStore(template=template),
+        invocation_store=invocation_store,
+        command_executor=command_executor,
+    )
+
+    with pytest.raises(ShellExecutionGatewayError, match="digest"):
+        await gateway.run_shell(
+            ShellExecutionRequest(
+                project_id=project_id,
+                actor_id=actor_id,
+                template_ref="echo-shell",
+                template_version=1,
+                environment="test",
+                parameters={"message": "hello"},
+            )
+        )
+
+    assert command_executor.command is None
+    assert invocation_store.invocations == []
+
+
+@pytest.mark.asyncio
 async def test_shell_execution_gateway_records_sanitized_failure_summary() -> None:
     project_id = uuid4()
     actor_id = uuid4()
@@ -248,7 +281,7 @@ def shell_template(*, project_id: UUID, actor_id: UUID) -> ShellTemplateRead:
         environment_key="test",
         credential_ref="",
         image_ref="redis:7-alpine",
-        image_digest="",
+        image_digest="sha256:" + ("c" * 64),
         entrypoint="/bin/sh",
         argv_template=["-lc", "echo {{message}}"],
         parameter_schema={

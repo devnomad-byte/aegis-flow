@@ -892,6 +892,7 @@ def test_real_workflow_runtime_runs_shell_node_through_docker_sandbox() -> None:
                     "risk_level": "low",
                     "environment_key": "test",
                     "image_ref": "redis:7-alpine",
+                    "image_digest": "sha256:" + ("2" * 64),
                     "entrypoint": "/bin/sh",
                     "argv_template": [
                         "-lc",

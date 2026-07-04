@@ -17,6 +17,8 @@ from backend.app.tool_registry.schemas import (
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellTemplateCreateRequest,
+    ShellTemplatePreviewRequest,
+    ShellTemplatePreviewResponse,
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
@@ -110,6 +112,18 @@ class ToolRegistryStore(Protocol):
         template_ref: str,
         template_version: int,
     ) -> ShellTemplateRead | None:
+        raise NotImplementedError
+
+    async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
+        raise NotImplementedError
+
+    async def preview_shell_template(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellTemplatePreviewRequest,
+    ) -> ShellTemplatePreviewResponse:
         raise NotImplementedError
 
     async def create_credential_ref(

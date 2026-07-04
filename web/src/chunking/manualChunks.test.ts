@@ -18,6 +18,9 @@ describe("resolveAegisManualChunk", () => {
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/run-observatory/RunObservatory.tsx")).toBe(
       "run-observatory",
     );
+    expect(resolveAegisManualChunk("D:/projects/web/src/modules/tool-registry/ProjectToolRegistry.tsx")).toBe(
+      "tool-registry",
+    );
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/global-command-center/globalCommandCenter.ts")).toBe(
       "global-command-center",
     );
@@ -26,6 +29,7 @@ describe("resolveAegisManualChunk", () => {
   it("keeps heavy project workbench views behind dynamic route loaders", () => {
     expect(PROJECT_FEATURE_LOADERS.workflows.toString()).toContain("workflow-studio");
     expect(PROJECT_FEATURE_LOADERS.runs.toString()).toContain("run-observatory");
+    expect(PROJECT_FEATURE_LOADERS["tool-registry"].toString()).toContain("tool-registry");
     expect(PROJECT_FEATURE_LOADERS.command.toString()).toContain("project-command-center");
   });
 });

@@ -112,6 +112,16 @@ class ShellTemplateCreateRequest(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
 
 
+class ShellTemplatePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    template_ref: str = Field(min_length=1, max_length=120)
+    template_version: int = Field(ge=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    run_id: str = Field(default="", max_length=160)
+    trace_id: str = Field(default="", max_length=160)
+
+
 class CredentialRefCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -230,6 +240,24 @@ class ShellTemplateRead(RegistryResourceRead):
     argv_template: list[str] = Field(default_factory=list)
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int
+
+
+class ShellTemplatePolicySummary(BaseModel):
+    approval_required: bool
+    digest_required: bool
+    allowlisted: bool
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ShellTemplatePreviewResponse(BaseModel):
+    template_ref: str
+    template_version: int
+    rendered_argv: list[str]
+    command_preview: str
+    command_hash: str
+    sandbox: dict[str, Any]
+    policy: ShellTemplatePolicySummary
+    trace_link: str
 
 
 class CredentialRefRead(BaseModel):

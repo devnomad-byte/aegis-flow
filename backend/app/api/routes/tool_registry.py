@@ -12,6 +12,7 @@ from backend.app.api.dependencies import (
     get_tool_registry_store,
 )
 from backend.app.audit.store import AuditEventStore
+from backend.app.execution.shell_policy import ShellTemplatePolicyError
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.security.egress_policy import EgressPolicy
@@ -28,6 +29,8 @@ from backend.app.tool_registry.schemas import (
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellTemplateCreateRequest,
+    ShellTemplatePreviewRequest,
+    ShellTemplatePreviewResponse,
     ShellTemplateRead,
     ToolDefinitionRead,
     ToolGroupCreateRequest,
@@ -730,6 +733,8 @@ async def create_shell_template(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credential reference not found or inactive",
         ) from exc
+    except ShellTemplatePolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await _record_create_event(
         audit_store,
         project_id=project_id,
@@ -741,6 +746,78 @@ async def create_shell_template(
         risk_level=request.risk_level,
     )
     return resource
+
+
+@router.get("/shell-templates", response_model=list[ShellTemplateRead])
+async def list_shell_templates(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[ShellTemplateRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    templates = await registry_store.list_project_shell_templates(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_template.list",
+        target_type="tool_registry_shell_template",
+        target_id=str(project_id),
+        risk_level=_highest_risk_level([template.risk_level for template in templates]),
+        metadata={"shell_template_count": len(templates)},
+    )
+    return templates
+
+
+@router.post("/shell-templates/preview", response_model=ShellTemplatePreviewResponse)
+async def preview_shell_template(
+    project_id: UUID,
+    request: ShellTemplatePreviewRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellTemplatePreviewResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        preview = await registry_store.preview_shell_template(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ToolRegistryResourceNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shell template not found",
+        ) from exc
+    except ShellTemplatePolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_template.preview",
+        target_type="tool_registry_shell_template",
+        target_id=f"{preview.template_ref}@{preview.template_version}",
+        risk_level="high" if preview.policy.approval_required else "medium",
+        metadata={
+            "reference": f"{preview.template_ref}@{preview.template_version}",
+            "command_hash": preview.command_hash,
+            "approval_required": preview.policy.approval_required,
+            "trace_link": preview.trace_link,
+        },
+    )
+    return preview
 
 
 def _require_project_permission(

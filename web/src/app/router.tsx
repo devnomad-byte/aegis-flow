@@ -54,6 +54,12 @@ const projectWorkflowsRoute = createRoute({
   component: ProjectWorkflowsRoute,
 });
 
+const projectToolRegistryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/tools",
+  component: ProjectToolRegistryRoute,
+});
+
 const projectModelGatewaySettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId/settings/model-gateway",
@@ -78,6 +84,7 @@ const routeTree = rootRoute.addChildren([
   globalRoute,
   projectRoute,
   projectWorkflowsRoute,
+  projectToolRegistryRoute,
   projectModelGatewaySettingsRoute,
   projectPromptLibraryRoute,
   projectRunsRoute,
@@ -130,6 +137,18 @@ function ProjectWorkflowsRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="workflows" />;
+}
+
+function ProjectToolRegistryRoute() {
+  const context = projectToolRegistryRoute.useRouteContext();
+  const params = projectToolRegistryRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="tool-registry" />;
 }
 
 function ProjectModelGatewaySettingsRoute() {
