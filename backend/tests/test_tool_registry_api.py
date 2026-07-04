@@ -45,6 +45,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionPolicyRead,
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
@@ -58,6 +60,7 @@ from backend.app.tool_registry.schemas import (
     ToolGroupItemRead,
     ToolGroupRead,
     ToolSyncRunRead,
+    default_shell_image_admission_policy,
 )
 from backend.app.tool_registry.store import (
     ShellImageAdmissionRequiredError,
@@ -102,6 +105,7 @@ class InMemoryToolRegistryStore:
         self.tool_group_items: dict[UUID, list[ToolGroupItemRead]] = {}
         self.shell_templates: dict[UUID, list[ShellTemplateRead]] = {}
         self.image_admissions: dict[UUID, list[ShellImageAdmissionRead]] = {}
+        self.image_policies: dict[UUID, ShellImageAdmissionPolicyRead] = {}
         self.fail_next_sync = False
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
@@ -712,6 +716,44 @@ class InMemoryToolRegistryStore:
                 return admission
         return None
 
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
+        return self.image_policies.get(project_id) or default_shell_image_admission_policy(
+            project_id
+        )
+
+    async def upsert_shell_image_admission_policy(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionPolicyUpdateRequest,
+    ) -> ShellImageAdmissionPolicyRead:
+        now = datetime.now(UTC)
+        existing = self.image_policies.get(project_id)
+        policy = ShellImageAdmissionPolicyRead(
+            id=existing.id if existing else uuid4(),
+            configured=True,
+            project_id=project_id,
+            enforcement_mode=request.enforcement_mode,
+            cosign_required=request.cosign_required,
+            notation_enabled=request.notation_enabled,
+            notation_trust_policy=request.notation_trust_policy,
+            sbom_artifact_retention_enabled=request.sbom_artifact_retention_enabled,
+            scan_report_retention_enabled=request.scan_report_retention_enabled,
+            artifact_store_prefix=request.artifact_store_prefix,
+            artifact_retention_days=request.artifact_retention_days,
+            blocked_severities=request.blocked_severities,
+            created_by=existing.created_by if existing else actor_id,
+            updated_by=actor_id,
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        self.image_policies[project_id] = policy
+        return policy
+
     async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
         return self.shell_templates.get(project_id, [])
 
@@ -909,6 +951,132 @@ def make_project(
         roles=["project_admin"],
         permissions=permissions,
     )
+
+
+def test_tool_registry_shell_image_policy_round_trips_with_sanitized_audit() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    trust_policy = {
+        "version": "1.0",
+        "trustPolicies": [
+            {
+                "name": "internal-runtime-images",
+                "registryScopes": ["registry.example/aegis/runtime"],
+                "signatureVerification": {"level": "strict"},
+                "trustStores": ["ca:aegis-runtime"],
+                "trustedIdentities": ["x509.subject: C=CN, ST=ZJ, O=AegisFlow, CN=SecureBuilder"],
+            }
+        ],
+    }
+
+    default_response = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy"
+    )
+    update_response = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy",
+        json={
+            "enforcement_mode": "enforce",
+            "cosign_required": True,
+            "notation_enabled": True,
+            "notation_trust_policy": trust_policy,
+            "sbom_artifact_retention_enabled": True,
+            "scan_report_retention_enabled": True,
+            "artifact_store_prefix": "shell-image-admissions/prod",
+            "artifact_retention_days": 90,
+            "blocked_severities": ["CRITICAL", "HIGH", "HIGH"],
+        },
+    )
+    follow_up_response = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy"
+    )
+
+    assert default_response.status_code == 200
+    assert default_response.json()["configured"] is False
+    assert default_response.json()["enforcement_mode"] == "dry_run"
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["configured"] is True
+    assert updated["enforcement_mode"] == "enforce"
+    assert updated["cosign_required"] is True
+    assert updated["notation_enabled"] is True
+    assert updated["notation_trust_policy"] == trust_policy
+    assert updated["sbom_artifact_retention_enabled"] is True
+    assert updated["scan_report_retention_enabled"] is True
+    assert updated["artifact_store_prefix"] == "shell-image-admissions/prod"
+    assert updated["artifact_retention_days"] == 90
+    assert updated["blocked_severities"] == ["HIGH", "CRITICAL"]
+    assert follow_up_response.status_code == 200
+    assert follow_up_response.json()["id"] == updated["id"]
+    assert follow_up_response.json()["configured"] is True
+
+    update_event = next(
+        event
+        for event in audit_store.events
+        if event["action"] == "tool_registry.shell_image_policy.update"
+    )
+    metadata = update_event["metadata"]
+    assert metadata == {
+        "configured": True,
+        "enforcement_mode": "enforce",
+        "cosign_required": True,
+        "notation_enabled": True,
+        "trust_policy_count": 1,
+        "sbom_artifact_retention_enabled": True,
+        "scan_report_retention_enabled": True,
+        "artifact_retention_days": 90,
+        "blocked_severities": ["HIGH", "CRITICAL"],
+    }
+    assert "SecureBuilder" not in str(metadata)
+    assert "trustedIdentities" not in str(metadata)
+
+
+def test_tool_registry_shell_image_policy_rejects_secret_like_trust_policy_keys() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy",
+        json={
+            "notation_enabled": True,
+            "notation_trust_policy": {
+                "version": "1.0",
+                "trustPolicies": [],
+                "token": "raw-secret-token",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "raw-secret-token" not in response.text
+
+
+def test_tool_registry_shell_image_policy_write_requires_permission() -> None:
+    project = make_project(permissions=["tool-registry:view"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admission-policy",
+        json={"enforcement_mode": "enforce"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_tool_registry_creates_project_resources_and_returns_catalog() -> None:

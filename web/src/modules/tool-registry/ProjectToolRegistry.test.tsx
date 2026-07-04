@@ -54,6 +54,53 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/admission-policy") && !init) {
+        return new Response(
+          JSON.stringify({
+            id: null,
+            configured: false,
+            project_id: "ops-command",
+            enforcement_mode: "dry_run",
+            cosign_required: false,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admission-policy") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        expect(body.enforcement_mode).toBe("enforce");
+        expect(body.notation_enabled).toBe(true);
+        expect(body.sbom_artifact_retention_enabled).toBe(true);
+        expect(body.scan_report_retention_enabled).toBe(true);
+        expect(body.artifact_store_prefix).toBe("shell-image-admissions/prod");
+        expect(body.artifact_retention_days).toBe(90);
+        return new Response(
+          JSON.stringify({
+            id: "policy-1",
+            configured: true,
+            project_id: "ops-command",
+            enforcement_mode: "enforce",
+            cosign_required: true,
+            notation_enabled: true,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: true,
+            scan_report_retention_enabled: true,
+            artifact_store_prefix: "shell-image-admissions/prod",
+            artifact_retention_days: 90,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
       if (url.endsWith("/shell-templates") && init?.method === "POST") {
         return new Response(
           JSON.stringify({
@@ -136,7 +183,19 @@ describe("ProjectToolRegistry", () => {
     );
 
     expect(await screen.findByText("Runtime Shell Echo")).toBeInTheDocument();
+    expect(await screen.findByText("Shell Image Admission Policy")).toBeInTheDocument();
     expect(screen.getByText("registry.example/aegis/runtime:7-alpine")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Enforcement mode"), "enforce");
+    await user.click(screen.getByLabelText("Require Cosign"));
+    await user.click(screen.getByLabelText("Enable Notation"));
+    await user.click(screen.getByLabelText("Retain SBOM artifact"));
+    await user.click(screen.getByLabelText("Retain scan report"));
+    await user.clear(screen.getByLabelText("Artifact prefix"));
+    await user.type(screen.getByLabelText("Artifact prefix"), "shell-image-admissions/prod");
+    await user.clear(screen.getByLabelText("Retention days"));
+    await user.type(screen.getByLabelText("Retention days"), "90");
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
 
     await user.clear(screen.getByLabelText("Version"));
     await user.type(screen.getByLabelText("Version"), "2");
@@ -152,6 +211,7 @@ describe("ProjectToolRegistry", () => {
     await user.click(screen.getByRole("button", { name: "Preview command" }));
 
     expect(await screen.findByText("sha256:preview")).toBeInTheDocument();
+    expect(screen.getByText("configured")).toBeInTheDocument();
     expect(screen.getByText("approved")).toBeInTheDocument();
     expect(screen.getAllByText("passed").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("failed")).toBeInTheDocument();
@@ -170,6 +230,10 @@ describe("ProjectToolRegistry", () => {
       );
     });
     expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admission-policy",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/resolve",
       expect.objectContaining({ method: "POST" }),
     );
@@ -181,6 +245,26 @@ describe("ProjectToolRegistry", () => {
       const url = String(input);
       if (url.endsWith("/shell-templates")) {
         return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/admission-policy")) {
+        return new Response(
+          JSON.stringify({
+            id: null,
+            configured: false,
+            project_id: "ops-command",
+            enforcement_mode: "dry_run",
+            cosign_required: false,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: null,
+          }),
+          { status: 200 },
+        );
       }
       return new Response(
         JSON.stringify({ detail: "Shell template image digest is required" }),

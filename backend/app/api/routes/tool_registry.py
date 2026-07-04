@@ -43,6 +43,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionPolicyRead,
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
@@ -814,6 +816,71 @@ async def resolve_shell_image_admission(
     return admission.model_copy(update={"evidence": _sanitize_image_evidence(admission.evidence)})
 
 
+@router.get(
+    "/shell-images/admission-policy",
+    response_model=ShellImageAdmissionPolicyRead,
+)
+async def get_shell_image_admission_policy(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellImageAdmissionPolicyRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    policy = await registry_store.get_shell_image_admission_policy(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_policy.view",
+        target_type="tool_registry_shell_image_policy",
+        target_id=str(policy.id or project_id),
+        risk_level="medium",
+        metadata=_shell_image_policy_metadata(policy),
+    )
+    return policy
+
+
+@router.put(
+    "/shell-images/admission-policy",
+    response_model=ShellImageAdmissionPolicyRead,
+)
+async def update_shell_image_admission_policy(
+    project_id: UUID,
+    request: ShellImageAdmissionPolicyUpdateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellImageAdmissionPolicyRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    policy = await registry_store.upsert_shell_image_admission_policy(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        request=request,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_policy.update",
+        target_type="tool_registry_shell_image_policy",
+        target_id=str(policy.id or project_id),
+        risk_level="high" if policy.enforcement_mode == "enforce" else "medium",
+        metadata=_shell_image_policy_metadata(policy),
+    )
+    return policy
+
+
 @router.post(
     "/shell-templates",
     response_model=ShellTemplateRead,
@@ -1013,6 +1080,22 @@ def _secret_lease_metadata(lease: SecretLeaseRead) -> dict[str, object]:
         "ttl_seconds": lease.ttl_seconds,
         "expires_at": lease.expires_at.isoformat(),
         "status": lease.status,
+    }
+
+
+def _shell_image_policy_metadata(policy: ShellImageAdmissionPolicyRead) -> dict[str, object]:
+    trust_policies = policy.notation_trust_policy.get("trustPolicies")
+    trust_policy_count = len(trust_policies) if isinstance(trust_policies, list) else 0
+    return {
+        "configured": policy.configured,
+        "enforcement_mode": policy.enforcement_mode,
+        "cosign_required": policy.cosign_required,
+        "notation_enabled": policy.notation_enabled,
+        "trust_policy_count": trust_policy_count,
+        "sbom_artifact_retention_enabled": policy.sbom_artifact_retention_enabled,
+        "scan_report_retention_enabled": policy.scan_report_retention_enabled,
+        "artifact_retention_days": policy.artifact_retention_days,
+        "blocked_severities": policy.blocked_severities,
     }
 
 

@@ -53,6 +53,38 @@ export type ShellImageAdmission = {
   evidence: Record<string, unknown>;
 };
 
+export type ShellImageAdmissionPolicy = {
+  id: string | null;
+  configured: boolean;
+  project_id: string;
+  enforcement_mode: "dry_run" | "enforce";
+  cosign_required: boolean;
+  notation_enabled: boolean;
+  notation_trust_policy: Record<string, unknown>;
+  sbom_artifact_retention_enabled: boolean;
+  scan_report_retention_enabled: boolean;
+  artifact_store_prefix: string;
+  artifact_retention_days: number;
+  blocked_severities: string[];
+  created_by?: string | null;
+  updated_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ShellImageAdmissionPolicyUpdateRequest = Pick<
+  ShellImageAdmissionPolicy,
+  | "enforcement_mode"
+  | "cosign_required"
+  | "notation_enabled"
+  | "notation_trust_policy"
+  | "sbom_artifact_retention_enabled"
+  | "scan_report_retention_enabled"
+  | "artifact_store_prefix"
+  | "artifact_retention_days"
+  | "blocked_severities"
+>;
+
 export type ShellTemplateCreateRequest = Pick<
   ShellTemplate,
   | "template_ref"
@@ -97,6 +129,9 @@ export type ShellTemplatePreviewResponse = {
 export const shellTemplatesQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-templates"] as const;
 
+export const shellImagePolicyQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "shell-image-policy"] as const;
+
 export async function listShellTemplates(
   projectId: string,
   fetcher: typeof fetch = globalThis.fetch,
@@ -104,6 +139,33 @@ export async function listShellTemplates(
   return requestJson<ShellTemplate[]>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-templates`,
     undefined,
+    fetcher,
+  );
+}
+
+export async function getShellImageAdmissionPolicy(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageAdmissionPolicy> {
+  return requestJson<ShellImageAdmissionPolicy>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admission-policy`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function updateShellImageAdmissionPolicy(
+  projectId: string,
+  request: ShellImageAdmissionPolicyUpdateRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageAdmissionPolicy> {
+  return requestJson<ShellImageAdmissionPolicy>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admission-policy`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
+    },
     fetcher,
   );
 }

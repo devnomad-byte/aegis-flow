@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from backend.app.security.egress_policy import normalize_allowed_hosts
 
@@ -38,6 +39,23 @@ CredentialAccessDecision = Literal["recorded", "denied"]
 SecretLeaseStatus = Literal["active", "revoked", "expired", "denied"]
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
 ImageAdmissionDecision = Literal["approved", "rejected"]
+ShellImageAdmissionEnforcementMode = Literal["dry_run", "enforce"]
+
+DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}
+DEFAULT_BLOCKED_SEVERITIES = ["HIGH", "CRITICAL"]
+_SEVERITY_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+_SECRET_LIKE_KEYS = {
+    "apikey",
+    "api_key",
+    "authorization",
+    "credential",
+    "password",
+    "privatekey",
+    "private_key",
+    "secret",
+    "token",
+}
+_WINDOWS_DRIVE_PREFIX = re.compile(r"^[a-zA-Z]:")
 
 
 class ToolRegistryCatalogResponse(BaseModel):
@@ -129,6 +147,62 @@ class ShellImageAdmissionResolveRequest(BaseModel):
 
     image_ref: str = Field(min_length=1, max_length=260)
     image_digest: str = Field(min_length=1, max_length=160)
+
+
+class ShellImageAdmissionPolicyUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enforcement_mode: ShellImageAdmissionEnforcementMode = "dry_run"
+    cosign_required: bool = False
+    notation_enabled: bool = False
+    notation_trust_policy: dict[str, Any] = Field(
+        default_factory=lambda: dict(DEFAULT_NOTATION_TRUST_POLICY)
+    )
+    sbom_artifact_retention_enabled: bool = False
+    scan_report_retention_enabled: bool = False
+    artifact_store_prefix: str = Field(
+        default="shell-image-admissions",
+        min_length=1,
+        max_length=240,
+    )
+    artifact_retention_days: int = Field(default=30, ge=1, le=3650)
+    blocked_severities: list[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_SEVERITIES))
+
+    @field_validator("notation_trust_policy")
+    @classmethod
+    def validate_notation_trust_policy(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if _contains_secret_like_key(value):
+            raise ValueError("Notation trust policy contains secret-like fields")
+        if value.get("version") != "1.0":
+            raise ValueError("Notation trust policy version must be 1.0")
+        trust_policies = value.get("trustPolicies")
+        if not isinstance(trust_policies, list):
+            raise ValueError("Notation trust policy must contain trustPolicies list")
+        return value
+
+    @field_validator("artifact_store_prefix")
+    @classmethod
+    def validate_artifact_store_prefix(cls, value: str) -> str:
+        prefix = value.strip().strip("/")
+        if not prefix:
+            raise ValueError("Artifact store prefix is required")
+        if (
+            "://" in prefix
+            or "\\" in prefix
+            or ".." in prefix.split("/")
+            or _WINDOWS_DRIVE_PREFIX.match(prefix)
+        ):
+            raise ValueError("Artifact store prefix must be a relative object-store path")
+        return prefix
+
+    @field_validator("blocked_severities")
+    @classmethod
+    def normalize_blocked_severities(cls, value: list[str]) -> list[str]:
+        normalized = {severity.strip().upper() for severity in value if severity.strip()}
+        unsupported = normalized - set(_SEVERITY_ORDER)
+        if unsupported:
+            raise ValueError("Blocked severities contain unsupported values")
+        return sorted(normalized, key=lambda severity: _SEVERITY_ORDER[severity])
 
 
 class CredentialRefCreateRequest(BaseModel):
@@ -299,6 +373,27 @@ class ShellImageAdmissionRead(BaseModel):
     updated_at: datetime
 
 
+class ShellImageAdmissionPolicyRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID | None = None
+    configured: bool = False
+    project_id: UUID
+    enforcement_mode: ShellImageAdmissionEnforcementMode
+    cosign_required: bool
+    notation_enabled: bool
+    notation_trust_policy: dict[str, Any] = Field(default_factory=dict)
+    sbom_artifact_retention_enabled: bool
+    scan_report_retention_enabled: bool
+    artifact_store_prefix: str
+    artifact_retention_days: int
+    blocked_severities: list[str] = Field(default_factory=list)
+    created_by: UUID | None = None
+    updated_by: UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class CredentialRefRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -430,6 +525,38 @@ class ToolSyncRunRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     tool_definitions: list[ToolDefinitionRead] = Field(default_factory=list)
+
+
+def default_shell_image_admission_policy(project_id: UUID) -> ShellImageAdmissionPolicyRead:
+    default_request = ShellImageAdmissionPolicyUpdateRequest()
+    return ShellImageAdmissionPolicyRead(
+        id=None,
+        configured=False,
+        project_id=project_id,
+        enforcement_mode=default_request.enforcement_mode,
+        cosign_required=default_request.cosign_required,
+        notation_enabled=default_request.notation_enabled,
+        notation_trust_policy=default_request.notation_trust_policy,
+        sbom_artifact_retention_enabled=default_request.sbom_artifact_retention_enabled,
+        scan_report_retention_enabled=default_request.scan_report_retention_enabled,
+        artifact_store_prefix=default_request.artifact_store_prefix,
+        artifact_retention_days=default_request.artifact_retention_days,
+        blocked_severities=default_request.blocked_severities,
+    )
+
+
+def _contains_secret_like_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).lower().replace("-", "_")
+            compact_key = normalized_key.replace("_", "")
+            if normalized_key in _SECRET_LIKE_KEYS or compact_key in _SECRET_LIKE_KEYS:
+                return True
+            if _contains_secret_like_key(item):
+                return True
+    if isinstance(value, list):
+        return any(_contains_secret_like_key(item) for item in value)
+    return False
 
 
 class AuthorizedToolsResolveRequest(BaseModel):

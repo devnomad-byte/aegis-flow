@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createShellTemplate,
+  getShellImageAdmissionPolicy,
   listShellTemplates,
   previewShellTemplate,
   resolveShellImageAdmission,
   shellTemplatesQueryKey,
+  shellImagePolicyQueryKey,
+  updateShellImageAdmissionPolicy,
 } from "./toolRegistryApi";
 
 describe("toolRegistryApi", () => {
@@ -33,6 +36,46 @@ describe("toolRegistryApi", () => {
             signature_status: "not_checked",
             sbom_status: "not_checked",
             vulnerability_status: "not_checked",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admission-policy") && !init) {
+        return new Response(
+          JSON.stringify({
+            id: null,
+            configured: false,
+            project_id: "ops-command",
+            enforcement_mode: "dry_run",
+            cosign_required: false,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admission-policy") && init?.method === "PUT") {
+        return new Response(
+          JSON.stringify({
+            id: "policy-1",
+            configured: true,
+            project_id: "ops-command",
+            enforcement_mode: "enforce",
+            cosign_required: true,
+            notation_enabled: true,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: true,
+            scan_report_retention_enabled: true,
+            artifact_store_prefix: "shell-image-admissions/prod",
+            artifact_retention_days: 90,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
         );
@@ -99,12 +142,39 @@ describe("toolRegistryApi", () => {
         fetcher,
       ),
     ).resolves.toMatchObject({ policy_decision: "approved", digest_match: true });
+    await expect(getShellImageAdmissionPolicy("ops-command", fetcher)).resolves.toMatchObject({
+      configured: false,
+      enforcement_mode: "dry_run",
+    });
+    await expect(
+      updateShellImageAdmissionPolicy(
+        "ops-command",
+        {
+          enforcement_mode: "enforce",
+          cosign_required: true,
+          notation_enabled: true,
+          notation_trust_policy: { version: "1.0", trustPolicies: [] },
+          sbom_artifact_retention_enabled: true,
+          scan_report_retention_enabled: true,
+          artifact_store_prefix: "shell-image-admissions/prod",
+          artifact_retention_days: 90,
+          blocked_severities: ["HIGH", "CRITICAL"],
+        },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ configured: true, enforcement_mode: "enforce" });
 
     expect(shellTemplatesQueryKey("ops-command")).toEqual([
       "project",
       "ops-command",
       "tool-registry",
       "shell-templates",
+    ]);
+    expect(shellImagePolicyQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-policy",
     ]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-templates/preview",
@@ -113,6 +183,10 @@ describe("toolRegistryApi", () => {
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/resolve",
       expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admission-policy",
+      expect.objectContaining({ method: "PUT" }),
     );
   });
 });

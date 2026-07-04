@@ -18,6 +18,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionPolicyRead,
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
@@ -152,6 +154,21 @@ class ToolRegistryStore(Protocol):
         vulnerability_status: str,
         evidence_summary: dict[str, object],
     ) -> ShellImageAdmissionRead:
+        raise NotImplementedError
+
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
+        raise NotImplementedError
+
+    async def upsert_shell_image_admission_policy(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionPolicyUpdateRequest,
+    ) -> ShellImageAdmissionPolicyRead:
         raise NotImplementedError
 
     async def create_credential_ref(

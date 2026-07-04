@@ -9,6 +9,7 @@ from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
     EnvironmentCreateRequest,
     McpServerCreateRequest,
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
@@ -202,3 +203,63 @@ async def test_sqlalchemy_tool_registry_lists_and_previews_shell_templates() -> 
     assert preview.policy.approval_required is True
     assert preview.command_hash.startswith("sha256:")
     assert "raw-token" not in preview.command_preview
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_tool_registry_upserts_project_shell_image_policy() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid4()
+    other_project_id = uuid4()
+    actor_id = uuid4()
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="policy@example.com", display_name="Policy"))
+        session.add(Project(id=project_id, slug="policy", name="Policy"))
+        session.add(Project(id=other_project_id, slug="other-policy", name="Other Policy"))
+        await session.commit()
+
+        store = SqlAlchemyToolRegistryStore(session)
+        default_policy = await store.get_shell_image_admission_policy(project_id)
+        updated_policy = await store.upsert_shell_image_admission_policy(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionPolicyUpdateRequest(
+                enforcement_mode="enforce",
+                cosign_required=True,
+                notation_enabled=True,
+                notation_trust_policy={
+                    "version": "1.0",
+                    "trustPolicies": [
+                        {
+                            "name": "runtime-images",
+                            "registryScopes": ["registry.example/aegis/runtime"],
+                            "signatureVerification": {"level": "strict"},
+                            "trustStores": ["ca:aegis-runtime"],
+                            "trustedIdentities": ["*"],
+                        }
+                    ],
+                },
+                sbom_artifact_retention_enabled=True,
+                scan_report_retention_enabled=True,
+                artifact_store_prefix="shell-image-admissions/prod",
+                artifact_retention_days=180,
+                blocked_severities=["LOW", "CRITICAL", "HIGH", "HIGH"],
+            ),
+        )
+        reread_policy = await store.get_shell_image_admission_policy(project_id)
+        other_policy = await store.get_shell_image_admission_policy(other_project_id)
+
+    await engine.dispose()
+
+    assert default_policy.configured is False
+    assert default_policy.id is None
+    assert updated_policy.configured is True
+    assert updated_policy.enforcement_mode == "enforce"
+    assert updated_policy.blocked_severities == ["LOW", "HIGH", "CRITICAL"]
+    assert updated_policy.artifact_retention_days == 180
+    assert reread_policy.id == updated_policy.id
+    assert reread_policy.notation_trust_policy["trustPolicies"][0]["name"] == "runtime-images"
+    assert other_policy.configured is False

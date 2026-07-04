@@ -36,6 +36,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryImageAdmission,
     ToolRegistryMcpServer,
     ToolRegistrySecretLease,
+    ToolRegistryShellImagePolicy,
     ToolRegistryShellTemplate,
     ToolRegistryToolDefinition,
     ToolRegistryToolGroup,
@@ -55,6 +56,8 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionPolicyRead,
+    ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
@@ -69,6 +72,7 @@ from backend.app.tool_registry.schemas import (
     ToolGroupRead,
     ToolMcpServerCredentialRead,
     ToolSyncRunRead,
+    default_shell_image_admission_policy,
 )
 from backend.app.tool_registry.store import (
     DuplicateToolRegistryResourceError,
@@ -349,6 +353,48 @@ class SqlAlchemyToolRegistryStore:
         if template is None:
             return None
         return ShellTemplateRead.model_validate(template)
+
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
+        policy = await self._get_shell_image_policy(project_id)
+        if policy is None:
+            return default_shell_image_admission_policy(project_id)
+        return ShellImageAdmissionPolicyRead.model_validate(policy).model_copy(
+            update={"configured": True}
+        )
+
+    async def upsert_shell_image_admission_policy(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageAdmissionPolicyUpdateRequest,
+    ) -> ShellImageAdmissionPolicyRead:
+        policy = await self._get_shell_image_policy(project_id)
+        if policy is None:
+            policy = ToolRegistryShellImagePolicy(
+                project_id=project_id,
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+            self._session.add(policy)
+        policy.enforcement_mode = request.enforcement_mode
+        policy.cosign_required = request.cosign_required
+        policy.notation_enabled = request.notation_enabled
+        policy.notation_trust_policy = request.notation_trust_policy
+        policy.sbom_artifact_retention_enabled = request.sbom_artifact_retention_enabled
+        policy.scan_report_retention_enabled = request.scan_report_retention_enabled
+        policy.artifact_store_prefix = request.artifact_store_prefix
+        policy.artifact_retention_days = request.artifact_retention_days
+        policy.blocked_severities = request.blocked_severities
+        policy.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(policy)
+        return ShellImageAdmissionPolicyRead.model_validate(policy).model_copy(
+            update={"configured": True}
+        )
 
     async def preview_shell_template(
         self,
@@ -1083,6 +1129,19 @@ class SqlAlchemyToolRegistryStore:
                     ToolRegistryCredentialRef.project_id == project_id,
                     ToolRegistryCredentialRef.credential_ref == credential_ref,
                     ToolRegistryCredentialRef.status == "active",
+                )
+            ),
+        )
+
+    async def _get_shell_image_policy(
+        self,
+        project_id: UUID,
+    ) -> ToolRegistryShellImagePolicy | None:
+        return cast(
+            ToolRegistryShellImagePolicy | None,
+            await self._session.scalar(
+                select(ToolRegistryShellImagePolicy).where(
+                    ToolRegistryShellImagePolicy.project_id == project_id,
                 )
             ),
         )

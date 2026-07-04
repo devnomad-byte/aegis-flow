@@ -5,15 +5,20 @@ import { useEffect, useMemo, useState } from "react";
 import type { ProjectContext } from "../../shell/projectContext";
 import {
   createShellTemplate,
+  getShellImageAdmissionPolicy,
   listShellTemplates,
   previewShellTemplate,
   resolveShellImageAdmission,
   type ShellImageAdmission,
+  type ShellImageAdmissionPolicy,
+  type ShellImageAdmissionPolicyUpdateRequest,
+  shellImagePolicyQueryKey,
   shellTemplatesQueryKey,
   type ShellRiskLevel,
   type ShellTemplate,
   type ShellTemplateCreateRequest,
   type ShellTemplatePreviewResponse,
+  updateShellImageAdmissionPolicy,
 } from "./toolRegistryApi";
 
 type ProjectToolRegistryProps = {
@@ -43,13 +48,31 @@ const emptyShellTemplateForm: ShellTemplateCreateRequest = {
   timeout_seconds: 20,
 };
 
+const defaultPolicyForm: ShellImageAdmissionPolicyUpdateRequest = {
+  enforcement_mode: "dry_run",
+  cosign_required: false,
+  notation_enabled: false,
+  notation_trust_policy: { version: "1.0", trustPolicies: [] },
+  sbom_artifact_retention_enabled: false,
+  scan_report_retention_enabled: false,
+  artifact_store_prefix: "shell-image-admissions",
+  artifact_retention_days: 30,
+  blocked_severities: ["HIGH", "CRITICAL"],
+};
+
 export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => shellTemplatesQueryKey(project.projectId), [project.projectId]);
+  const policyQueryKey = useMemo(
+    () => shellImagePolicyQueryKey(project.projectId),
+    [project.projectId],
+  );
   const [form, setForm] = useState<ShellTemplateCreateRequest>(emptyShellTemplateForm);
   const [argvText, setArgvText] = useState("-lc\necho {{message}}");
   const [schemaText, setSchemaText] = useState(JSON.stringify(emptyShellTemplateForm.parameter_schema, null, 2));
   const [parameterText, setParameterText] = useState('{"message":"hello"}');
+  const [policyForm, setPolicyForm] = useState<ShellImageAdmissionPolicyUpdateRequest>(defaultPolicyForm);
+  const [trustPolicyText, setTrustPolicyText] = useState(JSON.stringify(defaultPolicyForm.notation_trust_policy, null, 2));
   const [localError, setLocalError] = useState("");
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
   const [admission, setAdmission] = useState<ShellImageAdmission | null>(null);
@@ -57,6 +80,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const templatesQuery = useQuery({
     queryFn: () => listShellTemplates(project.projectId),
     queryKey,
+    retry: false,
+  });
+  const policyQuery = useQuery({
+    queryFn: () => getShellImageAdmissionPolicy(project.projectId),
+    queryKey: policyQueryKey,
     retry: false,
   });
   const createMutation = useMutation({
@@ -87,6 +115,15 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
       }),
     onSuccess: (result) => setAdmission(result),
   });
+  const policyMutation = useMutation({
+    mutationFn: (request: ShellImageAdmissionPolicyUpdateRequest) =>
+      updateShellImageAdmissionPolicy(project.projectId, request),
+    onSuccess: (policy) => {
+      applyPolicy(policy, setPolicyForm, setTrustPolicyText);
+      queryClient.setQueryData(policyQueryKey, policy);
+      void queryClient.invalidateQueries({ queryKey: policyQueryKey });
+    },
+  });
 
   useEffect(() => {
     const firstTemplate = templatesQuery.data?.[0];
@@ -99,11 +136,19 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     setAdmission(null);
   }, [form.image_digest, form.image_ref, project.projectId]);
 
+  useEffect(() => {
+    if (policyQuery.data) {
+      applyPolicy(policyQuery.data, setPolicyForm, setTrustPolicyText);
+    }
+  }, [policyQuery.data]);
+
   const error =
     localError ||
     createMutation.error ||
     previewMutation.error ||
     admissionMutation.error ||
+    policyMutation.error ||
+    policyQuery.error ||
     templatesQuery.error;
 
   return (
@@ -246,6 +291,23 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               <ShieldCheck aria-hidden="true" size={18} />
             </div>
             <SupplyChainPanel admission={admission} />
+            <PolicyPanel
+              isLoading={policyQuery.isLoading}
+              isSaving={policyMutation.isPending}
+              onSave={() => {
+                submitPolicy({
+                  onError: setLocalError,
+                  onSubmit: (request) => policyMutation.mutate(request),
+                  policyForm,
+                  trustPolicyText,
+                });
+              }}
+              policy={policyMutation.data ?? policyQuery.data ?? null}
+              policyForm={policyForm}
+              setPolicyForm={setPolicyForm}
+              setTrustPolicyText={setTrustPolicyText}
+              trustPolicyText={trustPolicyText}
+            />
             {preview ? (
               <PreviewPanel preview={preview} />
             ) : (
@@ -255,6 +317,139 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
         </div>
       </section>
     </main>
+  );
+}
+
+function PolicyPanel({
+  isLoading,
+  isSaving,
+  onSave,
+  policy,
+  policyForm,
+  setPolicyForm,
+  setTrustPolicyText,
+  trustPolicyText,
+}: {
+  isLoading: boolean;
+  isSaving: boolean;
+  onSave: () => void;
+  policy: ShellImageAdmissionPolicy | null;
+  policyForm: ShellImageAdmissionPolicyUpdateRequest;
+  setPolicyForm: (
+    updater: (
+      current: ShellImageAdmissionPolicyUpdateRequest,
+    ) => ShellImageAdmissionPolicyUpdateRequest,
+  ) => void;
+  setTrustPolicyText: (value: string) => void;
+  trustPolicyText: string;
+}) {
+  if (isLoading) {
+    return <div className="preview-alert">Loading shell image admission policy</div>;
+  }
+
+  return (
+    <section className="shell-policy-panel" aria-label="Shell Image Admission Policy">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">SUPPLY CHAIN POLICY</div>
+          <h3>Shell Image Admission Policy</h3>
+        </div>
+        <span className={`status-pill ${policy?.configured ? "status-ready" : "status-warning"}`}>
+          {policy?.configured ? "configured" : "default"}
+        </span>
+      </div>
+      <div className="tool-registry-form-grid">
+        <label className="field-label" htmlFor="enforcement-mode">
+          Enforcement mode
+          <select
+            className="text-field"
+            id="enforcement-mode"
+            onChange={(event) =>
+              setPolicyForm((current) => ({
+                ...current,
+                enforcement_mode: event.target.value as "dry_run" | "enforce",
+              }))
+            }
+            value={policyForm.enforcement_mode}
+          >
+            <option value="dry_run">dry_run</option>
+            <option value="enforce">enforce</option>
+          </select>
+        </label>
+        <NumberField
+          label="Retention days"
+          min={1}
+          onChange={(value) =>
+            setPolicyForm((current) => ({ ...current, artifact_retention_days: value }))
+          }
+          value={policyForm.artifact_retention_days}
+        />
+        <TextField
+          label="Artifact prefix"
+          onChange={(value) =>
+            setPolicyForm((current) => ({ ...current, artifact_store_prefix: value }))
+          }
+          value={policyForm.artifact_store_prefix}
+        />
+        <TextField
+          label="Blocked severities"
+          onChange={(value) =>
+            setPolicyForm((current) => ({
+              ...current,
+              blocked_severities: value
+                .split(",")
+                .map((severity) => severity.trim().toUpperCase())
+                .filter(Boolean),
+            }))
+          }
+          value={policyForm.blocked_severities.join(",")}
+        />
+      </div>
+      <div className="policy-toggle-grid">
+        <CheckboxField
+          checked={policyForm.cosign_required}
+          label="Require Cosign"
+          onChange={(checked) =>
+            setPolicyForm((current) => ({ ...current, cosign_required: checked }))
+          }
+        />
+        <CheckboxField
+          checked={policyForm.notation_enabled}
+          label="Enable Notation"
+          onChange={(checked) =>
+            setPolicyForm((current) => ({ ...current, notation_enabled: checked }))
+          }
+        />
+        <CheckboxField
+          checked={policyForm.sbom_artifact_retention_enabled}
+          label="Retain SBOM artifact"
+          onChange={(checked) =>
+            setPolicyForm((current) => ({
+              ...current,
+              sbom_artifact_retention_enabled: checked,
+            }))
+          }
+        />
+        <CheckboxField
+          checked={policyForm.scan_report_retention_enabled}
+          label="Retain scan report"
+          onChange={(checked) =>
+            setPolicyForm((current) => ({
+              ...current,
+              scan_report_retention_enabled: checked,
+            }))
+          }
+        />
+      </div>
+      <TextAreaField label="Notation trust policy" onChange={setTrustPolicyText} value={trustPolicyText} />
+      {policy?.updated_at ? <Detail label="Policy updated" value={policy.updated_at} /> : null}
+      <div className="release-action-row">
+        <button className="toolbar-button" disabled={isSaving} onClick={onSave} type="button">
+          <Save aria-hidden="true" size={16} />
+          Save policy
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -367,6 +562,29 @@ function TextAreaField({
   );
 }
 
+function CheckboxField({
+  checked,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  const id = fieldId(label);
+  return (
+    <label className="checkbox-field" htmlFor={id}>
+      <input
+        checked={checked}
+        id={id}
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+      {label}
+    </label>
+  );
+}
+
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div className="detail-item">
@@ -439,6 +657,50 @@ function submitWithParsedFields({
   } catch (error) {
     onError((error as Error).message);
   }
+}
+
+function submitPolicy({
+  onError,
+  onSubmit,
+  policyForm,
+  trustPolicyText,
+}: {
+  onError: (message: string) => void;
+  onSubmit: (request: ShellImageAdmissionPolicyUpdateRequest) => void;
+  policyForm: ShellImageAdmissionPolicyUpdateRequest;
+  trustPolicyText: string;
+}) {
+  try {
+    const trustPolicy = parseJsonObject(trustPolicyText, "Notation trust policy");
+    onError("");
+    onSubmit({ ...policyForm, notation_trust_policy: trustPolicy });
+  } catch (error) {
+    onError((error as Error).message);
+  }
+}
+
+function applyPolicy(
+  policy: ShellImageAdmissionPolicy,
+  setPolicyForm: (value: ShellImageAdmissionPolicyUpdateRequest) => void,
+  setTrustPolicyText: (value: string) => void,
+) {
+  const nextPolicy = policyToForm(policy);
+  setPolicyForm(nextPolicy);
+  setTrustPolicyText(JSON.stringify(nextPolicy.notation_trust_policy, null, 2));
+}
+
+function policyToForm(policy: ShellImageAdmissionPolicy): ShellImageAdmissionPolicyUpdateRequest {
+  return {
+    enforcement_mode: policy.enforcement_mode,
+    cosign_required: policy.cosign_required,
+    notation_enabled: policy.notation_enabled,
+    notation_trust_policy: policy.notation_trust_policy,
+    sbom_artifact_retention_enabled: policy.sbom_artifact_retention_enabled,
+    scan_report_retention_enabled: policy.scan_report_retention_enabled,
+    artifact_store_prefix: policy.artifact_store_prefix,
+    artifact_retention_days: policy.artifact_retention_days,
+    blocked_severities: policy.blocked_severities,
+  };
 }
 
 function parseJsonObject(text: string, label: string): Record<string, unknown> {

@@ -178,6 +178,43 @@ class ToolRegistryImageAdmission(Base, TimestampMixin):
     updated_at: Mapped[datetime]
 
 
+class ToolRegistryShellImagePolicy(Base, TimestampMixin):
+    __tablename__ = "tool_registry_shell_image_policies"
+    __table_args__ = (UniqueConstraint("project_id", name="uq_tool_shell_image_policy_project"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    enforcement_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="dry_run")
+    cosign_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notation_trust_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    sbom_artifact_retention_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    scan_report_retention_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    artifact_store_prefix: Mapped[str] = mapped_column(
+        String(240),
+        nullable=False,
+        default="shell-image-admissions",
+    )
+    artifact_retention_days: Mapped[int] = mapped_column(nullable=False, default=30)
+    blocked_severities: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
 class ToolRegistryCredentialRef(Base, TimestampMixin):
     __tablename__ = "tool_registry_credential_refs"
     __table_args__ = (

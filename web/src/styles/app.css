@@ -1263,6 +1263,38 @@ select {
   grid-column: 1 / -1;
 }
 
+.shell-policy-panel {
+  border-top: 1px solid var(--color-border);
+  display: grid;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-md);
+}
+
+.policy-toggle-grid {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.checkbox-field {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.76);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  display: flex;
+  font-size: 13px;
+  gap: var(--space-sm);
+  min-height: 40px;
+  padding: 0 var(--space-md);
+}
+
+.checkbox-field input {
+  accent-color: var(--color-accent);
+  flex: 0 0 auto;
+}
+
 .policy-row {
   align-items: center;
   background: rgba(24, 33, 31, 0.86);
@@ -1966,6 +1998,7 @@ select {
   .global-metric-grid,
   .node-detail-grid,
   .tool-registry-form-grid,
+  .policy-toggle-grid,
   .shell-preview-grid,
   .model-trace-metrics,
   .policy-row,
