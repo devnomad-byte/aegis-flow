@@ -1,5 +1,7 @@
 export type WorkflowRunStatus =
+  | "queued"
   | "running"
+  | "cancel_requested"
   | "success"
   | "failed"
   | "pending_approval"
@@ -97,6 +99,34 @@ export type WorkflowRunListResponse = {
   count: number;
 };
 
+export type WorkflowRunEventRead = {
+  id: string;
+  project_id: string;
+  actor_id: string;
+  workflow_run_id: string | null;
+  workflow_version_id: string;
+  workflow_ref: string;
+  run_id: string;
+  trace_id: string;
+  sequence: number;
+  event_type: string;
+  status: string;
+  node_id: string;
+  node_type: string;
+  message: string;
+  payload_summary: string;
+  payload: Record<string, unknown>;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowRunEventListResponse = {
+  events: WorkflowRunEventRead[];
+  count: number;
+};
+
 export type WorkflowRunApiRequest = {
   inputs?: Record<string, unknown>;
   run_ref?: string;
@@ -149,6 +179,22 @@ export const workflowRunListQueryKey = (
     status ?? "all",
   ] as const;
 
+export const workflowRunEventsQueryKey = (
+  projectId: string,
+  versionId: string,
+  runId: string,
+) =>
+  [
+    "project",
+    projectId,
+    "workflows",
+    "versions",
+    versionId,
+    "runs",
+    runId,
+    "events",
+  ] as const;
+
 export async function runWorkflowVersion(
   projectId: string,
   versionId: string,
@@ -157,6 +203,23 @@ export async function runWorkflowVersion(
 ): Promise<WorkflowRunResult> {
   return requestJson<WorkflowRunResult>(
     buildRunUrl(projectId, versionId),
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function submitWorkflowVersionRun(
+  projectId: string,
+  versionId: string,
+  request: WorkflowRunApiRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<WorkflowRunRead> {
+  return requestJson<WorkflowRunRead>(
+    `${buildRunUrl(projectId, versionId)}/submit`,
     {
       body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },
@@ -182,6 +245,30 @@ export async function listWorkflowRuns(
   const query = params.toString();
   return requestJson<WorkflowRunListResponse>(
     `${buildRunUrl(projectId, versionId)}${query ? `?${query}` : ""}`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function listWorkflowRunEvents(
+  projectId: string,
+  versionId: string,
+  runId: string,
+  filters: { after_sequence?: number; limit?: number } = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<WorkflowRunEventListResponse> {
+  const params = new URLSearchParams();
+  if (typeof filters.after_sequence === "number") {
+    params.set("after_sequence", String(filters.after_sequence));
+  }
+  if (typeof filters.limit === "number") {
+    params.set("limit", String(filters.limit));
+  }
+  const query = params.toString();
+  return requestJson<WorkflowRunEventListResponse>(
+    `${buildRunUrl(projectId, versionId)}/${encodeURIComponent(runId)}/events${
+      query ? `?${query}` : ""
+    }`,
     undefined,
     fetcher,
   );

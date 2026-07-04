@@ -6,7 +6,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.workflows.schemas import WorkflowVersionRead
 
-WorkflowRunStatus = Literal["running", "success", "failed", "pending_approval", "cancelled"]
+WorkflowRunStatus = Literal[
+    "queued",
+    "running",
+    "cancel_requested",
+    "success",
+    "failed",
+    "pending_approval",
+    "cancelled",
+]
 WorkflowNodeStatus = Literal["success", "failed", "pending_approval", "skipped"]
 WorkflowApprovalKind = Literal["human", "tool"]
 WorkflowApprovalDecision = Literal["approved"]
@@ -174,6 +182,36 @@ class WorkflowRunCheckpointRead(WorkflowRunCheckpointCreate):
     updated_at: datetime
 
 
+class WorkflowRunEventCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    actor_id: UUID
+    workflow_run_id: UUID | None = None
+    workflow_version_id: UUID
+    workflow_ref: str
+    run_id: str
+    trace_id: str
+    event_type: str = Field(max_length=80)
+    status: str = Field(default="", max_length=32)
+    node_id: str = Field(default="", max_length=120)
+    node_type: str = Field(default="", max_length=40)
+    message: str = Field(default="", max_length=500)
+    payload_summary: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    updated_by: UUID
+
+
+class WorkflowRunEventRead(WorkflowRunEventCreate):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    sequence: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class WorkflowRunResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -204,4 +242,11 @@ class WorkflowRunListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     runs: list[WorkflowRunRead] = Field(default_factory=list)
+    count: int
+
+
+class WorkflowRunEventListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    events: list[WorkflowRunEventRead] = Field(default_factory=list)
     count: int

@@ -6,6 +6,8 @@ from backend.app.api.dependencies import (
     get_audit_event_store,
     get_current_account,
     get_project_access_provider,
+    get_workflow_run_event_store,
+    get_workflow_run_scheduler,
     get_workflow_run_store,
     get_workflow_runtime_runner,
     get_workflow_version_store,
@@ -18,6 +20,9 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
     WorkflowRunCreate,
+    WorkflowRunEventCreate,
+    WorkflowRunEventListResponse,
+    WorkflowRunEventRead,
     WorkflowRunListResponse,
     WorkflowRunRead,
     WorkflowRunRequest,
@@ -82,7 +87,15 @@ class InMemoryRunStore:
         self.cancel_requests: list[WorkflowRunCancelRequest] = []
 
     async def create_run(self, request: WorkflowRunCreate) -> WorkflowRunRead:
-        raise NotImplementedError
+        created = WorkflowRunRead(
+            **request.model_dump(),
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self.run = created
+        self.runs.append(created)
+        return created
 
     async def update_run(self, request: WorkflowRunUpdate) -> WorkflowRunRead:
         raise NotImplementedError
@@ -127,6 +140,31 @@ class InMemoryRunStore:
             update={
                 "status": "cancelled",
                 "outputs_summary": "cancelled by operator",
+                "pending_approval": {},
+                "updated_by": request.actor_id,
+            }
+        )
+        return self.run
+
+    async def request_cancel_run(self, request: WorkflowRunCancelRequest) -> WorkflowRunRead:
+        self.cancel_requests.append(request)
+        run = await self.get_run(project_id=request.project_id, run_id=request.run_id)
+        if run is None:
+            raise LookupError("workflow run not found")
+        if run.status == "pending_approval":
+            return await self.cancel_pending_run(request)
+        if run.status == "queued":
+            status = "cancelled"
+            outputs_summary = "cancelled before runner started"
+        elif run.status in {"running", "cancel_requested"}:
+            status = "cancel_requested"
+            outputs_summary = "cancellation requested by operator"
+        else:
+            raise ValueError("workflow run is terminal and cannot be cancelled")
+        self.run = run.model_copy(
+            update={
+                "status": status,
+                "outputs_summary": outputs_summary,
                 "pending_approval": {},
                 "updated_by": request.actor_id,
             }
@@ -200,6 +238,64 @@ class RecordingAuditStore:
         self.events.append(kwargs)
 
 
+class InMemoryRunEventStore:
+    def __init__(self, events: Iterable[WorkflowRunEventRead] = ()) -> None:
+        self.events = list(events)
+        self.recorded: list[WorkflowRunEventCreate] = []
+
+    async def record_event(self, request: WorkflowRunEventCreate) -> WorkflowRunEventRead:
+        self.recorded.append(request)
+        event = WorkflowRunEventRead(
+            **request.model_dump(),
+            id=uuid4(),
+            sequence=len(self.events) + 1,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self.events.append(event)
+        return event
+
+    async def list_events(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> list[WorkflowRunEventRead]:
+        return [
+            event
+            for event in self.events
+            if event.project_id == project_id
+            and event.run_id == run_id
+            and event.sequence > after_sequence
+        ][:limit]
+
+
+class RecordingWorkflowRunScheduler:
+    def __init__(self) -> None:
+        self.scheduled: list[dict[str, object]] = []
+
+    async def submit(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        version_id: UUID,
+        run_id: str,
+        inputs: dict[str, object] | None = None,
+    ) -> None:
+        self.scheduled.append(
+            {
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "version_id": version_id,
+                "run_id": run_id,
+                "inputs": inputs or {},
+            }
+        )
+
+
 def test_workflow_runtime_api_requires_workflow_run_permission() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
@@ -247,6 +343,50 @@ def test_workflow_runtime_api_runs_published_version_and_audits() -> None:
     metadata = audit_store.events[-1]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["status"] == "success"
+
+
+def test_workflow_runtime_api_submits_background_run_and_records_event() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    run_store = InMemoryRunStore()
+    event_store = InMemoryRunEventStore()
+    scheduler = RecordingWorkflowRunScheduler()
+    client, _, audit_store = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:run"]),
+        version=version,
+        run_store=run_store,
+        event_store=event_store,
+        scheduler=scheduler,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/workflows/versions/{version.id}/runs/submit",
+        json={
+            "inputs": {"change_id": "CHG-123", "token": "raw-token"},
+            "run_ref": "run-background",
+            "trace_id": "trace-background",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["run_id"] == "run-background"
+    assert payload["trace_id"] == "trace-background"
+    assert payload["status"] == "queued"
+    assert scheduler.scheduled == [
+        {
+            "project_id": project_id,
+            "actor_id": account.account_id,
+            "version_id": version.id,
+            "run_id": "run-background",
+            "inputs": {"change_id": "CHG-123", "token": "raw-token"},
+        }
+    ]
+    assert event_store.recorded[0].event_type == "run.submitted"
+    assert "raw-token" not in event_store.recorded[0].payload_summary
+    assert audit_store.events[-1]["action"] == "workflow.run.submit"
 
 
 def test_workflow_runtime_api_get_run_detail_requires_workflow_run_permission() -> None:
@@ -359,6 +499,46 @@ def test_workflow_runtime_api_lists_runs_for_version_and_audits() -> None:
     assert metadata["status"] == "pending_approval"
 
 
+def test_workflow_runtime_api_lists_runtime_events_for_run() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    run = make_run(project_id, version.id, status="running")
+    event_store = InMemoryRunEventStore(
+        [
+            make_event(project_id, version.id, run, sequence=1, event_type="run.started"),
+            make_event(
+                project_id,
+                version.id,
+                run,
+                sequence=2,
+                event_type="node.completed",
+                node_id="llm_1",
+                payload_summary="node done",
+            ),
+        ]
+    )
+    client, _, audit_store = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:run"]),
+        version=version,
+        run_store=InMemoryRunStore(run=run),
+        event_store=event_store,
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{project_id}/workflows/versions/{version.id}/runs/{run.run_id}/events",
+        params={"after_sequence": 1, "limit": 10},
+    )
+
+    assert response.status_code == 200
+    payload = WorkflowRunEventListResponse.model_validate(response.json())
+    assert payload.count == 1
+    assert payload.events[0].sequence == 2
+    assert payload.events[0].event_type == "node.completed"
+    assert audit_store.events[-1]["action"] == "workflow.run.events.list"
+
+
 def test_workflow_runtime_api_rejects_unknown_run_list_status() -> None:
     project_id = uuid4()
     account = AccountPrincipal(account_id=uuid4(), status="active")
@@ -425,7 +605,38 @@ def test_workflow_runtime_api_cancel_rejects_non_pending_run() -> None:
     )
 
     assert response.status_code == 409
-    assert "pending approval" in response.json()["detail"]
+    assert "terminal" in response.json()["detail"]
+
+
+def test_workflow_runtime_api_requests_running_cancel_and_audits() -> None:
+    project_id = uuid4()
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    version = make_version(project_id)
+    run = make_run(project_id, version.id, status="running")
+    run_store = InMemoryRunStore(run=run)
+    event_store = InMemoryRunEventStore()
+    client, _, audit_store = build_client(
+        account=account,
+        project=make_project(project_id, permissions=["workflow:run"]),
+        version=version,
+        run_store=run_store,
+        event_store=event_store,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/workflows/versions/{version.id}/runs/{run.run_id}/cancel",
+        json={"reason": "operator stopped running run"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "cancel_requested"
+    assert run_store.cancel_requests[-1].reason == "operator stopped running run"
+    assert event_store.recorded[-1].event_type == "run.cancel_requested"
+    assert audit_store.events[-1]["action"] == "workflow.run.cancel"
+    metadata = audit_store.events[-1]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["status"] == "cancel_requested"
 
 
 def test_workflow_runtime_api_retries_terminal_run_with_checkpoint_inputs_and_audits() -> None:
@@ -544,6 +755,8 @@ def build_client(
     project: ProjectSummary,
     version: WorkflowVersionRead,
     run_store: InMemoryRunStore | None = None,
+    event_store: InMemoryRunEventStore | None = None,
+    scheduler: RecordingWorkflowRunScheduler | None = None,
 ) -> tuple[TestClient, RecordingRuntimeRunner, RecordingAuditStore]:
     app = create_app()
     runner = RecordingRuntimeRunner()
@@ -554,6 +767,12 @@ def build_client(
     )
     app.dependency_overrides[get_workflow_version_store] = lambda: InMemoryVersionStore(version)
     app.dependency_overrides[get_workflow_run_store] = lambda: run_store or InMemoryRunStore()
+    app.dependency_overrides[get_workflow_run_event_store] = lambda: (
+        event_store or InMemoryRunEventStore()
+    )
+    app.dependency_overrides[get_workflow_run_scheduler] = lambda: (
+        scheduler or RecordingWorkflowRunScheduler()
+    )
     app.dependency_overrides[get_workflow_runtime_runner] = lambda: runner
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
     return TestClient(app), runner, audit_store
@@ -679,6 +898,42 @@ def make_checkpoint(
         error_message="",
         created_by=uuid4(),
         updated_by=uuid4(),
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def make_event(
+    project_id: UUID,
+    version_id: UUID,
+    run: WorkflowRunRead,
+    *,
+    sequence: int,
+    event_type: str,
+    node_id: str = "",
+    node_type: str = "",
+    payload_summary: str = "",
+) -> WorkflowRunEventRead:
+    now = datetime.now(UTC)
+    return WorkflowRunEventRead(
+        id=uuid4(),
+        project_id=project_id,
+        actor_id=run.actor_id,
+        workflow_run_id=run.id,
+        workflow_version_id=version_id,
+        workflow_ref=run.workflow_ref,
+        run_id=run.run_id,
+        trace_id=run.trace_id,
+        sequence=sequence,
+        event_type=event_type,
+        status=run.status,
+        node_id=node_id,
+        node_type=node_type,
+        message=event_type,
+        payload_summary=payload_summary,
+        payload={},
+        created_by=run.actor_id,
+        updated_by=run.actor_id,
         created_at=now,
         updated_at=now,
     )

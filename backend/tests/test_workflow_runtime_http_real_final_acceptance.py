@@ -44,10 +44,11 @@ from backend.app.tool_registry.models import (
     ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
 )
+from backend.app.workflow_runtime.background import WorkflowRunWorker
 from backend.app.workflow_runtime.checkpoint_lifecycle import (
     LangGraphCheckpointLifecycleService,
 )
-from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
+from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint, WorkflowRunEvent
 from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
@@ -256,6 +257,176 @@ def test_real_workflow_runtime_runs_http_node_through_execution_gateway() -> Non
         asyncio.run(engine.dispose())
 
 
+def test_real_background_workflow_run_events_and_running_cancel() -> None:
+    settings = AppSettings()
+    asyncio.run(LangGraphCheckpointLifecycleService(settings.database).setup())
+    project_id = uuid4()
+    actor_id = uuid4()
+    cleanup_ids = _CleanupIds(project_id=project_id, actor_id=actor_id)
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def seed() -> None:
+        async with session_factory() as session:
+            role_id = uuid4()
+            member_id = uuid4()
+            session.add(
+                Account(
+                    id=actor_id,
+                    email=f"runtime-events-{actor_id.hex[:12]}@example.com",
+                    display_name="Workflow Runtime Events Final Acceptance",
+                )
+            )
+            session.add(
+                Project(
+                    id=project_id,
+                    slug=f"runtime-events-{project_id.hex[:12]}",
+                    name="Workflow Runtime Events Final Acceptance",
+                )
+            )
+            session.add(ProjectMember(id=member_id, project_id=project_id, account_id=actor_id))
+            session.add(
+                ProjectRole(
+                    id=role_id,
+                    project_id=project_id,
+                    code="runtime_events_admin",
+                    name="Runtime Events Admin",
+                    description="Workflow runtime events final acceptance role",
+                )
+            )
+            session.add(ProjectMemberRole(member_id=member_id, role_id=role_id))
+            for code in {
+                "project:view",
+                "workflow:view",
+                "workflow:write",
+                "workflow:run",
+                "tool-registry:view",
+                "tool-registry:write",
+                "audit:view",
+            }:
+                permission = await _ensure_permission(session, code)
+                session.add(ProjectRolePermission(role_id=role_id, permission_id=permission.id))
+            await session.commit()
+
+    asyncio.run(seed())
+    try:
+        with running_slow_http_api_server() as (api_url, _api_state):
+            local_http_policy = EgressPolicy(allow_plain_http=True, allow_loopback=True)
+            app = create_app(settings)
+
+            async def override_async_session() -> AsyncIterator[AsyncSession]:
+                async with session_factory() as session:
+                    yield session
+
+            app.dependency_overrides[get_current_account] = lambda: AccountPrincipal(
+                account_id=actor_id,
+                status="active",
+            )
+            app.dependency_overrides[get_async_session] = override_async_session
+            app.dependency_overrides[get_http_egress_policy] = lambda: local_http_policy
+            with TestClient(app) as client:
+                app.state.workflow_run_scheduler._worker = WorkflowRunWorker(
+                    session_factory=session_factory,
+                    settings=settings,
+                    http_egress_policy=local_http_policy,
+                )
+                env_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/environments",
+                    json={
+                        "key": "test",
+                        "name": "Test",
+                        "egress_allowed_hosts": [],
+                        "egress_allowed_ports": [],
+                    },
+                )
+                assert env_response.status_code == 201
+                group_response = client.post(
+                    f"/api/v1/projects/{project_id}/tool-registry/tool-groups",
+                    json={
+                        "group_ref": "runtime.http",
+                        "name": "Runtime HTTP",
+                        "risk_level": "low",
+                        "environment_key": "test",
+                    },
+                )
+                assert group_response.status_code == 201
+
+                import_response = client.post(
+                    f"/api/v1/projects/{project_id}/workflows/import-yaml",
+                    json={"yaml_text": workflow_http_yaml(project_id, api_url)},
+                )
+                assert import_response.status_code == 201
+                draft_id = import_response.json()["id"]
+
+                publish_response = client.post(
+                    f"/api/v1/projects/{project_id}/workflows/drafts/{draft_id}/publish",
+                    json={"release_note": "workflow runtime events final acceptance"},
+                )
+                assert publish_response.status_code == 201
+                version_id = publish_response.json()["id"]
+
+                submit_response = client.post(
+                    f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/submit",
+                    json={
+                        "inputs": {"message": "hello-background", "token": "raw-token"},
+                        "run_ref": "run-background-cancel-final",
+                        "trace_id": "trace-background-cancel-final",
+                    },
+                )
+                assert submit_response.status_code == 202
+                assert submit_response.json()["status"] == "queued"
+
+                assert wait_for_run_status(
+                    client,
+                    project_id=project_id,
+                    version_id=version_id,
+                    run_id="run-background-cancel-final",
+                    statuses={"running"},
+                )
+                cancel_response = client.post(
+                    f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/run-background-cancel-final/cancel",
+                    json={"reason": "operator cancelled slow background run"},
+                )
+                assert cancel_response.status_code == 200
+                assert cancel_response.json()["status"] == "cancel_requested"
+
+                final_detail = wait_for_run_status(
+                    client,
+                    project_id=project_id,
+                    version_id=version_id,
+                    run_id="run-background-cancel-final",
+                    statuses={"cancelled"},
+                    return_detail=True,
+                )
+                assert isinstance(final_detail, dict)
+                assert final_detail["run"]["status"] == "cancelled"
+                assert "hello-background" not in final_detail["run"]["outputs_summary"]
+
+                events_response = client.get(
+                    f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/run-background-cancel-final/events",
+                    params={"limit": 100},
+                )
+                assert events_response.status_code == 200
+                events_body = events_response.json()
+                event_types = [event["event_type"] for event in events_body["events"]]
+                assert "run.submitted" in event_types
+                assert "run.started" in event_types
+                assert "run.cancel_requested" in event_types
+                assert "run.cancelled" in event_types
+                assert "raw-token" not in str(events_body)
+
+                stream_response = client.get(
+                    f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/run-background-cancel-final/events/stream",
+                    params={"once": "true", "limit": 100},
+                )
+                assert stream_response.status_code == 200
+                assert "event: run.submitted" in stream_response.text
+                assert "raw-token" not in stream_response.text
+    finally:
+        asyncio.run(_cleanup(session_factory, cleanup_ids))
+        asyncio.run(engine.dispose())
+
+
 def workflow_http_yaml(project_id: UUID, api_url: str) -> str:
     return f"""
 schema_version: workflow.dsl/v0.2
@@ -303,6 +474,59 @@ policies:
 """
 
 
+@contextmanager
+def running_slow_http_api_server() -> Iterator[tuple[str, dict[str, Any]]]:
+    state: dict[str, Any] = {"requests": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            content_length = int(self.headers.get("content-length", "0"))
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            state["requests"].append({"path": self.path, "payload": payload})
+            threading.Event().wait(0.5)
+            self._write_json({"echo": payload.get("message")})
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+        def _write_json(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/slow-echo", state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def wait_for_run_status(
+    client: TestClient,
+    *,
+    project_id: UUID,
+    version_id: str,
+    run_id: str,
+    statuses: set[str],
+    return_detail: bool = False,
+) -> bool | dict[str, Any] | None:
+    for _ in range(40):
+        response = client.get(
+            f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{run_id}",
+        )
+        if response.status_code == 200 and response.json()["run"]["status"] in statuses:
+            return response.json() if return_detail else True
+        threading.Event().wait(0.1)
+    return None if return_detail else False
+
+
 async def _ensure_permission(session: AsyncSession, code: str) -> ProjectPermission:
     existing = await session.scalar(select(ProjectPermission).where(ProjectPermission.code == code))
     if existing is not None:
@@ -345,6 +569,9 @@ async def _cleanup(
             delete(WorkflowRunCheckpoint).where(
                 WorkflowRunCheckpoint.project_id == cleanup_ids.project_id
             )
+        )
+        await session.execute(
+            delete(WorkflowRunEvent).where(WorkflowRunEvent.project_id == cleanup_ids.project_id)
         )
         await session.execute(
             delete(WorkflowRun).where(WorkflowRun.project_id == cleanup_ids.project_id)

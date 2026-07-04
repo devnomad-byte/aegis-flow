@@ -1,4 +1,6 @@
-from fastapi import Depends, HTTPException, status
+from typing import cast
+
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.audit.sqlalchemy_store import SqlAlchemyAuditEventStore
@@ -38,13 +40,17 @@ from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.mcp_client import HttpMcpToolsClient, McpToolsClient
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryStore
+from backend.app.workflow_runtime.background import InProcessWorkflowRunScheduler
 from backend.app.workflow_runtime.checkpointing import (
     PostgresWorkflowCheckpointerProvider,
     WorkflowCheckpointerProvider,
 )
 from backend.app.workflow_runtime.runner import WorkflowRuntimeRunner
-from backend.app.workflow_runtime.sqlalchemy_store import SqlAlchemyWorkflowRunStore
-from backend.app.workflow_runtime.store import WorkflowRunStore
+from backend.app.workflow_runtime.sqlalchemy_store import (
+    SqlAlchemyWorkflowRunEventStore,
+    SqlAlchemyWorkflowRunStore,
+)
+from backend.app.workflow_runtime.store import WorkflowRunEventStore, WorkflowRunStore
 from backend.app.workflows.sqlalchemy_store import (
     SqlAlchemyWorkflowDraftStore,
     SqlAlchemyWorkflowVersionStore,
@@ -183,6 +189,16 @@ def get_workflow_run_store(
     return SqlAlchemyWorkflowRunStore(session)
 
 
+def get_workflow_run_event_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> WorkflowRunEventStore:
+    return SqlAlchemyWorkflowRunEventStore(session)
+
+
+def get_workflow_run_scheduler(request: Request) -> InProcessWorkflowRunScheduler:
+    return cast(InProcessWorkflowRunScheduler, request.app.state.workflow_run_scheduler)
+
+
 ToolRegistryStoreDependency = Depends(get_tool_registry_store)
 ToolInvocationStoreDependency = Depends(get_tool_invocation_store)
 ShellInvocationStoreDependency = Depends(get_shell_invocation_store)
@@ -191,6 +207,7 @@ AuditEventStoreDependency = Depends(get_audit_event_store)
 McpToolCallClientDependency = Depends(get_mcp_tool_call_client)
 ModelGatewayStoreDependency = Depends(get_model_gateway_store)
 WorkflowRunStoreDependency = Depends(get_workflow_run_store)
+WorkflowRunEventStoreDependency = Depends(get_workflow_run_event_store)
 PolicyGateEventStoreDependency = Depends(get_policy_gate_event_store)
 RuntimeTraceStoreDependency = Depends(get_runtime_trace_store)
 
@@ -265,6 +282,7 @@ HttpExecutionGatewayServiceDependency = Depends(get_http_execution_gateway_servi
 
 def get_workflow_runtime_runner(
     run_store: WorkflowRunStore = WorkflowRunStoreDependency,
+    event_store: WorkflowRunEventStore = WorkflowRunEventStoreDependency,
     policy_store: SqlAlchemyPolicyGateEventStore = PolicyGateEventStoreDependency,
     trace_store: SqlAlchemyRuntimeTraceStore = RuntimeTraceStoreDependency,
     llm_runner: LlmNodeRunner = LlmNodeRunnerDependency,
@@ -282,6 +300,7 @@ def get_workflow_runtime_runner(
         execution_gateway=execution_gateway,
         http_execution_gateway=http_execution_gateway,
         checkpointer_provider=checkpointer_provider,
+        event_store=event_store,
     )
 
 

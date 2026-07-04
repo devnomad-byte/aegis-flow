@@ -39,12 +39,14 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
     WorkflowRunCreate,
+    WorkflowRunEventCreate,
+    WorkflowRunRead,
     WorkflowRunRequest,
     WorkflowRunResult,
     WorkflowRunResumeRequest,
     WorkflowRunUpdate,
 )
-from backend.app.workflow_runtime.store import WorkflowRunStore
+from backend.app.workflow_runtime.store import WorkflowRunEventStore, WorkflowRunStore
 from backend.app.workflows.dsl import (
     AgentNodeData,
     ConditionNodeData,
@@ -72,6 +74,10 @@ class WorkflowRuntimePendingApproval(RuntimeError):
     def __init__(self, pending_approval: WorkflowPendingApproval) -> None:
         super().__init__("workflow run is pending approval")
         self.pending_approval = pending_approval
+
+
+class WorkflowRuntimeCancelled(RuntimeError):
+    """Raised when an operator requested workflow run cancellation."""
 
 
 class LlmNodeRuntimeRunner(Protocol):
@@ -121,6 +127,7 @@ class WorkflowRuntimeRunner:
     checkpointer_provider: WorkflowCheckpointerProvider = field(
         default_factory=InMemoryWorkflowCheckpointerProvider
     )
+    event_store: WorkflowRunEventStore | None = None
 
     async def run(self, request: WorkflowRunRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -141,6 +148,7 @@ class WorkflowRuntimeRunner:
             tool_gateway=self.tool_gateway,
             execution_gateway=self.execution_gateway,
             http_execution_gateway=self.http_execution_gateway,
+            event_store=self.event_store,
         )
         checkpointer_handle = await self.checkpointer_provider.for_run(run_id)
         try:
@@ -165,6 +173,93 @@ class WorkflowRuntimeRunner:
         except Exception:
             await close_workflow_checkpointer(checkpointer_handle)
             raise
+        return await self._execute_run(
+            request=request,
+            runtime=runtime,
+            run_record=run_record,
+            checkpointer_handle=checkpointer_handle,
+        )
+
+    async def run_existing(
+        self,
+        request: WorkflowRunRequest,
+        run_record: WorkflowRunRead,
+    ) -> WorkflowRunResult:
+        _validate_version(request.version, request.project_id)
+        workflow = request.version.definition
+        if run_record.workflow_version_id != request.version.id:
+            raise WorkflowRuntimeError("workflow run does not match workflow version")
+        if run_record.definition_hash != request.version.definition_hash:
+            raise WorkflowRuntimeError("workflow run does not match workflow version")
+        if run_record.status == "cancelled":
+            return _result_from_run(
+                run_record,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=[],
+            )
+        if run_record.status == "cancel_requested":
+            updated_run = await self._mark_cancelled(request, run_record)
+            await _record_standalone_run_event(
+                self.event_store,
+                request=request,
+                run_record=updated_run,
+                event_type="run.cancelled",
+                status="cancelled",
+                message="workflow run cancelled before runner started",
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=[],
+            )
+        run_record = await self.run_store.update_run(
+            WorkflowRunUpdate(
+                project_id=request.project_id,
+                run_id=run_record.run_id,
+                actor_id=request.actor_id,
+                status="running",
+                outputs_summary="",
+            )
+        )
+        runtime = _RuntimeExecution(
+            request=request,
+            workflow=workflow,
+            workflow_ref=_workflow_ref(workflow),
+            run_id=run_record.run_id,
+            trace_id=run_record.trace_id,
+            run_store=self.run_store,
+            policy_store=self.policy_store,
+            trace_store=self.trace_store,
+            llm_runner=self.llm_runner,
+            tool_gateway=self.tool_gateway,
+            execution_gateway=self.execution_gateway,
+            http_execution_gateway=self.http_execution_gateway,
+            event_store=self.event_store,
+            workflow_run_id=run_record.id,
+        )
+        checkpointer_handle = await self.checkpointer_provider.for_run(run_record.run_id)
+        return await self._execute_run(
+            request=request,
+            runtime=runtime,
+            run_record=run_record,
+            checkpointer_handle=checkpointer_handle,
+        )
+
+    async def _execute_run(
+        self,
+        *,
+        request: WorkflowRunRequest,
+        runtime: "_RuntimeExecution",
+        run_record: WorkflowRunRead,
+        checkpointer_handle: Any,
+    ) -> WorkflowRunResult:
+        await runtime.record_run_event(
+            event_type="run.started",
+            status="running",
+            message="workflow run started",
+        )
         try:
             graph = runtime.build_graph(checkpointer=checkpointer_handle.checkpointer)
             state = await graph.ainvoke(
@@ -174,18 +269,24 @@ class WorkflowRuntimeRunner:
                     "last": {},
                     "outputs": {},
                 },
-                config={"configurable": {"thread_id": run_id}},
+                config={"configurable": {"thread_id": runtime.run_id}},
             )
             if pending_approval := _pending_approval_from_graph_state(state):
                 updated_run = await self.run_store.update_run(
                     WorkflowRunUpdate(
                         project_id=request.project_id,
-                        run_id=run_id,
+                        run_id=runtime.run_id,
                         actor_id=request.actor_id,
                         status="pending_approval",
                         outputs_summary="",
                         pending_approval=pending_approval.model_dump(mode="json"),
                     )
+                )
+                await runtime.record_run_event(
+                    event_type="run.pending_approval",
+                    status="pending_approval",
+                    message="workflow run is pending approval",
+                    payload={"pending_approval": pending_approval.model_dump(mode="json")},
                 )
                 return _result_from_run(
                     updated_run,
@@ -195,14 +296,22 @@ class WorkflowRuntimeRunner:
                     pending_approval=pending_approval,
                 )
             outputs = dict(state.get("outputs", {}))
+            await runtime.ensure_not_cancelled()
             updated_run = await self.run_store.update_run(
                 WorkflowRunUpdate(
                     project_id=request.project_id,
-                    run_id=run_id,
+                    run_id=runtime.run_id,
                     actor_id=request.actor_id,
                     status="success",
                     outputs_summary=_summarize_json(outputs),
                 )
+            )
+            await runtime.record_run_event(
+                event_type="run.succeeded",
+                status="success",
+                message="workflow run succeeded",
+                payload_summary=_summarize_json(outputs),
+                payload={"outputs_summary": _summarize_json(outputs)},
             )
             return _result_from_run(
                 updated_run,
@@ -214,12 +323,18 @@ class WorkflowRuntimeRunner:
             updated_run = await self.run_store.update_run(
                 WorkflowRunUpdate(
                     project_id=request.project_id,
-                    run_id=run_id,
+                    run_id=runtime.run_id,
                     actor_id=request.actor_id,
                     status="pending_approval",
                     outputs_summary="",
                     pending_approval=exc.pending_approval.model_dump(mode="json"),
                 )
+            )
+            await runtime.record_run_event(
+                event_type="run.pending_approval",
+                status="pending_approval",
+                message="workflow run is pending approval",
+                payload={"pending_approval": exc.pending_approval.model_dump(mode="json")},
             )
             return _result_from_run(
                 updated_run,
@@ -228,17 +343,57 @@ class WorkflowRuntimeRunner:
                 node_results=runtime.node_results,
                 pending_approval=exc.pending_approval,
             )
+        except WorkflowRuntimeCancelled:
+            updated_run = await self._mark_cancelled(request, run_record)
+            await runtime.record_run_event(
+                event_type="run.cancelled",
+                status="cancelled",
+                message="workflow run cancelled",
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=runtime.node_results,
+            )
         except Exception as exc:
+            latest_run = await self.run_store.get_run(
+                project_id=request.project_id,
+                run_id=runtime.run_id,
+            )
+            if latest_run is not None and latest_run.status in {"cancel_requested", "cancelled"}:
+                updated_run = await self._mark_cancelled(request, latest_run)
+                await runtime.record_run_event(
+                    event_type="run.cancelled",
+                    status="cancelled",
+                    message="workflow run cancelled",
+                )
+                return _result_from_run(
+                    updated_run,
+                    workflow_version_id=request.version.id,
+                    outputs={},
+                    node_results=runtime.node_results,
+                )
             updated_run = await self.run_store.update_run(
                 WorkflowRunUpdate(
                     project_id=request.project_id,
-                    run_id=run_id,
+                    run_id=runtime.run_id,
                     actor_id=request.actor_id,
                     status="failed",
                     outputs_summary="",
                     error_type=exc.__class__.__name__,
                     error_message=str(exc),
                 )
+            )
+            await runtime.record_run_event(
+                event_type="run.failed",
+                status="failed",
+                message="workflow run failed",
+                payload_summary=str(exc),
+                payload={
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
             )
             return _result_from_run(
                 updated_run,
@@ -250,6 +405,22 @@ class WorkflowRuntimeRunner:
             )
         finally:
             await close_workflow_checkpointer(checkpointer_handle)
+
+    async def _mark_cancelled(
+        self,
+        request: WorkflowRunRequest,
+        run_record: WorkflowRunRead,
+    ) -> WorkflowRunRead:
+        return await self.run_store.update_run(
+            WorkflowRunUpdate(
+                project_id=request.project_id,
+                run_id=run_record.run_id,
+                actor_id=request.actor_id,
+                status="cancelled",
+                outputs_summary="cancelled by operator",
+                pending_approval={},
+            )
+        )
 
     async def resume(self, request: WorkflowRunResumeRequest) -> WorkflowRunResult:
         _validate_version(request.version, request.project_id)
@@ -296,6 +467,7 @@ class WorkflowRuntimeRunner:
             tool_gateway=self.tool_gateway,
             execution_gateway=self.execution_gateway,
             http_execution_gateway=self.http_execution_gateway,
+            event_store=self.event_store,
             workflow_run_id=run_record.id,
         )
 
@@ -343,6 +515,7 @@ class WorkflowRuntimeRunner:
                     pending_approval=next_pending_approval,
                 )
             outputs = dict(state.get("outputs", {})) or _final_outputs_from_state(state)
+            await runtime.ensure_not_cancelled()
             updated_run = await self.run_store.update_run(
                 WorkflowRunUpdate(
                     project_id=request.project_id,
@@ -375,6 +548,28 @@ class WorkflowRuntimeRunner:
                 outputs={},
                 node_results=runtime.node_results,
                 pending_approval=exc.pending_approval,
+            )
+        except WorkflowRuntimeCancelled:
+            updated_run = await self.run_store.update_run(
+                WorkflowRunUpdate(
+                    project_id=request.project_id,
+                    run_id=request.run_id,
+                    actor_id=request.actor_id,
+                    status="cancelled",
+                    outputs_summary="cancelled by operator",
+                    pending_approval={},
+                )
+            )
+            await runtime.record_run_event(
+                event_type="run.cancelled",
+                status="cancelled",
+                message="workflow run cancelled",
+            )
+            return _result_from_run(
+                updated_run,
+                workflow_version_id=request.version.id,
+                outputs={},
+                node_results=runtime.node_results,
             )
         except ToolGatewayServiceError as exc:
             if exc.status_code < 500:
@@ -436,6 +631,7 @@ class _RuntimeExecution:
     tool_gateway: ToolGatewayRuntimeClient
     execution_gateway: ShellExecutionRuntimeClient | None = None
     http_execution_gateway: HttpExecutionRuntimeClient | None = None
+    event_store: WorkflowRunEventStore | None = None
     workflow_run_id: UUID | None = None
     node_results: list[WorkflowNodeRunResult] = None  # type: ignore[assignment]
 
@@ -494,6 +690,7 @@ class _RuntimeExecution:
     ) -> WorkflowRuntimeState:
         if pending_approval.node_id != node.id:
             raise WorkflowRuntimeError("pending approval node does not match checkpoint")
+        await self.ensure_not_cancelled()
         started = time.perf_counter()
         if pending_approval.approval_kind == "tool":
             if node.type == "agent":
@@ -548,6 +745,7 @@ class _RuntimeExecution:
     def _node_callable(self, node: NodeDefinition) -> Any:
         async def run_node(state: WorkflowRuntimeState) -> WorkflowRuntimeState:
             started = time.perf_counter()
+            await self.ensure_not_cancelled()
             if node.type != "human_approval":
                 await self._record_policy_event(node=node, decision="allowed", started=started)
             try:
@@ -601,7 +799,7 @@ class _RuntimeExecution:
                 if pending_approval is not None:
                     raise WorkflowRuntimePendingApproval(pending_approval)
                 return next_state
-            except (WorkflowRuntimePendingApproval, GraphInterrupt):
+            except (WorkflowRuntimePendingApproval, GraphInterrupt, WorkflowRuntimeCancelled):
                 raise
             except Exception as exc:
                 await self._record_checkpoint(
@@ -1014,6 +1212,44 @@ class _RuntimeExecution:
             )
         )
 
+    async def ensure_not_cancelled(self) -> None:
+        run = await self.run_store.get_run(project_id=self.request.project_id, run_id=self.run_id)
+        if run is not None and run.status in {"cancel_requested", "cancelled"}:
+            raise WorkflowRuntimeCancelled()
+
+    async def record_run_event(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        message: str,
+        node: NodeDefinition | None = None,
+        payload_summary: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self.event_store is None:
+            return
+        await self.event_store.record_event(
+            WorkflowRunEventCreate(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                workflow_run_id=self.workflow_run_id,
+                workflow_version_id=self.request.version.id,
+                workflow_ref=self.workflow_ref,
+                run_id=self.run_id,
+                trace_id=self.trace_id,
+                event_type=event_type,
+                status=status,
+                node_id=node.id if node is not None else "",
+                node_type=node.type if node is not None else "",
+                message=message,
+                payload_summary=payload_summary,
+                payload=payload or {},
+                created_by=self.request.actor_id,
+                updated_by=self.request.actor_id,
+            )
+        )
+
     async def _record_checkpoint(
         self,
         *,
@@ -1043,6 +1279,25 @@ class _RuntimeExecution:
                 created_by=self.request.actor_id,
                 updated_by=self.request.actor_id,
             )
+        )
+        event_type = {
+            "success": "node.completed",
+            "pending_approval": "node.pending_approval",
+            "failed": "node.failed",
+        }.get(status, "node.updated")
+        await self.record_run_event(
+            event_type=event_type,
+            status=status,
+            node=node,
+            message=f"workflow node {status}",
+            payload_summary=_safe_runtime_event_summary(error_message or _summarize_json(output)),
+            payload={
+                "node_id": node.id,
+                "node_type": node.type,
+                "status": status,
+                "error_type": error_type,
+                "error_message": _safe_runtime_event_summary(error_message),
+            },
         )
 
     async def _record_trace_span(
@@ -1139,6 +1394,39 @@ def _validate_version(version: WorkflowVersionRead, project_id: UUID) -> None:
         raise WorkflowRuntimeError("workflow version is not in project scope")
     if version.status != "published" or version.definition.workflow.status != "published":
         raise WorkflowRuntimeError("workflow runtime can only run published workflow versions")
+
+
+async def _record_standalone_run_event(
+    event_store: WorkflowRunEventStore | None,
+    *,
+    request: WorkflowRunRequest,
+    run_record: WorkflowRunRead,
+    event_type: str,
+    status: str,
+    message: str,
+    payload_summary: str = "",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if event_store is None:
+        return
+    await event_store.record_event(
+        WorkflowRunEventCreate(
+            project_id=request.project_id,
+            actor_id=request.actor_id,
+            workflow_run_id=run_record.id,
+            workflow_version_id=request.version.id,
+            workflow_ref=run_record.workflow_ref,
+            run_id=run_record.run_id,
+            trace_id=run_record.trace_id,
+            event_type=event_type,
+            status=status,
+            message=message,
+            payload_summary=payload_summary,
+            payload=payload or {},
+            created_by=request.actor_id,
+            updated_by=request.actor_id,
+        )
+    )
 
 
 def _workflow_ref(workflow: WorkflowDefinition) -> str:
@@ -1477,3 +1765,22 @@ def _summarize_json(value: Any) -> str:
     if len(text) > 2000:
         return f"{text[:2000]}..."
     return text
+
+
+def _safe_runtime_event_summary(value: str) -> str:
+    lowered = value.lower()
+    if any(
+        token in lowered
+        for token in {
+            "api_key",
+            "apikey",
+            "auth_token",
+            "authorization",
+            "bearer",
+            "password",
+            "secret",
+            "token",
+        }
+    ):
+        return "[redacted]"
+    return value

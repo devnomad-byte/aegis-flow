@@ -53,7 +53,11 @@ from backend.app.tool_registry.models import (
 from backend.app.workflow_runtime.checkpoint_lifecycle import (
     LangGraphCheckpointLifecycleService,
 )
-from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
+from backend.app.workflow_runtime.models import (
+    WorkflowRun,
+    WorkflowRunCheckpoint,
+    WorkflowRunEvent,
+)
 from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, text
@@ -1772,6 +1776,9 @@ async def _cleanup(
             delete(WorkflowRunCheckpoint).where(
                 WorkflowRunCheckpoint.project_id == cleanup_ids.project_id
             )
+        )
+        await session.execute(
+            delete(WorkflowRunEvent).where(WorkflowRunEvent.project_id == cleanup_ids.project_id)
         )
         await session.execute(
             delete(WorkflowRun).where(WorkflowRun.project_id == cleanup_ids.project_id)

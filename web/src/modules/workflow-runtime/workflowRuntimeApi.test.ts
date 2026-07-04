@@ -3,11 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cancelWorkflowRun,
   getWorkflowRunDetail,
+  listWorkflowRunEvents,
   listWorkflowRuns,
   retryWorkflowRun,
   resumeWorkflowRun,
   runWorkflowVersion,
+  submitWorkflowVersionRun,
   workflowRunDetailQueryKey,
+  workflowRunEventsQueryKey,
   workflowRunListQueryKey,
 } from "./workflowRuntimeApi";
 
@@ -34,6 +37,19 @@ describe("workflowRuntimeApi", () => {
       "runs",
       "list",
       "pending_approval",
+    ]);
+  });
+
+  it("builds stable runtime event query keys", () => {
+    expect(workflowRunEventsQueryKey("ops-command", "version-1", "run-1")).toEqual([
+      "project",
+      "ops-command",
+      "workflows",
+      "versions",
+      "version-1",
+      "runs",
+      "run-1",
+      "events",
     ]);
   });
 
@@ -68,6 +84,39 @@ describe("workflowRuntimeApi", () => {
     expect(response.run_id).toBe("run-1");
   });
 
+  it("submits a workflow version run for background execution", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ...workflowRunDetail().run, status: "queued" }), {
+        status: 202,
+      }),
+    );
+
+    const response = await submitWorkflowVersionRun(
+      "ops-command",
+      "version-1",
+      {
+        inputs: { change_id: "CHG-123" },
+        run_ref: "run-1",
+        trace_id: "trace-1",
+      },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/submit",
+      {
+        body: JSON.stringify({
+          inputs: { change_id: "CHG-123" },
+          run_ref: "run-1",
+          trace_id: "trace-1",
+        }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(response.status).toBe("queued");
+  });
+
   it("loads workflow run detail with checkpoints", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify(workflowRunDetail()), { status: 200 }),
@@ -99,6 +148,54 @@ describe("workflowRuntimeApi", () => {
     );
     expect(response.count).toBe(1);
     expect(response.runs[0].run_id).toBe("run-1");
+  });
+
+  it("lists workflow run events with an incremental cursor", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          count: 1,
+          events: [
+            {
+              actor_id: "acct-1",
+              created_at: "2026-07-04T00:00:00Z",
+              created_by: "acct-1",
+              event_type: "node.completed",
+              id: "event-1",
+              message: "workflow node success",
+              node_id: "llm_1",
+              node_type: "llm",
+              payload: {},
+              payload_summary: "safe summary",
+              project_id: "ops-command",
+              run_id: "run-1",
+              sequence: 2,
+              status: "success",
+              trace_id: "trace-1",
+              updated_at: "2026-07-04T00:00:00Z",
+              updated_by: "acct-1",
+              workflow_ref: "ops_incident_triage:1",
+              workflow_run_id: "run-row-1",
+              workflow_version_id: "version-1",
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const response = await listWorkflowRunEvents(
+      "ops-command",
+      "version-1",
+      "run-1",
+      { after_sequence: 1, limit: 50 },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1/events?after_sequence=1&limit=50",
+    );
+    expect(response.events[0].event_type).toBe("node.completed");
   });
 
   it("resumes a pending workflow run", async () => {

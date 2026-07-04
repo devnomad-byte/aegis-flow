@@ -9,6 +9,11 @@ from starlette.responses import Response
 
 from backend.app.api.router import api_router
 from backend.app.core.settings import AppSettings
+from backend.app.db.session import AsyncSessionFactory
+from backend.app.workflow_runtime.background import (
+    InProcessWorkflowRunScheduler,
+    WorkflowRunWorker,
+)
 from backend.app.workflow_runtime.checkpoint_lifecycle import LangGraphCheckpointLifecycleService
 
 
@@ -40,12 +45,19 @@ def _build_lifespan(
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        scheduler = InProcessWorkflowRunScheduler(
+            WorkflowRunWorker(session_factory=AsyncSessionFactory, settings=settings)
+        )
+        app.state.workflow_run_scheduler = scheduler
         if settings.workflow_checkpoint_setup_on_startup:
             lifecycle = checkpoint_lifecycle or LangGraphCheckpointLifecycleService(
                 settings.database
             )
             await lifecycle.setup()
-        yield
+        try:
+            yield
+        finally:
+            await scheduler.shutdown()
 
     return lifespan
 

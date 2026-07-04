@@ -25,6 +25,37 @@ describe("RunObservatory", () => {
       const url = String(input);
       if (
         url.includes(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/events",
+        )
+      ) {
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            events: [
+              runtimeEvent({
+                event_type: "run.started",
+                id: "runtime-event-1",
+                message: "workflow run started",
+                sequence: 1,
+                status: "running",
+              }),
+              runtimeEvent({
+                event_type: "node.completed",
+                id: "runtime-event-2",
+                message: "workflow node success",
+                node_id: "llm_1",
+                node_type: "llm",
+                payload_summary: "safe event summary",
+                sequence: 2,
+                status: "success",
+              }),
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (
+        url.includes(
           "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui",
         )
       ) {
@@ -207,6 +238,10 @@ describe("RunObservatory", () => {
     expect(screen.getByText("Run Trace Detail")).toBeInTheDocument();
     expect(screen.getAllByText("trace-ui").length).toBeGreaterThan(0);
     expect(await screen.findByText("Workflow Run Detail")).toBeInTheDocument();
+    expect(await screen.findByText("Runtime Event Stream")).toBeInTheDocument();
+    expect(screen.getByText("#1 run.started")).toBeInTheDocument();
+    expect(screen.getByText("#2 node.completed")).toBeInTheDocument();
+    expect(screen.getByText("safe event summary")).toBeInTheDocument();
     expect((await screen.findAllByText("pending_approval")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("human_approval_1").length).toBeGreaterThan(0);
     expect(await screen.findByText("Graph Replay")).toBeInTheDocument();
@@ -222,6 +257,9 @@ describe("RunObservatory", () => {
     expect(screen.getByText("18")).toBeInTheDocument();
     expect(screen.queryByText("lease_should_not_render")).not.toBeInTheDocument();
     expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/events?limit=100",
+    );
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/runtime-traces/spans?run_id=run-ui&trace_id=trace-ui&limit=500",
     );
@@ -474,6 +512,32 @@ function runtimeSpan(overrides: Partial<RuntimeSpanFixture>) {
     updated_by: "acct-1",
     created_at: "2026-07-04T00:00:00Z",
     updated_at: "2026-07-04T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function runtimeEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    actor_id: "acct-1",
+    created_at: "2026-07-04T00:00:00Z",
+    created_by: "acct-1",
+    event_type: "run.started",
+    id: "runtime-event",
+    message: "workflow run started",
+    node_id: "",
+    node_type: "",
+    payload: {},
+    payload_summary: "",
+    project_id: "ops-command",
+    run_id: "run-ui",
+    sequence: 1,
+    status: "running",
+    trace_id: "trace-ui",
+    updated_at: "2026-07-04T00:00:00Z",
+    updated_by: "acct-1",
+    workflow_ref: "ops_incident_triage:1",
+    workflow_run_id: "run-row-1",
+    workflow_version_id: "44444444-4444-4444-8444-444444444444",
     ...overrides,
   };
 }

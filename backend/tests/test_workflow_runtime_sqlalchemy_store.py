@@ -9,9 +9,13 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunCancelRequest,
     WorkflowRunCheckpointCreate,
     WorkflowRunCreate,
+    WorkflowRunEventCreate,
     WorkflowRunUpdate,
 )
-from backend.app.workflow_runtime.sqlalchemy_store import SqlAlchemyWorkflowRunStore
+from backend.app.workflow_runtime.sqlalchemy_store import (
+    SqlAlchemyWorkflowRunEventStore,
+    SqlAlchemyWorkflowRunStore,
+)
 from backend.app.workflows.models import WorkflowVersion
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -205,6 +209,197 @@ async def test_workflow_runtime_store_lists_and_cancels_pending_runs(
     assert cancelled.pending_approval == {}
     assert cancelled.updated_by == actor_id
     assert "raw-token" not in str(cancelled)
+
+
+@pytest.mark.asyncio
+async def test_workflow_runtime_event_store_records_sanitized_incremental_events(
+    runtime_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version_id = uuid4()
+    async with runtime_session_factory() as session:
+        seed_project_version(
+            session,
+            project_id=project_id,
+            actor_id=actor_id,
+            version_id=version_id,
+        )
+        await session.commit()
+
+        run_store = SqlAlchemyWorkflowRunStore(session)
+        run = await run_store.create_run(
+            WorkflowRunCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_version_id=version_id,
+                workflow_id="runtime_flow",
+                workflow_ref="runtime_flow:1",
+                definition_hash="sha256:runtime",
+                run_id="run-events",
+                trace_id="trace-events",
+                status="running",
+                inputs_summary="input",
+                outputs_summary="",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        event_store = SqlAlchemyWorkflowRunEventStore(session)
+        first = await event_store.record_event(
+            WorkflowRunEventCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_run_id=run.id,
+                workflow_version_id=version_id,
+                workflow_ref="runtime_flow:1",
+                run_id=run.run_id,
+                trace_id=run.trace_id,
+                event_type="run.started",
+                status="running",
+                message="run started",
+                payload_summary='{"token":"raw-token"}',
+                payload={"safe": "ok", "secret": "raw-token"},
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        second = await event_store.record_event(
+            WorkflowRunEventCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_run_id=run.id,
+                workflow_version_id=version_id,
+                workflow_ref="runtime_flow:1",
+                run_id=run.run_id,
+                trace_id=run.trace_id,
+                event_type="node.completed",
+                status="success",
+                node_id="llm_1",
+                node_type="llm",
+                message="node completed",
+                payload_summary="node completed with api_key raw-token",
+                payload={"api_key": "raw-token", "usage": {"total_tokens": 8}},
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        events = await event_store.list_events(
+            project_id=project_id,
+            run_id=run.run_id,
+            after_sequence=first.sequence,
+            limit=10,
+        )
+
+    assert first.sequence == 1
+    assert second.sequence == 2
+    assert [event.sequence for event in events] == [2]
+    assert events[0].node_id == "llm_1"
+    assert "raw-token" not in str(first)
+    assert "raw-token" not in str(second)
+    assert "raw-token" not in str(events)
+    assert second.payload["api_key"] == "[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runtime_store_requests_running_cancel_without_terminal_overwrite(
+    runtime_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version_id = uuid4()
+    async with runtime_session_factory() as session:
+        seed_project_version(
+            session,
+            project_id=project_id,
+            actor_id=actor_id,
+            version_id=version_id,
+        )
+        await session.commit()
+
+        store = SqlAlchemyWorkflowRunStore(session)
+        await store.create_run(
+            WorkflowRunCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_version_id=version_id,
+                workflow_id="runtime_flow",
+                workflow_ref="runtime_flow:1",
+                definition_hash="sha256:runtime",
+                run_id="run-running",
+                trace_id="trace-running",
+                status="running",
+                inputs_summary="running",
+                outputs_summary="",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        await store.create_run(
+            WorkflowRunCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_version_id=version_id,
+                workflow_id="runtime_flow",
+                workflow_ref="runtime_flow:1",
+                definition_hash="sha256:runtime",
+                run_id="run-queued",
+                trace_id="trace-queued",
+                status="queued",
+                inputs_summary="queued",
+                outputs_summary="",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        await store.create_run(
+            WorkflowRunCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_version_id=version_id,
+                workflow_id="runtime_flow",
+                workflow_ref="runtime_flow:1",
+                definition_hash="sha256:runtime",
+                run_id="run-success",
+                trace_id="trace-success",
+                status="success",
+                inputs_summary="done",
+                outputs_summary="ok",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+
+        running = await store.request_cancel_run(
+            WorkflowRunCancelRequest(
+                project_id=project_id,
+                run_id="run-running",
+                actor_id=actor_id,
+                reason="operator stop",
+            )
+        )
+        queued = await store.request_cancel_run(
+            WorkflowRunCancelRequest(
+                project_id=project_id,
+                run_id="run-queued",
+                actor_id=actor_id,
+                reason="operator stop",
+            )
+        )
+        with pytest.raises(ValueError, match="terminal"):
+            await store.request_cancel_run(
+                WorkflowRunCancelRequest(
+                    project_id=project_id,
+                    run_id="run-success",
+                    actor_id=actor_id,
+                    reason="too late",
+                )
+            )
+
+    assert running.status == "cancel_requested"
+    assert running.outputs_summary == "cancellation requested by operator"
+    assert queued.status == "cancelled"
+    assert queued.outputs_summary == "cancelled before runner started"
 
 
 def seed_project_version(

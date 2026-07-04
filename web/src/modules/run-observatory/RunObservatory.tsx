@@ -16,14 +16,17 @@ import {
 import {
   cancelWorkflowRun,
   getWorkflowRunDetail,
+  listWorkflowRunEvents,
   listWorkflowRuns,
   retryWorkflowRun,
   resumeWorkflowRun,
   workflowRunDetailQueryKey,
+  workflowRunEventsQueryKey,
   workflowRunListQueryKey,
   type WorkflowPendingApproval,
   type WorkflowRunCheckpointRead,
   type WorkflowRunDetailResponse,
+  type WorkflowRunEventRead,
   type WorkflowRunRead,
   type WorkflowRunStatus,
 } from "../workflow-runtime/workflowRuntimeApi";
@@ -64,6 +67,7 @@ type RunScope = {
 const EMPTY_RUNTIME_SPANS: RuntimeTraceSpan[] = [];
 const EMPTY_MODEL_INVOCATIONS: ModelGatewayInvocation[] = [];
 const EMPTY_TOOL_INVOCATIONS: ToolGatewayInvocation[] = [];
+const EMPTY_RUNTIME_EVENTS: WorkflowRunEventRead[] = [];
 const SPAN_LIMIT = 500;
 
 const SAFE_ATTRIBUTE_LABELS: Record<string, string> = {
@@ -130,6 +134,20 @@ export function RunObservatory({ project }: RunObservatoryProps) {
     queryKey: workflowRunListQueryKey(project.projectId, runScope.versionId),
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => isActiveRunStatus(run.status)) ? 2500 : false,
+    retry: false,
+  });
+  const runEventsQuery = useQuery({
+    enabled: hasRunDetailScope,
+    queryFn: () =>
+      listWorkflowRunEvents(project.projectId, runScope.versionId, runScope.runId, {
+        limit: 100,
+      }),
+    queryKey: workflowRunEventsQueryKey(project.projectId, runScope.versionId, runScope.runId),
+    refetchInterval: (query) =>
+      query.state.data?.events.some((event) => isActiveRunStatus(event.status)) ||
+      isActiveRunStatus(runDetailQuery.data?.run.status)
+        ? 1500
+        : false,
     retry: false,
   });
   const modelInvocationsQuery = useQuery({
@@ -210,6 +228,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
   const runtimeSpans = runtimeSpansQuery.data?.spans ?? EMPTY_RUNTIME_SPANS;
   const modelInvocations = modelInvocationsQuery.data?.invocations ?? EMPTY_MODEL_INVOCATIONS;
   const toolInvocations = toolInvocationsQuery.data?.invocations ?? EMPTY_TOOL_INVOCATIONS;
+  const runtimeEvents = runEventsQuery.data?.events ?? EMPTY_RUNTIME_EVENTS;
   const traceEvents = useMemo(() => buildTraceEvents(runtimeSpans), [runtimeSpans]);
   const hasEvents = traceEvents.length > 0;
 
@@ -245,6 +264,13 @@ export function RunObservatory({ project }: RunObservatoryProps) {
           ) : null}
           {runScope.versionId ? (
             <WorkflowRunHistoryPanel error={runListQuery.error} runs={runListQuery.data?.runs ?? []} />
+          ) : null}
+          {hasRunDetailScope ? (
+            <RuntimeEventStreamPanel
+              error={runEventsQuery.error}
+              events={runtimeEvents}
+              isLoading={runEventsQuery.isLoading}
+            />
           ) : null}
 
           <section className="global-panel run-otlp-panel">
@@ -604,12 +630,14 @@ function WorkflowRunActions({
   payloadText: string;
   status: WorkflowRunStatus;
 }) {
-  const canResumeOrCancel = status === "pending_approval";
+  const canResume = status === "pending_approval";
+  const canCancel = status === "queued" || status === "running" || status === "pending_approval";
   const canRetry = isTerminalRunStatus(status);
+  const isCancelRequested = status === "cancel_requested";
 
   return (
     <div className="workflow-run-actions">
-      {canResumeOrCancel ? (
+      {canResume ? (
         <label className="field-label" htmlFor="run-observatory-resume-payload">
           Resume payload JSON
           <textarea
@@ -630,7 +658,7 @@ function WorkflowRunActions({
       <div className="workflow-run-action-row">
         <button
           className="toolbar-button"
-          disabled={!canResumeOrCancel || isOperating}
+          disabled={!canResume || isOperating}
           onClick={onResume}
           type="button"
         >
@@ -638,11 +666,11 @@ function WorkflowRunActions({
         </button>
         <button
           className="toolbar-button toolbar-button-danger"
-          disabled={!canResumeOrCancel || isOperating}
+          disabled={!canCancel || isCancelRequested || isOperating}
           onClick={onCancel}
           type="button"
         >
-          Cancel Run
+          {isCancelRequested ? "Cancelling" : "Cancel Run"}
         </button>
         <button
           className="toolbar-button"
@@ -654,6 +682,51 @@ function WorkflowRunActions({
         </button>
       </div>
     </div>
+  );
+}
+
+function RuntimeEventStreamPanel({
+  error,
+  events,
+  isLoading,
+}: {
+  error: unknown;
+  events: WorkflowRunEventRead[];
+  isLoading: boolean;
+}) {
+  return (
+    <section className="global-panel run-detail-panel" aria-label="Runtime Event Stream">
+      <PanelHeader count={events.length} label="RUNTIME EVENTS" title="Runtime Event Stream" />
+      {isLoading ? <div className="preview-alert">Loading runtime events</div> : null}
+      {error ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(error as Error).message}
+        </div>
+      ) : null}
+      {events.length ? (
+        <div className="workflow-run-checkpoints workflow-run-events">
+          {events.map((event) => (
+            <article className="workflow-run-checkpoint" key={event.id}>
+              <div>
+                <strong>
+                  #{event.sequence} {event.event_type}
+                </strong>
+                <span>
+                  {event.status}
+                  {event.node_id ? ` · ${event.node_id}` : ""}
+                </span>
+              </div>
+              <p>{event.message || event.payload_summary || "event recorded"}</p>
+              {event.payload_summary ? (
+                <EvidenceCode label="EVENT SUMMARY" value={event.payload_summary} />
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : error ? null : (
+        <div className="preview-alert">Runtime events will appear after the run starts</div>
+      )}
+    </section>
   );
 }
 
@@ -1057,8 +1130,13 @@ function runStatusClass(status: WorkflowRunStatus | "success" | "failed" | "pend
   }
 }
 
-function isActiveRunStatus(status: WorkflowRunStatus | undefined) {
-  return status === "running" || status === "pending_approval";
+function isActiveRunStatus(status: string | undefined) {
+  return (
+    status === "queued" ||
+    status === "running" ||
+    status === "cancel_requested" ||
+    status === "pending_approval"
+  );
 }
 
 function isTerminalRunStatus(status: WorkflowRunStatus) {

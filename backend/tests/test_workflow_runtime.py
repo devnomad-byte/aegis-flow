@@ -448,6 +448,55 @@ async def test_runtime_tool_pending_resume_uses_checkpointer_without_reinvoking_
 
 
 @pytest.mark.asyncio
+async def test_runtime_running_cancel_request_is_not_overwritten_by_success() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version = make_version(project_id=project_id, workflow=workflow_with_llm_only())
+    store = InMemoryWorkflowRunStore()
+    runner = WorkflowRuntimeRunner(
+        run_store=store,
+        policy_store=InMemoryPolicyGateStore(),
+        trace_store=InMemoryTraceStore(),
+        llm_runner=RecordingLlmRunner(
+            content='{"message":"finished after cancel"}',
+            delay_seconds=0.05,
+        ),
+        tool_gateway=RecordingToolGateway(),
+    )
+
+    run_task = asyncio.create_task(
+        runner.run(
+            WorkflowRunRequest(
+                project_id=project_id,
+                actor_id=actor_id,
+                version=version,
+                inputs={"message": "cancel me"},
+                run_id="run-cancel-running",
+                trace_id="trace-cancel-running",
+            )
+        )
+    )
+    await asyncio.sleep(0.01)
+    cancelled_request = await store.request_cancel_run(
+        WorkflowRunCancelRequest(
+            project_id=project_id,
+            run_id="run-cancel-running",
+            actor_id=actor_id,
+            reason="operator cancelled running run",
+        )
+    )
+
+    result = await run_task
+    final_run = await store.get_run(project_id=project_id, run_id="run-cancel-running")
+
+    assert cancelled_request.status == "cancel_requested"
+    assert result.status == "cancelled"
+    assert final_run is not None
+    assert final_run.status == "cancelled"
+    assert "finished after cancel" not in final_run.outputs_summary
+
+
+@pytest.mark.asyncio
 async def test_runtime_executes_shell_node_through_execution_gateway() -> None:
     project_id = uuid4()
     actor_id = uuid4()
@@ -956,6 +1005,32 @@ class InMemoryWorkflowRunStore:
         self.runs.append(updated)
         return updated
 
+    async def request_cancel_run(self, request: WorkflowRunCancelRequest) -> WorkflowRunRead:
+        existing = await self.get_run(project_id=request.project_id, run_id=request.run_id)
+        if existing is None:
+            raise LookupError("workflow run not found")
+        if existing.status == "pending_approval":
+            return await self.cancel_pending_run(request)
+        if existing.status == "queued":
+            status = "cancelled"
+            outputs_summary = "cancelled before runner started"
+        elif existing.status in {"running", "cancel_requested"}:
+            status = "cancel_requested"
+            outputs_summary = "cancellation requested by operator"
+        else:
+            raise ValueError("workflow run is terminal and cannot be cancelled")
+        updated = existing.model_copy(
+            update={
+                "status": status,
+                "outputs_summary": outputs_summary,
+                "pending_approval": {},
+                "updated_by": request.actor_id,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.runs.append(updated)
+        return updated
+
     async def record_checkpoint(
         self,
         request: WorkflowRunCheckpointCreate,
@@ -1314,6 +1389,38 @@ def workflow_with_llm_condition_tool() -> WorkflowDefinition:
                 source_handle="case:end",
             ),
             EdgeDefinition(source="tool_1", target="end_1"),
+        ],
+    )
+
+
+def workflow_with_llm_only() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        schema_version="workflow.dsl/v0.2",
+        workflow=WorkflowMetadata(
+            id="llm_flow",
+            name="LLM Flow",
+            project_id="runtime-project",
+            version=1,
+            status="published",
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="llm_1",
+                name="Summarize",
+                type="llm",
+                data=LlmNodeData(
+                    model_policy_ref="default",
+                    system_prompt="Return JSON.",
+                    user_prompt="Summarize {{message}}",
+                    prompt_version="v1",
+                ),
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="llm_1"),
+            EdgeDefinition(source="llm_1", target="end_1"),
         ],
     )
 
