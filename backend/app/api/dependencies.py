@@ -29,8 +29,11 @@ from backend.app.tool_gateway.store import ToolInvocationStore
 from backend.app.tool_registry.mcp_client import HttpMcpToolsClient, McpToolsClient
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryStore
-from backend.app.workflows.sqlalchemy_store import SqlAlchemyWorkflowDraftStore
-from backend.app.workflows.store import WorkflowDraftStore
+from backend.app.workflows.sqlalchemy_store import (
+    SqlAlchemyWorkflowDraftStore,
+    SqlAlchemyWorkflowVersionStore,
+)
+from backend.app.workflows.store import WorkflowDraftStore, WorkflowVersionStore
 
 AsyncSessionDependency = Depends(get_async_session)
 
@@ -52,6 +55,12 @@ def get_workflow_draft_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> WorkflowDraftStore:
     return SqlAlchemyWorkflowDraftStore(session)
+
+
+def get_workflow_version_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> WorkflowVersionStore:
+    return SqlAlchemyWorkflowVersionStore(session)
 
 
 def get_audit_event_store(

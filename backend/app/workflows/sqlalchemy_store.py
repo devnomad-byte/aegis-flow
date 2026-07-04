@@ -1,11 +1,20 @@
+import hashlib
+import json
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.workflows.dsl import WorkflowDefinition
-from backend.app.workflows.models import WorkflowDraft
-from backend.app.workflows.schemas import WorkflowDraftRead
+from backend.app.workflows.models import WorkflowDraft, WorkflowVersion
+from backend.app.workflows.schemas import (
+    WorkflowDraftRead,
+    WorkflowPublishGateResult,
+    WorkflowVersionRead,
+)
+from backend.app.workflows.store import WorkflowDraftStore, WorkflowVersionConflict
 from backend.app.workflows.yaml_io import WorkflowImportAnalysis
 
 
@@ -95,6 +104,136 @@ class SqlAlchemyWorkflowDraftStore:
         return True
 
 
+class SqlAlchemyWorkflowVersionStore:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def publish_project_version(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        draft: WorkflowDraftRead,
+        analysis: WorkflowImportAnalysis,
+        gate_result: WorkflowPublishGateResult,
+        release_note: str,
+    ) -> WorkflowVersionRead:
+        definition = draft.definition.model_copy(
+            update={
+                "workflow": draft.definition.workflow.model_copy(update={"status": "published"})
+            }
+        )
+        definition_payload = definition.model_dump(mode="json")
+        version = WorkflowVersion(
+            project_id=project_id,
+            workflow_id=draft.workflow_id,
+            name=draft.name,
+            version=draft.version,
+            status="published",
+            definition=definition_payload,
+            analysis=analysis.model_dump(mode="json"),
+            gate_result=gate_result.model_dump(mode="json"),
+            definition_hash=_definition_hash(definition),
+            release_note=release_note,
+            published_by=actor_id,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(version)
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise WorkflowVersionConflict("workflow version already exists") from exc
+        await self._session.refresh(version)
+        return _version_to_read(version)
+
+    async def list_project_versions(
+        self,
+        *,
+        project_id: UUID,
+        workflow_id: str | None = None,
+    ) -> list[WorkflowVersionRead]:
+        conditions = [WorkflowVersion.project_id == project_id]
+        if workflow_id:
+            conditions.append(WorkflowVersion.workflow_id == workflow_id)
+
+        result = await self._session.scalars(
+            select(WorkflowVersion)
+            .where(*conditions)
+            .order_by(WorkflowVersion.created_at.desc(), WorkflowVersion.id.desc())
+        )
+        return [_version_to_read(version) for version in result.all()]
+
+    async def get_project_version(
+        self,
+        project_id: UUID,
+        version_id: UUID,
+    ) -> WorkflowVersionRead | None:
+        version = await self._session.get(WorkflowVersion, version_id)
+        if version is None or version.project_id != project_id:
+            return None
+        return _version_to_read(version)
+
+    async def restore_version_as_draft(
+        self,
+        *,
+        project_id: UUID,
+        version_id: UUID,
+        actor_id: UUID,
+        draft_store: WorkflowDraftStore,
+    ) -> WorkflowDraftRead | None:
+        version = await self._session.get(WorkflowVersion, version_id)
+        if version is None or version.project_id != project_id:
+            return None
+
+        max_draft_version = await self._session.scalar(
+            select(func.max(WorkflowDraft.version)).where(
+                WorkflowDraft.project_id == project_id,
+                WorkflowDraft.workflow_id == version.workflow_id,
+            )
+        )
+        max_published_version = await self._session.scalar(
+            select(func.max(WorkflowVersion.version)).where(
+                WorkflowVersion.project_id == project_id,
+                WorkflowVersion.workflow_id == version.workflow_id,
+            )
+        )
+        next_version = max(max_draft_version or 0, max_published_version or 0) + 1
+        version_definition = WorkflowDefinition.model_validate(version.definition)
+        restored_definition = version_definition.model_copy(
+            update={
+                "workflow": version_definition.workflow.model_copy(
+                    update={"version": next_version, "status": "draft"}
+                )
+            }
+        )
+        return await draft_store.upsert_project_draft(
+            project_id=project_id,
+            actor_id=actor_id,
+            workflow=restored_definition,
+            analysis=WorkflowImportAnalysis.model_validate(version.analysis),
+        )
+
+    async def archive_project_version(
+        self,
+        *,
+        project_id: UUID,
+        version_id: UUID,
+        actor_id: UUID,
+    ) -> WorkflowVersionRead | None:
+        version = await self._session.get(WorkflowVersion, version_id)
+        if version is None or version.project_id != project_id:
+            return None
+        version.status = "archived"
+        version.archived_by = actor_id
+        version.archived_at = datetime.now(UTC)
+        version.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(version)
+        return _version_to_read(version)
+
+
 def _apply_definition(
     draft: WorkflowDraft,
     *,
@@ -128,3 +267,32 @@ def _draft_to_read(draft: WorkflowDraft) -> WorkflowDraftRead:
         created_at=draft.created_at,
         updated_at=draft.updated_at,
     )
+
+
+def _version_to_read(version: WorkflowVersion) -> WorkflowVersionRead:
+    return WorkflowVersionRead(
+        id=version.id,
+        project_id=version.project_id,
+        workflow_id=version.workflow_id,
+        name=version.name,
+        version=version.version,
+        status=version.status,
+        definition=WorkflowDefinition.model_validate(version.definition),
+        analysis=WorkflowImportAnalysis.model_validate(version.analysis),
+        gate_result=WorkflowPublishGateResult.model_validate(version.gate_result),
+        definition_hash=version.definition_hash,
+        release_note=version.release_note,
+        published_by=version.published_by,
+        archived_by=version.archived_by,
+        archived_at=version.archived_at,
+        created_by=version.created_by,
+        updated_by=version.updated_by,
+        created_at=version.created_at,
+        updated_at=version.updated_at,
+    )
+
+
+def _definition_hash(workflow: WorkflowDefinition) -> str:
+    payload = workflow.model_dump(mode="json", exclude_none=True)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

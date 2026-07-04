@@ -8,21 +8,32 @@ from backend.app.api.dependencies import (
     get_project_access_provider,
     get_tool_registry_store,
     get_workflow_draft_store,
+    get_workflow_version_store,
 )
 from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.tool_registry.store import ToolRegistryStore
 from backend.app.workflows.dsl import WorkflowDefinition
+from backend.app.workflows.publish_gate import evaluate_workflow_publish_gate
 from backend.app.workflows.schemas import (
+    WorkflowArchiveRequest,
     WorkflowDraftListResponse,
     WorkflowDraftRead,
     WorkflowDraftUpdateRequest,
     WorkflowImportPreviewResponse,
+    WorkflowPublishRequest,
+    WorkflowRestoreDraftRequest,
+    WorkflowVersionListResponse,
+    WorkflowVersionRead,
     WorkflowYamlExportResponse,
     WorkflowYamlImportRequest,
 )
-from backend.app.workflows.store import WorkflowDraftStore
+from backend.app.workflows.store import (
+    WorkflowDraftStore,
+    WorkflowVersionConflict,
+    WorkflowVersionStore,
+)
 from backend.app.workflows.yaml_io import (
     WorkflowImportAnalysis,
     WorkflowYamlError,
@@ -35,6 +46,7 @@ router = APIRouter(prefix="/projects/{project_id}/workflows", tags=["workflows"]
 CurrentAccount = Depends(get_current_account)
 ProjectAccess = Depends(get_project_access_provider)
 DraftStore = Depends(get_workflow_draft_store)
+VersionStore = Depends(get_workflow_version_store)
 AuditStore = Depends(get_audit_event_store)
 RegistryStore = Depends(get_tool_registry_store)
 
@@ -278,6 +290,238 @@ async def check_workflow_draft_publish(
     return analysis
 
 
+@router.post(
+    "/drafts/{draft_id}/publish",
+    response_model=WorkflowVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def publish_workflow_draft(
+    project_id: UUID,
+    draft_id: UUID,
+    request: WorkflowPublishRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    draft_store: WorkflowDraftStore = DraftStore,
+    version_store: WorkflowVersionStore = VersionStore,
+    audit_store: AuditEventStore = AuditStore,
+    registry_store: ToolRegistryStore = RegistryStore,
+) -> WorkflowVersionRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:write",
+    )
+    draft = await draft_store.get_project_draft(project_id, draft_id)
+    if draft is None:
+        raise _draft_not_found()
+
+    analysis = analyze_workflow_import(
+        draft.definition,
+        catalog=await registry_store.build_project_resource_catalog(project_id),
+        existing_workflow=draft.definition,
+    )
+    gate_result = evaluate_workflow_publish_gate(draft.definition, analysis)
+    if not gate_result.can_publish:
+        await audit_store.record_project_event(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            action="workflow.version.publish_blocked",
+            target_type="workflow_draft",
+            target_id=str(draft.id),
+            result="failure",
+            risk_level="medium",
+            metadata={
+                "workflow_id": draft.workflow_id,
+                "workflow_version": draft.version,
+                "gate_reason_count": len(gate_result.reasons),
+                "gate_reason_codes": [reason.code for reason in gate_result.reasons],
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=gate_result.model_dump(mode="json"),
+        )
+
+    try:
+        version = await version_store.publish_project_version(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            draft=draft,
+            analysis=analysis,
+            gate_result=gate_result,
+            release_note=request.release_note,
+        )
+    except WorkflowVersionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.version.publish",
+        target_type="workflow_version",
+        target_id=str(version.id),
+        metadata={
+            "workflow_id": version.workflow_id,
+            "workflow_version": version.version,
+            "definition_hash": version.definition_hash,
+            "gate_reason_count": len(version.gate_result.reasons),
+        },
+    )
+    return version
+
+
+@router.get("/versions", response_model=WorkflowVersionListResponse)
+async def list_workflow_versions(
+    project_id: UUID,
+    workflow_id: str | None = None,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowVersionListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:view",
+    )
+    versions = await version_store.list_project_versions(
+        project_id=project_id,
+        workflow_id=workflow_id,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.version.list",
+        target_type="workflow_version",
+        target_id=workflow_id or str(project_id),
+        metadata={
+            "workflow_id": workflow_id or "",
+            "version_count": len(versions),
+        },
+    )
+    return WorkflowVersionListResponse(versions=versions, count=len(versions))
+
+
+@router.get("/versions/{version_id}", response_model=WorkflowVersionRead)
+async def get_workflow_version(
+    project_id: UUID,
+    version_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowVersionRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:view",
+    )
+    version = await version_store.get_project_version(project_id, version_id)
+    if version is None:
+        raise _version_not_found()
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.version.view",
+        target_type="workflow_version",
+        target_id=str(version.id),
+        metadata={
+            "workflow_id": version.workflow_id,
+            "workflow_version": version.version,
+        },
+    )
+    return version
+
+
+@router.post(
+    "/versions/{version_id}/restore-draft",
+    response_model=WorkflowDraftRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def restore_workflow_version_as_draft(
+    project_id: UUID,
+    version_id: UUID,
+    request: WorkflowRestoreDraftRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    draft_store: WorkflowDraftStore = DraftStore,
+    version_store: WorkflowVersionStore = VersionStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowDraftRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:write",
+    )
+    draft = await version_store.restore_version_as_draft(
+        project_id=project_id,
+        version_id=version_id,
+        actor_id=current_account.account_id,
+        draft_store=draft_store,
+    )
+    if draft is None:
+        raise _version_not_found()
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.version.restore_draft",
+        target_type="workflow_version",
+        target_id=str(version_id),
+        metadata={
+            "workflow_id": draft.workflow_id,
+            "restored_draft_id": str(draft.id),
+            "restored_workflow_version": draft.version,
+            "release_note": request.release_note,
+        },
+    )
+    return draft
+
+
+@router.post("/versions/{version_id}/archive", response_model=WorkflowVersionRead)
+async def archive_workflow_version(
+    project_id: UUID,
+    version_id: UUID,
+    request: WorkflowArchiveRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowVersionRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:write",
+    )
+    version = await version_store.archive_project_version(
+        project_id=project_id,
+        version_id=version_id,
+        actor_id=current_account.account_id,
+    )
+    if version is None:
+        raise _version_not_found()
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.version.archive",
+        target_type="workflow_version",
+        target_id=str(version.id),
+        metadata={
+            "workflow_id": version.workflow_id,
+            "workflow_version": version.version,
+            "reason": request.reason,
+        },
+    )
+    return version
+
+
 @router.get("/drafts/{draft_id}/export-yaml", response_model=WorkflowYamlExportResponse)
 async def export_workflow_draft_yaml(
     project_id: UUID,
@@ -368,4 +612,11 @@ def _draft_not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Workflow draft not found",
+    )
+
+
+def _version_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Workflow version not found",
     )
