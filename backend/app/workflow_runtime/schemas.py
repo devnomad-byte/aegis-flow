@@ -15,6 +15,15 @@ WorkflowRunStatus = Literal[
     "pending_approval",
     "cancelled",
 ]
+WorkflowRunQueueStatus = Literal[
+    "queued",
+    "leased",
+    "running",
+    "completed",
+    "failed",
+    "dead_letter",
+    "cancelled",
+]
 WorkflowNodeStatus = Literal["success", "failed", "pending_approval", "skipped"]
 WorkflowApprovalKind = Literal["human", "tool"]
 WorkflowApprovalDecision = Literal["approved"]
@@ -208,6 +217,41 @@ class WorkflowRunEventRead(WorkflowRunEventCreate):
 
     id: UUID
     sequence: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRunQueueItemCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    actor_id: UUID
+    workflow_run_id: UUID
+    workflow_version_id: UUID
+    workflow_ref: str
+    run_id: str
+    trace_id: str
+    encrypted_inputs: str
+    encryption_key_ref: str
+    input_keys: list[str] = Field(default_factory=list)
+    max_attempts: int = Field(default=3, ge=1)
+    available_at: datetime
+    expires_at: datetime
+    created_by: UUID
+    updated_by: UUID
+
+
+class WorkflowRunQueueItemRead(WorkflowRunQueueItemCreate):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    status: WorkflowRunQueueStatus
+    attempt_count: int
+    leased_until: datetime | None = None
+    lease_owner: str = ""
+    last_error_type: str = ""
+    last_error_message: str = ""
+    dead_letter_reason: str = ""
     created_at: datetime
     updated_at: datetime
 

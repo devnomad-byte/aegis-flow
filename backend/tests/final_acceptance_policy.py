@@ -6,6 +6,7 @@ REAL_DEPENDENCY_MARKERS = {
     "real_docker",
     "real_http",
     "real_mcp",
+    "real_redis",
 }
 
 REAL_DEPENDENCY_ENV_FLAGS = {
@@ -14,6 +15,7 @@ REAL_DEPENDENCY_ENV_FLAGS = {
     "real_docker": "AEGIS_REAL_DOCKER",
     "real_http": "AEGIS_REAL_HTTP",
     "real_mcp": "AEGIS_REAL_MCP",
+    "real_redis": "AEGIS_REAL_REDIS",
 }
 
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}

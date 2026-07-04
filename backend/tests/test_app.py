@@ -1,4 +1,4 @@
-from backend.app.core.settings import AppSettings
+from backend.app.core.settings import AppSettings, WorkflowQueueSettings
 from backend.app.main import create_app
 from fastapi.testclient import TestClient
 
@@ -12,7 +12,8 @@ def test_create_app_sets_openapi_metadata() -> None:
 
 def test_create_app_does_not_setup_workflow_checkpoints_by_default() -> None:
     lifecycle = RecordingCheckpointLifecycle()
-    app = create_app(checkpoint_lifecycle=lifecycle)
+    settings = AppSettings(workflow_queue=WorkflowQueueSettings(enabled=False))
+    app = create_app(settings, checkpoint_lifecycle=lifecycle)
 
     with TestClient(app):
         pass
@@ -22,7 +23,10 @@ def test_create_app_does_not_setup_workflow_checkpoints_by_default() -> None:
 
 def test_create_app_sets_up_workflow_checkpoints_when_enabled() -> None:
     lifecycle = RecordingCheckpointLifecycle()
-    settings = AppSettings(workflow_checkpoint_setup_on_startup=True)
+    settings = AppSettings(
+        workflow_checkpoint_setup_on_startup=True,
+        workflow_queue=WorkflowQueueSettings(enabled=False),
+    )
     app = create_app(settings, checkpoint_lifecycle=lifecycle)
 
     with TestClient(app):

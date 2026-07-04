@@ -283,6 +283,7 @@ class InMemoryRunEventStore:
 class RecordingWorkflowRunScheduler:
     def __init__(self) -> None:
         self.scheduled: list[dict[str, object]] = []
+        self.cancelled: list[dict[str, object]] = []
 
     async def submit(
         self,
@@ -300,6 +301,23 @@ class RecordingWorkflowRunScheduler:
                 "version_id": version_id,
                 "run_id": run_id,
                 "inputs": inputs or {},
+            }
+        )
+
+    async def cancel(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        run_id: str,
+        reason: str = "",
+    ) -> None:
+        self.cancelled.append(
+            {
+                "project_id": project_id,
+                "actor_id": actor_id,
+                "run_id": run_id,
+                "reason": reason,
             }
         )
 

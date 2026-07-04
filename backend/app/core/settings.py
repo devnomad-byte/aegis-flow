@@ -56,6 +56,30 @@ class RedisSettings(BaseSettings):
     database: int = 0
 
 
+class WorkflowQueueSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="WORKFLOW_QUEUE_",
+        env_file=LOCAL_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    enabled: bool = True
+    poll_interval_seconds: float = 0.5
+    lease_seconds: int = 60
+    max_attempts: int = 3
+    retry_backoff_base_seconds: int = 5
+    payload_ttl_seconds: int = 86_400
+    encryption_secret: SecretStr = Field(
+        default=SecretStr("local-dev-workflow-queue-secret"),
+        repr=False,
+    )
+    encryption_key_ref: str = "local-fernet:v1"
+    redis_wakeup_enabled: bool = True
+    redis_wakeup_channel: str = "aegisflow:workflow-runs:wakeup"
+    redis_wakeup_ttl_seconds: int = 60
+
+
 class S3Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="S3_",
@@ -162,6 +186,7 @@ class AppSettings(BaseSettings):
     workflow_checkpoint_setup_on_startup: bool = False
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
+    workflow_queue: WorkflowQueueSettings = Field(default_factory=WorkflowQueueSettings)
     s3: S3Settings = Field(default_factory=S3Settings)
     milvus: MilvusSettings = Field(default_factory=MilvusSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)

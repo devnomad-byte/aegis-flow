@@ -46,7 +46,8 @@ def _build_lifespan(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler = InProcessWorkflowRunScheduler(
-            WorkflowRunWorker(session_factory=AsyncSessionFactory, settings=settings)
+            WorkflowRunWorker(session_factory=AsyncSessionFactory, settings=settings),
+            settings=settings,
         )
         app.state.workflow_run_scheduler = scheduler
         if settings.workflow_checkpoint_setup_on_startup:
@@ -54,6 +55,8 @@ def _build_lifespan(
                 settings.database
             )
             await lifecycle.setup()
+        if settings.workflow_queue.enabled:
+            await scheduler.start()
         try:
             yield
         finally:

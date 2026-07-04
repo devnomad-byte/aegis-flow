@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +10,7 @@ from backend.app.workflow_runtime.schemas import (
     WorkflowRunCheckpointCreate,
     WorkflowRunCreate,
     WorkflowRunEventCreate,
+    WorkflowRunQueueItemCreate,
     WorkflowRunUpdate,
 )
 from backend.app.workflow_runtime.sqlalchemy_store import (
@@ -299,6 +300,111 @@ async def test_workflow_runtime_event_store_records_sanitized_incremental_events
     assert "raw-token" not in str(second)
     assert "raw-token" not in str(events)
     assert second.payload["api_key"] == "[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runtime_store_claims_retries_reconciles_and_cleans_queue_items(
+    runtime_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    version_id = uuid4()
+    now = datetime.now(UTC)
+    async with runtime_session_factory() as session:
+        seed_project_version(
+            session,
+            project_id=project_id,
+            actor_id=actor_id,
+            version_id=version_id,
+        )
+        await session.commit()
+
+        store = SqlAlchemyWorkflowRunStore(session)
+        run = await store.create_run(
+            WorkflowRunCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_version_id=version_id,
+                workflow_id="runtime_flow",
+                workflow_ref="runtime_flow:1",
+                definition_hash="sha256:runtime",
+                run_id="run-queue",
+                trace_id="trace-queue",
+                status="queued",
+                inputs_summary='{"input_keys":["message","token"]}',
+                outputs_summary="",
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+        queued = await store.enqueue_run_queue_item(
+            WorkflowRunQueueItemCreate(
+                project_id=project_id,
+                actor_id=actor_id,
+                workflow_run_id=run.id,
+                workflow_version_id=version_id,
+                workflow_ref=run.workflow_ref,
+                run_id=run.run_id,
+                trace_id=run.trace_id,
+                encrypted_inputs="ciphertext-without-raw-token",
+                encryption_key_ref="local-fernet:v1",
+                input_keys=["message", "token"],
+                max_attempts=2,
+                available_at=now - timedelta(seconds=1),
+                expires_at=now + timedelta(hours=1),
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+        )
+
+        claimed = await store.claim_next_queue_item(
+            worker_id="worker-1",
+            lease_seconds=10,
+            now=now,
+        )
+        assert claimed is not None
+        assert claimed.id == queued.id
+        assert claimed.status == "leased"
+        assert claimed.attempt_count == 1
+        assert claimed.lease_owner == "worker-1"
+
+        running = await store.mark_queue_item_running(
+            queue_item_id=queued.id,
+            worker_id="worker-1",
+        )
+        assert running.status == "running"
+
+        reconciled = await store.reconcile_stale_queue_items(
+            worker_id="worker-2",
+            now=now + timedelta(seconds=11),
+        )
+        assert reconciled["requeued"] == 1
+        requeued = await store.get_queue_item(project_id=project_id, run_id=run.run_id)
+        assert requeued is not None
+        assert requeued.status == "queued"
+        restored_run = await store.get_run(project_id=project_id, run_id=run.run_id)
+        assert restored_run is not None
+        assert restored_run.status == "queued"
+
+        claimed_again = await store.claim_next_queue_item(
+            worker_id="worker-2",
+            lease_seconds=10,
+            now=now + timedelta(seconds=12),
+        )
+        assert claimed_again is not None
+        assert claimed_again.attempt_count == 2
+        dead_letter = await store.fail_queue_item(
+            queue_item_id=queued.id,
+            error_type="RuntimeError",
+            error_message="token=raw-token",
+            backoff_seconds=30,
+            now=now + timedelta(seconds=13),
+        )
+        assert dead_letter.status == "dead_letter"
+        assert "raw-token" not in dead_letter.last_error_message
+
+        deleted = await store.cleanup_expired_queue_payloads(now=now + timedelta(hours=2))
+        assert deleted == 1
 
 
 @pytest.mark.asyncio

@@ -67,6 +67,16 @@ class WorkflowRunScheduler(Protocol):
     ) -> None:
         raise NotImplementedError
 
+    async def cancel(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        run_id: str,
+        reason: str = "",
+    ) -> None:
+        raise NotImplementedError
+
 
 RunScheduler = Depends(get_workflow_run_scheduler)
 
@@ -436,6 +446,7 @@ async def cancel_workflow_run(
     run_store: WorkflowRunStore = RunStore,
     event_store: WorkflowRunEventStore = RunEventStore,
     audit_store: AuditEventStore = AuditStore,
+    scheduler: WorkflowRunScheduler = RunScheduler,
 ) -> WorkflowRunRead:
     _require_project_permission(
         project_access,
@@ -462,6 +473,12 @@ async def cancel_workflow_run(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await scheduler.cancel(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        run_id=run_id,
+        reason=request.reason,
+    )
 
     await event_store.record_event(
         WorkflowRunEventCreate(
