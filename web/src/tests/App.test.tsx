@@ -133,15 +133,15 @@ describe("App", () => {
 
   it("renders run observatory for project run detail routes", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ invocations: [], count: 0 }), { status: 200 }),
+      new Response(JSON.stringify({ spans: [], count: 0 }), { status: 200 }),
     );
 
     render(<App initialPath="/projects/ops-command/runs" />);
 
     expect(await screen.findByText("Run Trace Detail")).toBeInTheDocument();
-    expect(screen.getByText("run-real-llm")).toBeInTheDocument();
+    expect(screen.getAllByText("run-real-llm").length).toBeGreaterThan(0);
     expect(screen.getByText("Graph Replay")).toBeInTheDocument();
-    expect(await screen.findByText("No trace events for this run scope")).toBeInTheDocument();
+    expect(await screen.findByText("No runtime spans for this run scope")).toBeInTheDocument();
   });
 
   it("shows forbidden instead of global data for regular project members", async () => {

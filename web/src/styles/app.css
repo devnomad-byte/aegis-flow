@@ -1346,12 +1346,16 @@ select {
 }
 
 .model-trace-status-failed,
-.model-trace-status-schema_validation_failed {
+.model-trace-status-schema_validation_failed,
+.model-trace-status-denied,
+.model-trace-status-error,
+.model-trace-status-cancelled {
   background: rgba(255, 77, 94, 0.16);
   color: var(--color-danger);
 }
 
-.model-trace-status-budget_exceeded {
+.model-trace-status-budget_exceeded,
+.model-trace-status-pending {
   background: rgba(255, 176, 32, 0.16);
   color: var(--color-warning);
 }
@@ -1391,6 +1395,14 @@ select {
 
 .run-graph-node-tool {
   border-color: rgba(46, 243, 197, 0.46);
+}
+
+.run-graph-node-retrieval {
+  border-color: rgba(126, 231, 135, 0.46);
+}
+
+.run-graph-node-internal {
+  border-color: rgba(154, 168, 163, 0.42);
 }
 
 .run-graph-index {
@@ -1452,6 +1464,23 @@ select {
   display: grid;
   gap: var(--space-md);
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.run-ledger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.run-ledger-panel {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.run-ledger-panel h4 {
+  color: var(--color-text);
+  font-size: 14px;
+  margin: 0;
 }
 
 .raw-trace-form {

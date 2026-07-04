@@ -60,3 +60,20 @@ test("renders the prompt library settings workspace", async ({ page }) => {
   await expect(page.getByText("TEMPLATE RAIL")).toBeVisible();
   await expect(page.getByRole("button", { name: "Create template" })).toBeVisible();
 });
+
+test("renders run observatory on desktop and mobile", async ({ page }) => {
+  await page.goto("/projects/ops-command/runs");
+
+  await expect(page.getByRole("heading", { name: "Run Trace Detail" })).toBeVisible();
+  await expect(page.getByText("Runtime Trace Span + Ledger Drilldown")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Request OTLP export" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Model Ledger" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Tool Ledger" })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/projects/ops-command/runs");
+
+  await expect(page.getByRole("heading", { name: "Run Trace Detail" })).toBeVisible();
+  await expect(page.getByText("Runtime Trace Span + Ledger Drilldown")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Request OTLP export" })).toBeVisible();
+});
