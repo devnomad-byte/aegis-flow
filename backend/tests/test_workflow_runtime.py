@@ -19,6 +19,7 @@ from backend.app.workflow_runtime.checkpointing import InMemoryWorkflowCheckpoin
 from backend.app.workflow_runtime.compiler import compile_workflow_version
 from backend.app.workflow_runtime.runner import WorkflowRuntimeRunner
 from backend.app.workflow_runtime.schemas import (
+    WorkflowRunCancelRequest,
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
     WorkflowRunCreate,
@@ -919,6 +920,41 @@ class InMemoryWorkflowRunStore:
             ),
             None,
         )
+
+    async def list_runs(
+        self,
+        *,
+        project_id: UUID,
+        workflow_version_id: UUID,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[WorkflowRunRead]:
+        runs = [
+            run
+            for run in reversed(self.runs)
+            if run.project_id == project_id and run.workflow_version_id == workflow_version_id
+        ]
+        if status:
+            runs = [run for run in runs if run.status == status]
+        return runs[:limit]
+
+    async def cancel_pending_run(self, request: WorkflowRunCancelRequest) -> WorkflowRunRead:
+        existing = await self.get_run(project_id=request.project_id, run_id=request.run_id)
+        if existing is None:
+            raise LookupError("workflow run not found")
+        if existing.status != "pending_approval":
+            raise ValueError("workflow run cannot be cancelled unless it is pending approval")
+        updated = existing.model_copy(
+            update={
+                "status": "cancelled",
+                "outputs_summary": "cancelled by operator",
+                "pending_approval": {},
+                "updated_by": request.actor_id,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.runs.append(updated)
+        return updated
 
     async def record_checkpoint(
         self,

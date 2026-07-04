@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
@@ -14,11 +14,17 @@ import {
   type RuntimeTraceSpanFilters,
 } from "../runtime-trace/runtimeTraceApi";
 import {
+  cancelWorkflowRun,
   getWorkflowRunDetail,
+  listWorkflowRuns,
+  retryWorkflowRun,
+  resumeWorkflowRun,
   workflowRunDetailQueryKey,
+  workflowRunListQueryKey,
   type WorkflowPendingApproval,
   type WorkflowRunCheckpointRead,
   type WorkflowRunDetailResponse,
+  type WorkflowRunRead,
   type WorkflowRunStatus,
 } from "../workflow-runtime/workflowRuntimeApi";
 import {
@@ -87,6 +93,7 @@ const SAFE_ATTRIBUTE_LABELS: Record<string, string> = {
 };
 
 export function RunObservatory({ project }: RunObservatoryProps) {
+  const queryClient = useQueryClient();
   const [accessReason, setAccessReason] = useState("Need to inspect sanitized run trace");
   const [ledgerDrilldown, setLedgerDrilldown] = useState<LedgerDrilldown>(null);
   const [runScope, setRunScope] = useState<RunScope>(() => readInitialRunScope());
@@ -113,6 +120,16 @@ export function RunObservatory({ project }: RunObservatoryProps) {
     enabled: hasRunDetailScope,
     queryFn: () => getWorkflowRunDetail(project.projectId, runScope.versionId, runScope.runId),
     queryKey: workflowRunDetailQueryKey(project.projectId, runScope.versionId, runScope.runId),
+    refetchInterval: (query) =>
+      isActiveRunStatus(query.state.data?.run.status) ? 2500 : false,
+    retry: false,
+  });
+  const runListQuery = useQuery({
+    enabled: Boolean(runScope.versionId),
+    queryFn: () => listWorkflowRuns(project.projectId, runScope.versionId, { limit: 20 }),
+    queryKey: workflowRunListQueryKey(project.projectId, runScope.versionId),
+    refetchInterval: (query) =>
+      query.state.data?.runs.some((run) => isActiveRunStatus(run.status)) ? 2500 : false,
     retry: false,
   });
   const modelInvocationsQuery = useQuery({
@@ -146,6 +163,49 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         target_id: runScope.traceId,
       }),
   });
+  const resumeMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      resumeWorkflowRun(project.projectId, runScope.versionId, runScope.runId, {
+        decision: "approved",
+        payload,
+      }),
+    onSuccess: (run) => {
+      setRunScope((scope) => ({
+        ...scope,
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      }));
+      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: () =>
+      cancelWorkflowRun(project.projectId, runScope.versionId, runScope.runId, {
+        reason: "cancelled from run observatory",
+      }),
+    onSuccess: (run) => {
+      setRunScope((scope) => ({
+        ...scope,
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      }));
+      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+  });
+  const retryMutation = useMutation({
+    mutationFn: () => retryWorkflowRun(project.projectId, runScope.versionId, runScope.runId, {}),
+    onSuccess: (run) => {
+      setRunScope((scope) => ({
+        ...scope,
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      }));
+      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+  });
 
   const runtimeSpans = runtimeSpansQuery.data?.spans ?? EMPTY_RUNTIME_SPANS;
   const modelInvocations = modelInvocationsQuery.data?.invocations ?? EMPTY_MODEL_INVOCATIONS;
@@ -172,7 +232,19 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               detail={runDetailQuery.data}
               error={runDetailQuery.error}
               isLoading={runDetailQuery.isLoading}
+              isOperating={
+                resumeMutation.isPending || cancelMutation.isPending || retryMutation.isPending
+              }
+              operationError={
+                resumeMutation.error ?? cancelMutation.error ?? retryMutation.error ?? null
+              }
+              onCancel={() => cancelMutation.mutate()}
+              onResume={(payload) => resumeMutation.mutate(payload)}
+              onRetry={() => retryMutation.mutate()}
             />
+          ) : null}
+          {runScope.versionId ? (
+            <WorkflowRunHistoryPanel error={runListQuery.error} runs={runListQuery.data?.runs ?? []} />
           ) : null}
 
           <section className="global-panel run-otlp-panel">
@@ -430,12 +502,25 @@ function WorkflowRunDetailPanel({
   detail,
   error,
   isLoading,
+  isOperating,
+  onCancel,
+  onResume,
+  onRetry,
+  operationError,
 }: {
   detail: WorkflowRunDetailResponse | undefined;
   error: unknown;
   isLoading: boolean;
+  isOperating: boolean;
+  onCancel: () => void;
+  onResume: (payload: Record<string, unknown>) => void;
+  onRetry: () => void;
+  operationError: unknown;
 }) {
+  const [resumePayloadText, setResumePayloadText] = useState("{\n}");
+  const [resumePayloadError, setResumePayloadError] = useState("");
   const pendingApproval = readPendingApproval(detail?.run.pending_approval);
+  const status = detail?.run.status ?? "success";
 
   return (
     <section className="global-panel run-detail-panel" aria-label="Workflow Run Detail">
@@ -465,6 +550,30 @@ function WorkflowRunDetailPanel({
             <div className="preview-alert preview-alert-danger">{detail.run.error_message}</div>
           ) : null}
           {pendingApproval ? <PendingApprovalBanner approval={pendingApproval} /> : null}
+          <WorkflowRunActions
+            isOperating={isOperating}
+            onCancel={onCancel}
+            onPayloadChange={(value) => {
+              setResumePayloadText(value);
+              setResumePayloadError("");
+            }}
+            onResume={() => {
+              try {
+                onResume(parseJsonObject(resumePayloadText, "Resume payload JSON"));
+              } catch (parseError) {
+                setResumePayloadError((parseError as Error).message);
+              }
+            }}
+            onRetry={onRetry}
+            payloadError={resumePayloadError}
+            payloadText={resumePayloadText}
+            status={status}
+          />
+          {operationError ? (
+            <div className="preview-alert preview-alert-danger" role="alert">
+              {(operationError as Error).message}
+            </div>
+          ) : null}
           <div className="workflow-run-checkpoints">
             {detail.checkpoints.map((checkpoint) => (
               <CheckpointSummary checkpoint={checkpoint} key={checkpoint.id} />
@@ -472,6 +581,112 @@ function WorkflowRunDetailPanel({
           </div>
         </>
       ) : null}
+    </section>
+  );
+}
+
+function WorkflowRunActions({
+  isOperating,
+  onCancel,
+  onPayloadChange,
+  onResume,
+  onRetry,
+  payloadError,
+  payloadText,
+  status,
+}: {
+  isOperating: boolean;
+  onCancel: () => void;
+  onPayloadChange: (value: string) => void;
+  onResume: () => void;
+  onRetry: () => void;
+  payloadError: string;
+  payloadText: string;
+  status: WorkflowRunStatus;
+}) {
+  const canResumeOrCancel = status === "pending_approval";
+  const canRetry = isTerminalRunStatus(status);
+
+  return (
+    <div className="workflow-run-actions">
+      {canResumeOrCancel ? (
+        <label className="field-label" htmlFor="run-observatory-resume-payload">
+          Resume payload JSON
+          <textarea
+            aria-label="Resume payload JSON"
+            className="yaml-field workflow-run-inputs"
+            id="run-observatory-resume-payload"
+            onChange={(event) => onPayloadChange(event.target.value)}
+            rows={3}
+            value={payloadText}
+          />
+        </label>
+      ) : null}
+      {payloadError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {payloadError}
+        </div>
+      ) : null}
+      <div className="workflow-run-action-row">
+        <button
+          className="toolbar-button"
+          disabled={!canResumeOrCancel || isOperating}
+          onClick={onResume}
+          type="button"
+        >
+          Approve Resume
+        </button>
+        <button
+          className="toolbar-button toolbar-button-danger"
+          disabled={!canResumeOrCancel || isOperating}
+          onClick={onCancel}
+          type="button"
+        >
+          Cancel Run
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={!canRetry || isOperating}
+          onClick={onRetry}
+          type="button"
+        >
+          Retry Run
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowRunHistoryPanel({
+  error,
+  runs,
+}: {
+  error: unknown;
+  runs: WorkflowRunRead[];
+}) {
+  return (
+    <section className="global-panel run-detail-panel" aria-label="Workflow Run History">
+      <PanelHeader count={runs.length} label="RUN HISTORY" title="Run History" />
+      {error ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(error as Error).message}
+        </div>
+      ) : null}
+      {runs.length ? (
+        <div className="workflow-run-checkpoints workflow-run-history">
+          {runs.map((run) => (
+            <article className="workflow-run-checkpoint" key={run.id}>
+              <div>
+                <strong>{run.run_id}</strong>
+                <span className="telemetry">{formatTimestamp(run.updated_at)}</span>
+              </div>
+              <span className={`status-pill ${runStatusClass(run.status)}`}>{run.status}</span>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="preview-alert">No workflow runs recorded for this version.</div>
+      )}
     </section>
   );
 }
@@ -812,6 +1027,21 @@ function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function parseJsonObject(value: string, label: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${label} must be an object.`);
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Invalid ${label}: ${error.message}`);
+    }
+    throw new Error(`Invalid ${label}.`);
+  }
+}
+
 function runStatusClass(status: WorkflowRunStatus | "success" | "failed" | "pending_approval" | "skipped") {
   switch (status) {
     case "success":
@@ -825,6 +1055,30 @@ function runStatusClass(status: WorkflowRunStatus | "success" | "failed" | "pend
     default:
       return "status-warning";
   }
+}
+
+function isActiveRunStatus(status: WorkflowRunStatus | undefined) {
+  return status === "running" || status === "pending_approval";
+}
+
+function isTerminalRunStatus(status: WorkflowRunStatus) {
+  return status === "success" || status === "failed" || status === "cancelled";
+}
+
+async function invalidateWorkflowRunQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectId: string,
+  versionId: string,
+  runId: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: workflowRunDetailQueryKey(projectId, versionId, runId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: workflowRunListQueryKey(projectId, versionId),
+    }),
+  ]);
 }
 
 function formatUnixNano(value: number, fallback: string): string {

@@ -1005,6 +1005,194 @@ def test_real_workflow_runtime_resumes_human_interrupts_with_postgres_checkpoint
         asyncio.run(engine.dispose())
 
 
+def test_real_workflow_runtime_lists_cancels_retries_and_resumes_runs() -> None:
+    settings = require_real_workflow_runtime_final_acceptance()
+    project_id = uuid4()
+    actor_id = uuid4()
+    run_suffix = project_id.hex[:12]
+    cancelled_run_id = f"run-runtime-ops-cancel-{run_suffix}"
+    retry_run_id = f"run-runtime-ops-retry-{run_suffix}"
+    trace_id = f"trace-runtime-ops-cancel-{run_suffix}"
+    retry_trace_id = f"trace-runtime-ops-retry-{run_suffix}"
+    cleanup_ids = _CleanupIds(
+        project_id=project_id,
+        actor_id=actor_id,
+        run_ids=(cancelled_run_id, retry_run_id),
+    )
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def seed() -> None:
+        async with session_factory() as session:
+            role_id = uuid4()
+            member_id = uuid4()
+            session.add(
+                Account(
+                    id=actor_id,
+                    email=f"runtime-ops-{actor_id.hex[:12]}@example.com",
+                    display_name="Workflow Runtime Operations Final Acceptance",
+                )
+            )
+            session.add(
+                Project(
+                    id=project_id,
+                    slug=f"runtime-ops-{project_id.hex[:12]}",
+                    name="Workflow Runtime Operations Final Acceptance",
+                )
+            )
+            session.add(ProjectMember(id=member_id, project_id=project_id, account_id=actor_id))
+            session.add(
+                ProjectRole(
+                    id=role_id,
+                    project_id=project_id,
+                    code="runtime_ops_admin",
+                    name="Runtime Ops Admin",
+                    description="Workflow runtime operations final acceptance role",
+                )
+            )
+            session.add(ProjectMemberRole(member_id=member_id, role_id=role_id))
+            for code in {
+                "project:view",
+                "workflow:view",
+                "workflow:write",
+                "workflow:run",
+                "audit:view",
+            }:
+                permission = await _ensure_permission(session, code)
+                session.add(ProjectRolePermission(role_id=role_id, permission_id=permission.id))
+            await session.commit()
+
+    asyncio.run(seed())
+    try:
+        app = create_app(settings)
+
+        async def override_async_session() -> AsyncIterator[AsyncSession]:
+            async with session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_current_account] = lambda: AccountPrincipal(
+            account_id=actor_id,
+            status="active",
+        )
+        app.dependency_overrides[get_async_session] = override_async_session
+        with TestClient(app) as client:
+            import_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/import-yaml",
+                json={"yaml_text": workflow_human_resume_yaml(project_id)},
+            )
+            assert import_response.status_code == 201
+            draft_id = import_response.json()["id"]
+
+            publish_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/drafts/{draft_id}/publish",
+                json={"release_note": "workflow runtime operations final acceptance"},
+            )
+            assert publish_response.status_code == 201
+            version_id = publish_response.json()["id"]
+
+            run_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs",
+                json={
+                    "inputs": {
+                        "change_id": "CHG-OPS-058",
+                        "api_key": "raw-secret-token",
+                    },
+                    "run_ref": cancelled_run_id,
+                    "trace_id": trace_id,
+                },
+            )
+            assert run_response.status_code == 201
+            pending_body = run_response.json()
+            assert pending_body["status"] == "pending_approval"
+            assert pending_body["pending_approval"]["node_id"] == "approval_1"
+
+            list_pending_response = client.get(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs",
+                params={"status": "pending_approval", "limit": 10},
+            )
+            assert list_pending_response.status_code == 200
+            pending_runs = list_pending_response.json()["runs"]
+            assert [run["run_id"] for run in pending_runs] == [cancelled_run_id]
+            assert "raw-secret-token" not in str(list_pending_response.json())
+
+            cancel_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{cancelled_run_id}/cancel",
+                json={"reason": "operator cancelled token=raw-secret-token"},
+            )
+            assert cancel_response.status_code == 200
+            cancelled_body = cancel_response.json()
+            assert cancelled_body["status"] == "cancelled"
+            assert cancelled_body["pending_approval"] == {}
+            assert "raw-secret-token" not in str(cancelled_body)
+
+            cancelled_detail_response = client.get(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{cancelled_run_id}"
+            )
+            assert cancelled_detail_response.status_code == 200
+            assert cancelled_detail_response.json()["run"]["status"] == "cancelled"
+            assert cancelled_detail_response.json()["run"]["pending_approval"] == {}
+            assert "raw-secret-token" not in str(cancelled_detail_response.json())
+
+            retry_response = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{cancelled_run_id}/retry",
+                json={"run_ref": retry_run_id, "trace_id": retry_trace_id},
+            )
+            assert retry_response.status_code == 201
+            retry_pending = retry_response.json()
+            assert retry_pending["run_id"] == retry_run_id
+            assert retry_pending["trace_id"] == retry_trace_id
+            assert retry_pending["status"] == "pending_approval"
+
+            first_resume = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{retry_run_id}/resume",
+                json={"payload": {"reason": "retry first approval"}},
+            )
+            assert first_resume.status_code == 200
+            assert first_resume.json()["status"] == "pending_approval"
+            assert first_resume.json()["pending_approval"]["node_id"] == "approval_2"
+
+            second_resume = client.post(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs/{retry_run_id}/resume",
+                json={"payload": {"reason": "retry second approval"}},
+            )
+            assert second_resume.status_code == 200
+            completed = second_resume.json()
+            assert completed["status"] == "success"
+            assert completed["outputs"]["nodes"]["approval_1"]["payload"] == {
+                "reason": "retry first approval"
+            }
+            assert completed["outputs"]["nodes"]["approval_2"]["payload"] == {
+                "reason": "retry second approval"
+            }
+
+            list_all_response = client.get(
+                f"/api/v1/projects/{project_id}/workflows/versions/{version_id}/runs",
+                params={"limit": 10},
+            )
+            assert list_all_response.status_code == 200
+            all_run_ids = {run["run_id"] for run in list_all_response.json()["runs"]}
+            assert {cancelled_run_id, retry_run_id} <= all_run_ids
+            assert "raw-secret-token" not in str(list_all_response.json())
+
+            audit_response = client.get(
+                f"/api/v1/projects/{project_id}/audit/events",
+                params={"limit": 50},
+            )
+            assert audit_response.status_code == 200
+            audit_payload = audit_response.json()
+            audit_actions = {event["action"] for event in audit_payload["events"]}
+            assert {
+                "workflow.run.list",
+                "workflow.run.cancel",
+                "workflow.run.retry",
+                "workflow.run.resume",
+            } <= audit_actions
+            assert "raw-secret-token" not in str(audit_payload)
+    finally:
+        asyncio.run(_cleanup(session_factory, cleanup_ids))
+        asyncio.run(engine.dispose())
+
+
 @pytest.mark.real_docker
 def test_real_workflow_runtime_runs_shell_node_through_docker_sandbox() -> None:
     settings = require_real_workflow_runtime_final_acceptance()

@@ -92,6 +92,11 @@ export type WorkflowRunDetailResponse = {
   checkpoints: WorkflowRunCheckpointRead[];
 };
 
+export type WorkflowRunListResponse = {
+  runs: WorkflowRunRead[];
+  count: number;
+};
+
 export type WorkflowRunApiRequest = {
   inputs?: Record<string, unknown>;
   run_ref?: string;
@@ -102,6 +107,15 @@ export type WorkflowRunResumeApiRequest = {
   decision: WorkflowApprovalDecision;
   payload?: Record<string, unknown>;
   approval_task_id?: string | null;
+};
+
+export type WorkflowRunCancelApiRequest = {
+  reason?: string;
+};
+
+export type WorkflowRunRetryApiRequest = {
+  run_ref?: string;
+  trace_id?: string;
 };
 
 export const workflowRunDetailQueryKey = (
@@ -117,6 +131,22 @@ export const workflowRunDetailQueryKey = (
     versionId,
     "runs",
     runId,
+  ] as const;
+
+export const workflowRunListQueryKey = (
+  projectId: string,
+  versionId: string,
+  status?: WorkflowRunStatus,
+) =>
+  [
+    "project",
+    projectId,
+    "workflows",
+    "versions",
+    versionId,
+    "runs",
+    "list",
+    status ?? "all",
   ] as const;
 
 export async function runWorkflowVersion(
@@ -136,6 +166,27 @@ export async function runWorkflowVersion(
   );
 }
 
+export async function listWorkflowRuns(
+  projectId: string,
+  versionId: string,
+  filters: { limit?: number; status?: WorkflowRunStatus } = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<WorkflowRunListResponse> {
+  const params = new URLSearchParams();
+  if (typeof filters.limit === "number") {
+    params.set("limit", String(filters.limit));
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  const query = params.toString();
+  return requestJson<WorkflowRunListResponse>(
+    `${buildRunUrl(projectId, versionId)}${query ? `?${query}` : ""}`,
+    undefined,
+    fetcher,
+  );
+}
+
 export async function getWorkflowRunDetail(
   projectId: string,
   versionId: string,
@@ -145,6 +196,42 @@ export async function getWorkflowRunDetail(
   return requestJson<WorkflowRunDetailResponse>(
     `${buildRunUrl(projectId, versionId)}/${encodeURIComponent(runId)}`,
     undefined,
+    fetcher,
+  );
+}
+
+export async function cancelWorkflowRun(
+  projectId: string,
+  versionId: string,
+  runId: string,
+  request: WorkflowRunCancelApiRequest = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<WorkflowRunRead> {
+  return requestJson<WorkflowRunRead>(
+    `${buildRunUrl(projectId, versionId)}/${encodeURIComponent(runId)}/cancel`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function retryWorkflowRun(
+  projectId: string,
+  versionId: string,
+  runId: string,
+  request: WorkflowRunRetryApiRequest = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<WorkflowRunResult> {
+  return requestJson<WorkflowRunResult>(
+    `${buildRunUrl(projectId, versionId)}/${encodeURIComponent(runId)}/retry`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
     fetcher,
   );
 }

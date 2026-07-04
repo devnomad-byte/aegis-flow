@@ -29,13 +29,19 @@ import {
 
 import { SAMPLE_CATALOG, SAMPLE_WORKFLOW, SAMPLE_WORKFLOW_YAML } from "./sampleWorkflow";
 import {
+  cancelWorkflowRun,
   getWorkflowRunDetail,
+  listWorkflowRuns,
+  retryWorkflowRun,
+  resumeWorkflowRun,
   runWorkflowVersion,
   workflowRunDetailQueryKey,
+  workflowRunListQueryKey,
   type WorkflowNodeStatus,
   type WorkflowPendingApproval,
   type WorkflowRunCheckpointRead,
   type WorkflowRunDetailResponse,
+  type WorkflowRunRead,
   type WorkflowRunResult,
   type WorkflowRunStatus,
 } from "../workflow-runtime/workflowRuntimeApi";
@@ -486,7 +492,75 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
           latestRunTarget.runId,
         )
       : ["project", project.projectId, "workflows", "runs", "none"],
+    refetchInterval: (query) => {
+      const status = query.state.data?.run.status ?? runMutation.data?.status;
+      return isActiveRunStatus(status) ? 2500 : false;
+    },
     retry: false,
+  });
+  const runListQuery = useQuery({
+    enabled: Boolean(selectedVersion?.id),
+    queryFn: () => listWorkflowRuns(project.projectId, selectedVersion?.id ?? "", { limit: 20 }),
+    queryKey: selectedVersion?.id
+      ? workflowRunListQueryKey(project.projectId, selectedVersion.id)
+      : ["project", project.projectId, "workflows", "versions", "none", "runs", "list"],
+    refetchInterval: (query) =>
+      query.state.data?.runs.some((run) => isActiveRunStatus(run.status)) ? 2500 : false,
+    retry: false,
+  });
+  const resumeMutation = useMutation({
+    mutationFn: ({
+      payload,
+      runId,
+      versionId,
+    }: {
+      payload: Record<string, unknown>;
+      runId: string;
+      versionId: string;
+    }) => resumeWorkflowRun(project.projectId, versionId, runId, { decision: "approved", payload }),
+    onSuccess: (run) => {
+      setLatestRunTarget({
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      });
+      void invalidateRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+    onError: (error) => {
+      setRunInputsError(getErrorMessage(error));
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: ({ runId, versionId }: { runId: string; versionId: string }) =>
+      cancelWorkflowRun(project.projectId, versionId, runId, {
+        reason: "cancelled from workflow studio",
+      }),
+    onSuccess: (run) => {
+      setLatestRunTarget({
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      });
+      void invalidateRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+    onError: (error) => {
+      setRunInputsError(getErrorMessage(error));
+    },
+  });
+  const retryMutation = useMutation({
+    mutationFn: ({ runId, versionId }: { runId: string; versionId: string }) =>
+      retryWorkflowRun(project.projectId, versionId, runId, {}),
+    onSuccess: (run) => {
+      setLatestRunTarget({
+        runId: run.run_id,
+        traceId: run.trace_id,
+        versionId: run.workflow_version_id,
+      });
+      void invalidateRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+    },
+    onError: (error) => {
+      setRunInputsError(getErrorMessage(error));
+    },
   });
 
   const handlePreviewImport = useCallback(() => {
@@ -830,13 +904,23 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
           inputsText={runInputsText}
           isDetailLoading={runDetailQuery.isLoading}
           isRunning={runMutation.isPending}
+          isOperating={
+            resumeMutation.isPending || cancelMutation.isPending || retryMutation.isPending
+          }
           latestRun={runMutation.data}
           onInputsTextChange={(value) => {
             setRunInputsText(value);
             setRunInputsError("");
           }}
+          onCancel={(versionId, runId) => cancelMutation.mutate({ runId, versionId })}
           onRun={() => runMutation.mutate()}
+          onRetry={(versionId, runId) => retryMutation.mutate({ runId, versionId })}
+          onResume={(versionId, runId, payload) =>
+            resumeMutation.mutate({ payload, runId, versionId })
+          }
           projectId={project.projectId}
+          runs={runListQuery.data?.runs ?? []}
+          runsError={runListQuery.error}
           selectedVersion={selectedVersion}
         />
         <PreviewPanel error={previewError} summary={previewSummary} />
@@ -1400,11 +1484,17 @@ function WorkflowRunPanel({
   inputsError,
   inputsText,
   isDetailLoading,
+  isOperating,
   isRunning,
   latestRun,
+  onCancel,
   onInputsTextChange,
+  onRetry,
   onRun,
+  onResume,
   projectId,
+  runs,
+  runsError,
   selectedVersion,
 }: {
   detail: WorkflowRunDetailResponse | undefined;
@@ -1412,13 +1502,21 @@ function WorkflowRunPanel({
   inputsError: string;
   inputsText: string;
   isDetailLoading: boolean;
+  isOperating: boolean;
   isRunning: boolean;
   latestRun: WorkflowRunResult | undefined;
+  onCancel: (versionId: string, runId: string) => void;
   onInputsTextChange: (value: string) => void;
+  onRetry: (versionId: string, runId: string) => void;
   onRun: () => void;
+  onResume: (versionId: string, runId: string, payload: Record<string, unknown>) => void;
   projectId: string;
+  runs: WorkflowRunRead[];
+  runsError: Error | null;
   selectedVersion: WorkflowVersionRead | null;
 }) {
+  const [resumePayloadText, setResumePayloadText] = useState("{\n}");
+  const [resumePayloadError, setResumePayloadError] = useState("");
   const canRun = selectedVersion?.status === "published";
   const status = detail?.run.status ?? latestRun?.status ?? "idle";
   const runId = detail?.run.run_id ?? latestRun?.run_id ?? "";
@@ -1478,6 +1576,27 @@ function WorkflowRunPanel({
           </div>
           <span className={`status-pill ${workflowRunStatusClass(status)}`}>{status}</span>
           {pendingApproval ? <PendingApprovalBanner approval={pendingApproval} /> : null}
+          <WorkflowRunActions
+            isOperating={isOperating}
+            onCancel={() => onCancel(versionId, runId)}
+            onPayloadChange={(value) => {
+              setResumePayloadText(value);
+              setResumePayloadError("");
+            }}
+            onResume={() => {
+              try {
+                onResume(versionId, runId, parseJsonObject(resumePayloadText, "Resume payload JSON"));
+              } catch (error) {
+                setResumePayloadError(getErrorMessage(error));
+              }
+            }}
+            onRetry={() => onRetry(versionId, runId)}
+            payloadError={resumePayloadError}
+            payloadText={resumePayloadText}
+            runId={runId}
+            status={status}
+            versionId={versionId}
+          />
           {traceUrl ? (
             <a className="toolbar-button workflow-run-link" href={traceUrl}>
               Open Run Observatory
@@ -1501,7 +1620,111 @@ function WorkflowRunPanel({
       ) : latestRun ? (
         <div className="preview-alert">Checkpoint summary will appear after run detail is recorded.</div>
       ) : null}
+      <RunHistory runs={runs} runsError={runsError} />
     </section>
+  );
+}
+
+function WorkflowRunActions({
+  isOperating,
+  onCancel,
+  onPayloadChange,
+  onResume,
+  onRetry,
+  payloadError,
+  payloadText,
+  runId,
+  status,
+  versionId,
+}: {
+  isOperating: boolean;
+  onCancel: () => void;
+  onPayloadChange: (value: string) => void;
+  onResume: () => void;
+  onRetry: () => void;
+  payloadError: string;
+  payloadText: string;
+  runId: string;
+  status: WorkflowRunStatus | "idle";
+  versionId: string;
+}) {
+  const canOperate = Boolean(runId && versionId);
+  const canResumeOrCancel = canOperate && status === "pending_approval";
+  const canRetry = canOperate && isTerminalRunStatus(status);
+
+  return (
+    <div className="workflow-run-actions">
+      {canResumeOrCancel ? (
+        <label className="field-label" htmlFor={`resume-payload-${runId}`}>
+          Resume payload JSON
+          <textarea
+            aria-label="Resume payload JSON"
+            className="yaml-field workflow-run-inputs"
+            id={`resume-payload-${runId}`}
+            onChange={(event) => onPayloadChange(event.target.value)}
+            rows={3}
+            value={payloadText}
+          />
+        </label>
+      ) : null}
+      {payloadError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {payloadError}
+        </div>
+      ) : null}
+      <div className="workflow-run-action-row">
+        <button
+          className="toolbar-button"
+          disabled={!canResumeOrCancel || isOperating}
+          onClick={onResume}
+          type="button"
+        >
+          Approve Resume
+        </button>
+        <button
+          className="toolbar-button toolbar-button-danger"
+          disabled={!canResumeOrCancel || isOperating}
+          onClick={onCancel}
+          type="button"
+        >
+          Cancel Run
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={!canRetry || isOperating}
+          onClick={onRetry}
+          type="button"
+        >
+          Retry Run
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RunHistory({ runs, runsError }: { runs: WorkflowRunRead[]; runsError: Error | null }) {
+  return (
+    <div className="workflow-run-checkpoints workflow-run-history">
+      <strong>Run History</strong>
+      {runsError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {getErrorMessage(runsError)}
+        </div>
+      ) : null}
+      {runs.length ? (
+        runs.map((run) => (
+          <article className="workflow-run-checkpoint" key={run.id}>
+            <div>
+              <strong>{run.run_id}</strong>
+              <span className="telemetry">{formatDateTime(run.updated_at)}</span>
+            </div>
+            <span className={`status-pill ${workflowRunStatusClass(run.status)}`}>{run.status}</span>
+          </article>
+        ))
+      ) : (
+        <div className="preview-alert">No workflow runs recorded for this version.</div>
+      )}
+    </div>
   );
 }
 
@@ -1656,17 +1879,21 @@ function getErrorMessage(error: unknown) {
 }
 
 function parseRunInputs(value: string): Record<string, unknown> {
+  return parseJsonObject(value, "Run inputs JSON");
+}
+
+function parseJsonObject(value: string, label: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(value || "{}") as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Run inputs JSON must be an object.");
+      throw new Error(`${label} must be an object.`);
     }
     return parsed as Record<string, unknown>;
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Invalid run inputs JSON: ${error.message}`);
+      throw new Error(`Invalid ${label}: ${error.message}`);
     }
-    throw new Error("Invalid run inputs JSON.");
+    throw new Error(`Invalid ${label}.`);
   }
 }
 
@@ -1703,6 +1930,30 @@ function workflowRunStatusClass(status: WorkflowRunStatus | WorkflowNodeStatus |
     default:
       return "status-warning";
   }
+}
+
+function isActiveRunStatus(status: WorkflowRunStatus | undefined) {
+  return status === "running" || status === "pending_approval";
+}
+
+function isTerminalRunStatus(status: WorkflowRunStatus | "idle") {
+  return status === "success" || status === "failed" || status === "cancelled";
+}
+
+async function invalidateRunQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectId: string,
+  versionId: string,
+  runId: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: workflowRunDetailQueryKey(projectId, versionId, runId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: workflowRunListQueryKey(projectId, versionId),
+    }),
+  ]);
 }
 
 function buildRunObservatoryUrl(

@@ -31,6 +31,13 @@ class WorkflowRunApiRequest(BaseModel):
     trace_id: str = Field(default="", max_length=160)
 
 
+class WorkflowRunListQuery(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: WorkflowRunStatus | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 class WorkflowRunResumeRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -49,6 +56,28 @@ class WorkflowRunResumeApiRequest(BaseModel):
     decision: WorkflowApprovalDecision = "approved"
     payload: dict[str, Any] = Field(default_factory=dict)
     approval_task_id: UUID | None = None
+
+
+class WorkflowRunCancelRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    run_id: str = Field(min_length=1, max_length=160)
+    actor_id: UUID
+    reason: str = Field(default="", max_length=500)
+
+
+class WorkflowRunCancelApiRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field(default="", max_length=500)
+
+
+class WorkflowRunRetryApiRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_ref: str = Field(default="", max_length=120)
+    trace_id: str = Field(default="", max_length=160)
 
 
 class WorkflowPendingApproval(BaseModel):
@@ -169,3 +198,10 @@ class WorkflowRunDetailResponse(BaseModel):
 
     run: WorkflowRunRead
     checkpoints: list[WorkflowRunCheckpointRead] = Field(default_factory=list)
+
+
+class WorkflowRunListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    runs: list[WorkflowRunRead] = Field(default_factory=list)
+    count: int

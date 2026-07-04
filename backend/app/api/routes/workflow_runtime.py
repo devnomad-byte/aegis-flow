@@ -1,6 +1,7 @@
+from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.app.api.dependencies import (
     get_audit_event_store,
@@ -13,14 +14,21 @@ from backend.app.api.dependencies import (
 from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
+from backend.app.security.redaction import redact_sensitive_text
 from backend.app.workflow_runtime.runner import WorkflowRuntimeError, WorkflowRuntimeRunner
 from backend.app.workflow_runtime.schemas import (
     WorkflowRunApiRequest,
+    WorkflowRunCancelApiRequest,
+    WorkflowRunCancelRequest,
     WorkflowRunDetailResponse,
+    WorkflowRunListResponse,
+    WorkflowRunRead,
     WorkflowRunRequest,
     WorkflowRunResult,
     WorkflowRunResumeApiRequest,
     WorkflowRunResumeRequest,
+    WorkflowRunRetryApiRequest,
+    WorkflowRunStatus,
 )
 from backend.app.workflow_runtime.store import WorkflowRunStore
 from backend.app.workflows.store import WorkflowVersionStore
@@ -104,6 +112,53 @@ async def run_workflow_version(
     return result
 
 
+@router.get("", response_model=WorkflowRunListResponse)
+async def list_workflow_runs(
+    project_id: UUID,
+    version_id: UUID,
+    status_filter: Annotated[WorkflowRunStatus | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    run_store: WorkflowRunStore = RunStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowRunListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:run",
+    )
+    version = await version_store.get_project_version(project_id, version_id)
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found"
+        )
+    runs = await run_store.list_runs(
+        project_id=project_id,
+        workflow_version_id=version.id,
+        status=status_filter,
+        limit=limit,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.run.list",
+        target_type="workflow_version",
+        target_id=str(version.id),
+        result="success",
+        risk_level="low",
+        metadata={
+            "workflow_ref": f"{version.workflow_id}:{version.version}",
+            "count": len(runs),
+            "status": status_filter or "",
+            "limit": limit,
+        },
+    )
+    return WorkflowRunListResponse(runs=runs, count=len(runs))
+
+
 @router.get("/{run_id}", response_model=WorkflowRunDetailResponse)
 async def get_workflow_run_detail(
     project_id: UUID,
@@ -149,6 +204,147 @@ async def get_workflow_run_detail(
         },
     )
     return WorkflowRunDetailResponse(run=run, checkpoints=checkpoints)
+
+
+@router.post("/{run_id}/cancel", response_model=WorkflowRunRead)
+async def cancel_workflow_run(
+    project_id: UUID,
+    version_id: UUID,
+    run_id: str,
+    request: WorkflowRunCancelApiRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    run_store: WorkflowRunStore = RunStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> WorkflowRunRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:run",
+    )
+    version = await version_store.get_project_version(project_id, version_id)
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found"
+        )
+    run = await run_store.get_run(project_id=project_id, run_id=run_id)
+    if run is None or run.workflow_version_id != version.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found")
+    try:
+        updated_run = await run_store.cancel_pending_run(
+            WorkflowRunCancelRequest(
+                project_id=project_id,
+                run_id=run_id,
+                actor_id=current_account.account_id,
+                reason=request.reason,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.run.cancel",
+        target_type="workflow_run",
+        target_id=updated_run.run_id,
+        result="success",
+        risk_level="medium",
+        metadata={
+            "workflow_ref": updated_run.workflow_ref,
+            "run_id": updated_run.run_id,
+            "trace_id": updated_run.trace_id,
+            "status": updated_run.status,
+            "reason_summary": _safe_reason_summary(request.reason),
+        },
+    )
+    return updated_run
+
+
+@router.post(
+    "/{run_id}/retry",
+    response_model=WorkflowRunResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retry_workflow_run(
+    project_id: UUID,
+    version_id: UUID,
+    run_id: str,
+    request: WorkflowRunRetryApiRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    version_store: WorkflowVersionStore = VersionStore,
+    run_store: WorkflowRunStore = RunStore,
+    audit_store: AuditEventStore = AuditStore,
+    runtime_runner: WorkflowRuntimeRunner = RuntimeRunner,
+) -> WorkflowRunResult:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "workflow:run",
+    )
+    version = await version_store.get_project_version(project_id, version_id)
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workflow version not found"
+        )
+    if version.status != "published" or version.definition.workflow.status != "published":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workflow version is not published",
+        )
+
+    source_run = await run_store.get_run(project_id=project_id, run_id=run_id)
+    if source_run is None or source_run.workflow_version_id != version.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found")
+    if source_run.status not in {"success", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="workflow run must be terminal before retry",
+        )
+    checkpoints = await run_store.list_checkpoints(project_id=project_id, run_id=run_id)
+    retry_inputs = _retry_inputs_from_checkpoints(checkpoints)
+
+    result = await runtime_runner.run(
+        WorkflowRunRequest(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            version=version,
+            inputs=retry_inputs,
+            run_id=request.run_ref,
+            trace_id=request.trace_id,
+        )
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="workflow.run.retry",
+        target_type="workflow_run",
+        target_id=source_run.run_id,
+        result="success" if result.status in {"success", "pending_approval"} else "failure",
+        risk_level="medium",
+        metadata={
+            "workflow_ref": result.workflow_ref,
+            "source_run_id": source_run.run_id,
+            "new_run_id": result.run_id,
+            "trace_id": result.trace_id,
+            "status": result.status,
+        },
+    )
+    if result.status == "failed":
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "run_id": result.run_id,
+                "trace_id": result.trace_id,
+                "error_type": result.error_type,
+                "error_message": result.error_message,
+            },
+        )
+    return result
 
 
 @router.post("/{run_id}/resume", response_model=WorkflowRunResult)
@@ -251,3 +447,18 @@ def _require_project_permission(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
+
+
+def _retry_inputs_from_checkpoints(checkpoints: list[Any]) -> dict[str, Any]:
+    for checkpoint in checkpoints:
+        state = checkpoint.state
+        if isinstance(state, dict) and isinstance(state.get("inputs"), dict):
+            return dict(cast(dict[str, Any], state["inputs"]))
+    return {}
+
+
+def _safe_reason_summary(reason: str) -> str:
+    stripped = redact_sensitive_text(reason.strip())
+    if len(stripped) <= 120:
+        return stripped
+    return f"{stripped[:117]}..."

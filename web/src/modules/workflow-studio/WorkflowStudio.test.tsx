@@ -478,6 +478,40 @@ edges:
       ) {
         return jsonResponse(workflowRunDetailFixture());
       }
+      if (
+        url.endsWith(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs?limit=20",
+        ) &&
+        !init
+      ) {
+        return jsonResponse({
+          count: 1,
+          runs: [workflowRunDetailFixture().run],
+        });
+      }
+      if (
+        url.endsWith(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/resume",
+        ) &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({
+          id: "run-row-1",
+          project_id: "ops-command",
+          workflow_version_id: "44444444-4444-4444-8444-444444444444",
+          workflow_ref: "ops_incident_triage:1",
+          run_id: "run-ui",
+          trace_id: "trace-ui",
+          status: "success",
+          outputs: { approved: true },
+          node_results: [],
+          pending_approval: null,
+          error_type: "",
+          error_message: "",
+          created_at: "2026-07-04T00:00:00Z",
+          updated_at: "2026-07-04T00:00:02Z",
+        });
+      }
 
       return jsonResponse({ detail: `Unexpected request ${url}` }, { status: 500 });
     });
@@ -496,6 +530,19 @@ edges:
     expect((await screen.findAllByText("pending_approval")).length).toBeGreaterThan(0);
     expect(screen.getByText("Human approval required")).toBeInTheDocument();
     expect(screen.getAllByText("human_approval_1").length).toBeGreaterThan(0);
+    expect(await screen.findByText("Run History")).toBeInTheDocument();
+    expect(screen.getAllByText("run-ui").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Resume payload JSON")).toHaveValue("{\n}");
+    await user.click(screen.getByRole("button", { name: "Approve Resume" }));
+    expect(
+      globalThis.fetch,
+    ).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/resume",
+      expect.objectContaining({
+        body: JSON.stringify({ decision: "approved", payload: {} }),
+        method: "POST",
+      }),
+    );
     expect(screen.getByRole("link", { name: "Open Run Observatory" })).toHaveAttribute(
       "href",
       "/projects/ops-command/runs?run_id=run-ui&trace_id=trace-ui&version_id=44444444-4444-4444-8444-444444444444",

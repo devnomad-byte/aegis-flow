@@ -310,6 +310,110 @@ describe("RunObservatory", () => {
     );
   });
 
+  it("lists run history and operates on pending workflow runs from the selected scope", async () => {
+    const user = userEvent.setup();
+    window.history.pushState(
+      {},
+      "",
+      "/projects/ops-command/runs?run_id=run-ui&trace_id=trace-ui&version_id=44444444-4444-4444-8444-444444444444",
+    );
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (
+        url.endsWith(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui",
+        ) &&
+        !init
+      ) {
+        return new Response(JSON.stringify(workflowRunDetailFixture()), { status: 200 });
+      }
+      if (
+        url.endsWith(
+          "/workflows/versions/44444444-4444-4444-8444-444444444444/runs?limit=20",
+        ) &&
+        !init
+      ) {
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            runs: [
+              workflowRunDetailFixture().run,
+              {
+                ...workflowRunDetailFixture().run,
+                id: "run-row-failed",
+                run_id: "run-failed",
+                status: "failed",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/runtime-traces/spans")) {
+        return new Response(JSON.stringify({ spans: [], count: 0 }), { status: 200 });
+      }
+      if (url.endsWith("/runs/run-ui/resume") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: "run-row-1",
+            project_id: "ops-command",
+            workflow_version_id: "44444444-4444-4444-8444-444444444444",
+            workflow_ref: "ops_incident_triage:1",
+            run_id: "run-ui",
+            trace_id: "trace-ui",
+            status: "success",
+            outputs: { approved: true },
+            node_results: [],
+            pending_approval: null,
+            error_type: "",
+            error_message: "",
+            created_at: "2026-07-04T00:00:00Z",
+            updated_at: "2026-07-04T00:00:02Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/runs/run-ui/cancel") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({ ...workflowRunDetailFixture().run, status: "cancelled" }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ detail: `unexpected request ${url}` }), { status: 500 });
+    });
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+
+    render(
+      <AppProviders runtime={runtime}>
+        <RunObservatory project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    expect(await screen.findByText("Run History")).toBeInTheDocument();
+    expect(screen.getAllByText("run-ui").length).toBeGreaterThan(0);
+    expect(await screen.findByText("run-failed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Resume payload JSON")).toHaveValue("{\n}");
+
+    await user.click(screen.getByRole("button", { name: "Approve Resume" }));
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/resume",
+      expect.objectContaining({
+        body: JSON.stringify({ decision: "approved", payload: {} }),
+        method: "POST",
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/cancel",
+      expect.objectContaining({
+        body: JSON.stringify({ reason: "cancelled from run observatory" }),
+        method: "POST",
+      }),
+    );
+    expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
+  });
+
   it("renders forbidden runtime span errors without falling back to ledger data", async () => {
     window.history.pushState(
       {},

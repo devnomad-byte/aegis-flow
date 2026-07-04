@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  cancelWorkflowRun,
   getWorkflowRunDetail,
+  listWorkflowRuns,
+  retryWorkflowRun,
   resumeWorkflowRun,
   runWorkflowVersion,
   workflowRunDetailQueryKey,
+  workflowRunListQueryKey,
 } from "./workflowRuntimeApi";
 
 describe("workflowRuntimeApi", () => {
@@ -17,6 +21,19 @@ describe("workflowRuntimeApi", () => {
       "version-1",
       "runs",
       "run-1",
+    ]);
+  });
+
+  it("builds stable run list query keys", () => {
+    expect(workflowRunListQueryKey("ops-command", "version-1", "pending_approval")).toEqual([
+      "project",
+      "ops-command",
+      "workflows",
+      "versions",
+      "version-1",
+      "runs",
+      "list",
+      "pending_approval",
     ]);
   });
 
@@ -65,6 +82,25 @@ describe("workflowRuntimeApi", () => {
     expect(response.checkpoints[0].node_id).toBe("human_approval_1");
   });
 
+  it("lists workflow runs for a version", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ count: 1, runs: [workflowRunDetail().run] }), { status: 200 }),
+    );
+
+    const response = await listWorkflowRuns(
+      "ops-command",
+      "version-1",
+      { limit: 10, status: "pending_approval" },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs?limit=10&status=pending_approval",
+    );
+    expect(response.count).toBe(1);
+    expect(response.runs[0].run_id).toBe("run-1");
+  });
+
   it("resumes a pending workflow run", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify(workflowRunResult({ status: "success" })), { status: 200 }),
@@ -87,6 +123,56 @@ describe("workflowRuntimeApi", () => {
       },
     );
     expect(response.status).toBe("success");
+  });
+
+  it("cancels a pending workflow run", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ...workflowRunDetail().run, status: "cancelled" }), {
+        status: 200,
+      }),
+    );
+
+    const response = await cancelWorkflowRun(
+      "ops-command",
+      "version-1",
+      "run-1",
+      { reason: "operator stopped approval" },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1/cancel",
+      {
+        body: JSON.stringify({ reason: "operator stopped approval" }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(response.status).toBe("cancelled");
+  });
+
+  it("retries a terminal workflow run", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(workflowRunResult({ run_id: "run-retry" })), { status: 201 }),
+    );
+
+    const response = await retryWorkflowRun(
+      "ops-command",
+      "version-1",
+      "run-1",
+      { run_ref: "run-retry", trace_id: "trace-retry" },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1/retry",
+      {
+        body: JSON.stringify({ run_ref: "run-retry", trace_id: "trace-retry" }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(response.run_id).toBe("run-retry");
   });
 
   it("throws useful backend details for failed run requests", async () => {

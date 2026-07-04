@@ -2,6 +2,7 @@ from typing import Protocol
 from uuid import UUID
 
 from backend.app.workflow_runtime.schemas import (
+    WorkflowRunCancelRequest,
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
     WorkflowRunCreate,
@@ -23,6 +24,19 @@ class WorkflowRunStore(Protocol):
         project_id: UUID,
         run_id: str,
     ) -> WorkflowRunRead | None:
+        raise NotImplementedError
+
+    async def list_runs(
+        self,
+        *,
+        project_id: UUID,
+        workflow_version_id: UUID,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[WorkflowRunRead]:
+        raise NotImplementedError
+
+    async def cancel_pending_run(self, request: WorkflowRunCancelRequest) -> WorkflowRunRead:
         raise NotImplementedError
 
     async def record_checkpoint(

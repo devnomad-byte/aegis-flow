@@ -4,8 +4,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.security.redaction import redact_sensitive_text
 from backend.app.workflow_runtime.models import WorkflowRun, WorkflowRunCheckpoint
 from backend.app.workflow_runtime.schemas import (
+    WorkflowRunCancelRequest,
     WorkflowRunCheckpointCreate,
     WorkflowRunCheckpointRead,
     WorkflowRunCreate,
@@ -19,13 +21,14 @@ class SqlAlchemyWorkflowRunStore:
         self._session = session
 
     async def create_run(self, request: WorkflowRunCreate) -> WorkflowRunRead:
-        run = WorkflowRun(
-            **request.model_copy(
-                update={
-                    "pending_approval": _sanitize_runtime_json(request.pending_approval),
-                }
-            ).model_dump()
+        sanitized_request = request.model_copy(
+            update={
+                "inputs_summary": redact_sensitive_text(request.inputs_summary),
+                "outputs_summary": redact_sensitive_text(request.outputs_summary),
+                "pending_approval": _sanitize_runtime_json(request.pending_approval),
+            }
         )
+        run = WorkflowRun(**sanitized_request.model_dump())
         self._session.add(run)
         await self._session.commit()
         await self._session.refresh(run)
@@ -34,9 +37,9 @@ class SqlAlchemyWorkflowRunStore:
     async def update_run(self, request: WorkflowRunUpdate) -> WorkflowRunRead:
         run = await self._load_run(project_id=request.project_id, run_id=request.run_id)
         run.status = request.status
-        run.outputs_summary = request.outputs_summary
-        run.error_type = request.error_type
-        run.error_message = request.error_message
+        run.outputs_summary = redact_sensitive_text(request.outputs_summary)
+        run.error_type = redact_sensitive_text(request.error_type)
+        run.error_message = redact_sensitive_text(request.error_message)
         run.pending_approval = _sanitize_runtime_json(request.pending_approval)
         run.updated_by = request.actor_id
         await self._session.commit()
@@ -58,6 +61,41 @@ class SqlAlchemyWorkflowRunStore:
         run = result.scalar_one_or_none()
         if run is None:
             return None
+        return WorkflowRunRead.model_validate(run)
+
+    async def list_runs(
+        self,
+        *,
+        project_id: UUID,
+        workflow_version_id: UUID,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[WorkflowRunRead]:
+        statement = select(WorkflowRun).where(
+            WorkflowRun.project_id == project_id,
+            WorkflowRun.workflow_version_id == workflow_version_id,
+        )
+        if status:
+            statement = statement.where(WorkflowRun.status == status)
+        result = await self._session.scalars(
+            statement.order_by(WorkflowRun.updated_at.desc(), WorkflowRun.created_at.desc()).limit(
+                limit
+            )
+        )
+        return [WorkflowRunRead.model_validate(run) for run in result.all()]
+
+    async def cancel_pending_run(self, request: WorkflowRunCancelRequest) -> WorkflowRunRead:
+        run = await self._load_run(project_id=request.project_id, run_id=request.run_id)
+        if run.status != "pending_approval":
+            raise ValueError("workflow run cannot be cancelled unless it is pending approval")
+        run.status = "cancelled"
+        run.outputs_summary = "cancelled by operator"
+        run.error_type = ""
+        run.error_message = ""
+        run.pending_approval = {}
+        run.updated_by = request.actor_id
+        await self._session.commit()
+        await self._session.refresh(run)
         return WorkflowRunRead.model_validate(run)
 
     async def record_checkpoint(
