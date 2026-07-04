@@ -67,6 +67,8 @@ class LlmNodeData(BaseModel):
     system_prompt: str = Field(default="", max_length=20000)
     user_prompt: str = Field(default="", max_length=20000)
     prompt_version: str = Field(default="v1", min_length=1, max_length=160)
+    prompt_label: str = Field(default="", max_length=80)
+    prompt_environment: str = Field(default="", max_length=80)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1, le=32768)
     output_schema_ref: str = Field(default="", max_length=160)

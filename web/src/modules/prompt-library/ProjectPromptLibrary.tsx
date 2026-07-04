@@ -1,16 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileDiff, GitCommitHorizontal, Plus, Save } from "lucide-react";
+import { FileDiff, GitBranch, GitCommitHorizontal, Plus, Rocket, Save } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
   createPromptTemplate,
   createPromptTemplateVersion,
+  listPromptTemplateReleases,
   listPromptTemplates,
   listPromptTemplateVersions,
+  promptLibraryReleasesQueryKey,
   promptLibraryTemplatesQueryKey,
   promptLibraryVersionsQueryKey,
+  publishPromptTemplateRelease,
   type PromptTemplateCreateRequest,
+  type PromptTemplateReleasePublishRequest,
   type PromptTemplateStatus,
   type PromptTemplateVersionCreateRequest,
 } from "./promptLibraryApi";
@@ -33,6 +37,13 @@ const emptyVersionForm = {
   user_prompt: "",
   variables: "",
   version: "",
+};
+
+const emptyReleaseForm = {
+  environment: "preprod",
+  eval_run_id: "",
+  label: "staging",
+  release_note: "",
 };
 
 export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
@@ -67,6 +78,37 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
   const previousVersion = selectedVersionIndex > 0 ? versions[selectedVersionIndex - 1] : undefined;
   const [templateForm, setTemplateForm] = useState(emptyTemplateForm);
   const [versionForm, setVersionForm] = useState(emptyVersionForm);
+  const [releaseForm, setReleaseForm] = useState(emptyReleaseForm);
+  const releaseLabelFilter = releaseForm.label;
+  const releaseEnvironmentFilter = releaseForm.environment;
+  const releasesQueryKey = promptLibraryReleasesQueryKey(
+    project.projectId,
+    selectedTemplateRef,
+    releaseLabelFilter,
+    releaseEnvironmentFilter,
+  );
+  const releasesQuery = useQuery({
+    enabled: Boolean(selectedTemplateRef),
+    queryFn: () =>
+      listPromptTemplateReleases(project.projectId, selectedTemplateRef, {
+        environment: releaseEnvironmentFilter,
+        label: releaseLabelFilter,
+      }),
+    queryKey: releasesQueryKey,
+  });
+  const releases = releasesQuery.data?.releases ?? [];
+  const releaseBadgesQueryKey = promptLibraryReleasesQueryKey(
+    project.projectId,
+    selectedTemplateRef,
+    "all-labels",
+    "all-environments",
+  );
+  const releaseBadgesQuery = useQuery({
+    enabled: Boolean(selectedTemplateRef),
+    queryFn: () => listPromptTemplateReleases(project.projectId, selectedTemplateRef),
+    queryKey: releaseBadgesQueryKey,
+  });
+  const releaseBadges = releaseBadgesQuery.data?.releases ?? [];
   const [schemaError, setSchemaError] = useState("");
 
   const createTemplateMutation = useMutation({
@@ -87,6 +129,19 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
       setSelectedVersionId(version.id);
       void queryClient.invalidateQueries({ queryKey: templatesQueryKey });
       return queryClient.invalidateQueries({ queryKey: versionsQueryKey });
+    },
+  });
+  const publishReleaseMutation = useMutation({
+    mutationFn: (request: PromptTemplateReleasePublishRequest) =>
+      publishPromptTemplateRelease(project.projectId, selectedTemplateRef, request),
+    onSuccess: () => {
+      setReleaseForm((current) => ({
+        ...current,
+        eval_run_id: "",
+        release_note: "",
+      }));
+      void queryClient.invalidateQueries({ queryKey: releaseBadgesQueryKey });
+      return queryClient.invalidateQueries({ queryKey: releasesQueryKey });
     },
   });
 
@@ -130,8 +185,11 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
         <ErrorBanner
           errors={[
             templatesQuery.error,
+            releasesQuery.error,
+            releaseBadgesQuery.error,
             createTemplateMutation.error,
             createVersionMutation.error,
+            publishReleaseMutation.error,
           ]}
         />
 
@@ -191,6 +249,16 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
                 </span>
                 <span className="prompt-version-badges">
                   {version.id === latestVersion?.id ? <span className="status-pill status-ready">latest</span> : null}
+                  {releaseBadges
+                    .filter((release) => release.version === version.version && release.status === "active")
+                    .map((release) => (
+                      <span
+                        className="status-pill status-ready"
+                        key={`${release.id}-${release.label}-${release.environment}`}
+                      >
+                        {release.label}@{release.environment}
+                      </span>
+                    ))}
                   <span className={`status-pill status-policy-${version.status}`}>
                     {version.status}
                   </span>
@@ -301,6 +369,60 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
                 Create version
               </button>
             </form>
+
+            <PanelTitle eyebrow="RELEASE GATE" title="Publish Release" />
+            <form
+              className="prompt-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!selectedTemplateRef || !selectedVersion) {
+                  setSchemaError("Select a prompt version first");
+                  return;
+                }
+                setSchemaError("");
+                publishReleaseMutation.mutate({
+                  environment: releaseForm.environment,
+                  eval_run_id: releaseForm.eval_run_id.trim() || null,
+                  label: releaseForm.label,
+                  release_note: releaseForm.release_note,
+                  version: selectedVersion.version,
+                });
+              }}
+            >
+              <SelectField
+                label="Publish Label"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, label: value }))
+                }
+                options={["staging", "production", "latest"]}
+                value={releaseForm.label}
+              />
+              <TextField
+                label="Publish Environment"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, environment: value }))
+                }
+                value={releaseForm.environment}
+              />
+              <TextField
+                label="Eval Run ID"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, eval_run_id: value }))
+                }
+                value={releaseForm.eval_run_id}
+              />
+              <TextAreaField
+                label="Release Note"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, release_note: value }))
+                }
+                value={releaseForm.release_note}
+              />
+              <button className="toolbar-button" type="submit">
+                <Rocket aria-hidden="true" size={16} />
+                Publish release
+              </button>
+            </form>
           </section>
 
           <section className="settings-card prompt-diff-panel">
@@ -325,6 +447,60 @@ export function ProjectPromptLibrary({ project }: ProjectPromptLibraryProps) {
             ) : (
               <div className="global-empty-row">Select a prompt version to inspect diffs</div>
             )}
+          </section>
+
+          <section className="settings-card prompt-release-panel">
+            <PanelTitle eyebrow="RELEASE HISTORY" title="Prompt Releases" />
+            <div className="prompt-release-filters">
+              <SelectField
+                label="Release Label"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, label: value }))
+                }
+                options={["staging", "production", "latest"]}
+                value={releaseForm.label}
+              />
+              <TextField
+                label="Release Environment"
+                onChange={(value) =>
+                  setReleaseForm((current) => ({ ...current, environment: value }))
+                }
+                value={releaseForm.environment}
+              />
+            </div>
+            {releasesQuery.isLoading ? <div className="preview-alert">Loading releases</div> : null}
+            {!releasesQuery.isLoading && selectedTemplate && !releases.length ? (
+              <div className="global-empty-row">No releases for this label and environment</div>
+            ) : null}
+            <div className="prompt-release-list">
+              {releases.map((release) => (
+                <div className="prompt-release-row" key={release.id}>
+                  <GitBranch aria-hidden="true" size={16} />
+                  <span>
+                    <strong>{release.version}</strong>
+                    <small className="telemetry">{release.label}</small>
+                  </span>
+                  <span className="prompt-version-badges">
+                    <span className={`status-pill status-policy-${release.status}`}>
+                      {release.status}
+                    </span>
+                    <span
+                      className={
+                        release.eval_gate_status === "passed"
+                          ? "status-pill status-ready"
+                          : "status-pill status-policy-archived"
+                      }
+                    >
+                      {release.eval_gate_status}
+                    </span>
+                  </span>
+                  <span className="telemetry">{release.environment}</span>
+                  <span className="prompt-release-note">
+                    {release.release_note || "No release note"}
+                  </span>
+                </div>
+              ))}
+            </div>
           </section>
         </div>
       </section>
@@ -408,6 +584,38 @@ function TextAreaField({
         onChange={(event) => onChange(event.target.value)}
         value={value}
       />
+    </label>
+  );
+}
+
+function SelectField({
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  options: string[];
+  value: string;
+}) {
+  const id = label.toLowerCase().replaceAll(" ", "-");
+
+  return (
+    <label className="field-label" htmlFor={id}>
+      {label}
+      <select
+        className="text-field"
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
     </label>
   );
 }

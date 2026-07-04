@@ -1,4 +1,6 @@
 export type PromptTemplateStatus = "active" | "disabled" | "archived";
+export type PromptTemplateReleaseStatus = "active" | "archived";
+export type PromptReleaseEvalGateStatus = "not_required" | "passed" | "failed";
 
 export type PromptTemplate = {
   id: string;
@@ -30,6 +32,26 @@ export type PromptTemplateVersion = {
   updated_at: string;
 };
 
+export type PromptTemplateRelease = {
+  id: string;
+  project_id: string;
+  template_id: string;
+  template_ref: string;
+  version_id: string;
+  version: string;
+  label: string;
+  environment: string;
+  status: PromptTemplateReleaseStatus;
+  is_protected: boolean;
+  eval_gate_status: PromptReleaseEvalGateStatus;
+  eval_run_id: string | null;
+  release_note: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PromptTemplateCreateRequest = Pick<
   PromptTemplate,
   "description" | "name" | "status" | "template_ref"
@@ -39,6 +61,13 @@ export type PromptTemplateVersionCreateRequest = Pick<
   PromptTemplateVersion,
   "output_schema" | "status" | "system_prompt" | "user_prompt" | "variables" | "version"
 >;
+
+export type PromptTemplateReleasePublishRequest = Pick<
+  PromptTemplateRelease,
+  "environment" | "label" | "release_note" | "version"
+> & {
+  eval_run_id?: string | null;
+};
 
 export type PromptTemplateListResponse = {
   templates: PromptTemplate[];
@@ -50,11 +79,32 @@ export type PromptTemplateVersionListResponse = {
   count: number;
 };
 
+export type PromptTemplateReleaseListResponse = {
+  releases: PromptTemplateRelease[];
+  count: number;
+};
+
 export const promptLibraryTemplatesQueryKey = (projectId: string) =>
   ["project", projectId, "prompt-library", "templates"] as const;
 
 export const promptLibraryVersionsQueryKey = (projectId: string, templateRef: string) =>
   ["project", projectId, "prompt-library", "templates", templateRef, "versions"] as const;
+
+export const promptLibraryReleasesQueryKey = (
+  projectId: string,
+  templateRef: string,
+  label: string,
+  environment: string,
+) =>
+  [
+    "project",
+    projectId,
+    "prompt-library",
+    "templates",
+    templateRef,
+    "releases",
+    { environment, label },
+  ] as const;
 
 export async function listPromptTemplates(
   projectId: string,
@@ -107,6 +157,51 @@ export async function createPromptTemplateVersion(
     `/api/v1/projects/${encodeURIComponent(
       projectId,
     )}/model-gateway/prompt-templates/${encodeURIComponent(templateRef)}/versions`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function listPromptTemplateReleases(
+  projectId: string,
+  templateRef: string,
+  filters: { environment?: string; label?: string } = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<PromptTemplateReleaseListResponse> {
+  const searchParams = new URLSearchParams();
+  if (filters.label) {
+    searchParams.set("label", filters.label);
+  }
+  if (filters.environment) {
+    searchParams.set("environment", filters.environment);
+  }
+  const query = searchParams.toString();
+
+  return requestJson<PromptTemplateReleaseListResponse>(
+    `/api/v1/projects/${encodeURIComponent(
+      projectId,
+    )}/model-gateway/prompt-templates/${encodeURIComponent(templateRef)}/releases${
+      query ? `?${query}` : ""
+    }`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function publishPromptTemplateRelease(
+  projectId: string,
+  templateRef: string,
+  request: PromptTemplateReleasePublishRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<PromptTemplateRelease> {
+  return requestJson<PromptTemplateRelease>(
+    `/api/v1/projects/${encodeURIComponent(
+      projectId,
+    )}/model-gateway/prompt-templates/${encodeURIComponent(templateRef)}/releases`,
     {
       body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },

@@ -9,6 +9,7 @@ from backend.app.db.session import get_async_session
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.models import Account, Project
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
+from backend.app.knowledge.models import RetrievalEvalDataset, RetrievalEvalRun
 from backend.app.main import create_app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -195,6 +196,223 @@ async def test_prompt_library_write_requires_model_gateway_write_permission(
     assert response.json() == {"detail": "Missing required project permission"}
 
 
+@pytest.mark.asyncio
+async def test_prompt_library_release_api_publishes_lists_and_audits_without_prompt_body(
+    prompt_library_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    account = make_account()
+    await seed_project(prompt_library_session_factory, project_id, account.account_id)
+    eval_run_id = await seed_eval_run(
+        prompt_library_session_factory,
+        project_id=project_id,
+        actor_id=account.account_id,
+    )
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider(
+            [make_project(project_id, permissions=["model-gateway:view", "model-gateway:write"])]
+        ),
+        session_factory=prompt_library_session_factory,
+    )
+    template_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates",
+        json={
+            "template_ref": "incident-summary",
+            "name": "Incident Summary",
+            "description": "Summarize operational incidents.",
+            "status": "active",
+        },
+    )
+    assert template_response.status_code == 200
+    version_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/versions",
+        json={
+            "version": "v1",
+            "system_prompt": "Do not leak release system prompt.",
+            "user_prompt": "Do not leak release user prompt.",
+            "variables": ["incident"],
+            "output_schema": {"type": "object"},
+            "status": "active",
+        },
+    )
+    assert version_response.status_code == 200
+
+    release_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/releases",
+        json={
+            "version": "v1",
+            "label": "staging",
+            "environment": "preprod",
+            "eval_run_id": str(eval_run_id),
+            "release_note": "Promote after golden eval",
+        },
+    )
+    list_response = client.get(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/"
+        "incident-summary/releases?label=staging&environment=preprod"
+    )
+
+    assert release_response.status_code == 200
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["count"] == 1
+    assert payload["releases"][0] == {
+        **payload["releases"][0],
+        "template_ref": "incident-summary",
+        "version": "v1",
+        "label": "staging",
+        "environment": "preprod",
+        "status": "active",
+        "is_protected": True,
+        "eval_gate_status": "passed",
+        "release_note": "Promote after golden eval",
+    }
+    assert "release system prompt" not in list_response.text.lower()
+    assert "release user prompt" not in list_response.text.lower()
+
+    async with prompt_library_session_factory() as session:
+        audit_events = list(await session.scalars(select(AuditLog).order_by(AuditLog.created_at)))
+
+    assert audit_events[-2].action == "prompt_library.release.publish"
+    assert audit_events[-2].event_metadata == {
+        "template_ref": "incident-summary",
+        "version": "v1",
+        "label": "staging",
+        "environment": "preprod",
+        "eval_gate_status": "passed",
+        "eval_run_id": str(eval_run_id),
+    }
+    assert audit_events[-1].action == "prompt_library.release.list"
+    assert "release system prompt" not in str(audit_events[-2].event_metadata).lower()
+
+
+@pytest.mark.asyncio
+async def test_prompt_library_release_api_blocks_protected_label_without_passing_eval(
+    prompt_library_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    account = make_account()
+    await seed_project(prompt_library_session_factory, project_id, account.account_id)
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider(
+            [make_project(project_id, permissions=["model-gateway:view", "model-gateway:write"])]
+        ),
+        session_factory=prompt_library_session_factory,
+    )
+    template_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates",
+        json={"template_ref": "incident-summary", "name": "Incident Summary"},
+    )
+    assert template_response.status_code == 200
+    version_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/versions",
+        json={
+            "version": "v1",
+            "system_prompt": "Safe system prompt.",
+            "user_prompt": "Safe user prompt.",
+        },
+    )
+    assert version_response.status_code == 200
+
+    release_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/releases",
+        json={
+            "version": "v1",
+            "label": "production",
+            "environment": "prod",
+            "release_note": "Missing eval gate",
+        },
+    )
+
+    assert release_response.status_code == 422
+    assert "eval gate" in release_response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_prompt_library_release_api_returns_404_for_missing_version(
+    prompt_library_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    account = make_account()
+    await seed_project(prompt_library_session_factory, project_id, account.account_id)
+    eval_run_id = await seed_eval_run(
+        prompt_library_session_factory,
+        project_id=project_id,
+        actor_id=account.account_id,
+    )
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider(
+            [make_project(project_id, permissions=["model-gateway:view", "model-gateway:write"])]
+        ),
+        session_factory=prompt_library_session_factory,
+    )
+    template_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates",
+        json={"template_ref": "incident-summary", "name": "Incident Summary"},
+    )
+    assert template_response.status_code == 200
+
+    release_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/releases",
+        json={
+            "version": "missing",
+            "label": "staging",
+            "environment": "preprod",
+            "eval_run_id": str(eval_run_id),
+            "release_note": "Missing version should not publish",
+        },
+    )
+
+    assert release_response.status_code == 404
+    assert release_response.json() == {"detail": "Prompt template version not found"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_library_release_api_rejects_blank_label(
+    prompt_library_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    project_id = uuid4()
+    account = make_account()
+    await seed_project(prompt_library_session_factory, project_id, account.account_id)
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider(
+            [make_project(project_id, permissions=["model-gateway:view", "model-gateway:write"])]
+        ),
+        session_factory=prompt_library_session_factory,
+    )
+    template_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates",
+        json={"template_ref": "incident-summary", "name": "Incident Summary"},
+    )
+    assert template_response.status_code == 200
+    version_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/versions",
+        json={
+            "version": "v1",
+            "system_prompt": "Safe system prompt.",
+            "user_prompt": "Safe user prompt.",
+        },
+    )
+    assert version_response.status_code == 200
+
+    release_response = client.post(
+        f"/api/v1/projects/{project_id}/model-gateway/prompt-templates/incident-summary/releases",
+        json={
+            "version": "v1",
+            "label": "   ",
+            "environment": "preprod",
+            "release_note": "Blank labels must not publish",
+        },
+    )
+
+    assert release_response.status_code == 422
+    assert "label" in release_response.text
+
+
 def build_client(
     *,
     account: AccountPrincipal,
@@ -253,3 +471,47 @@ async def seed_project(
             )
         )
         await session.commit()
+
+
+async def seed_eval_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: UUID,
+    actor_id: UUID,
+) -> UUID:
+    async with session_factory() as session:
+        dataset = RetrievalEvalDataset(
+            project_id=project_id,
+            key=f"prompt-release-{uuid4().hex[:8]}",
+            name="Prompt Release Eval",
+            description="Golden prompt release gate",
+            evaluation_scope="prompt_release",
+            status="active",
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        session.add(dataset)
+        await session.flush()
+        run = RetrievalEvalRun(
+            project_id=project_id,
+            dataset_id=dataset.id,
+            actor_id=actor_id,
+            status="completed",
+            retrieval_mode="hybrid",
+            top_k=5,
+            candidate_limit=50,
+            case_count=2,
+            average_recall_at_k=1.0,
+            average_mrr=1.0,
+            average_context_precision=1.0,
+            average_context_recall=1.0,
+            average_faithfulness=1.0,
+            leakage_count=0,
+            deleted_visible_count=0,
+            report={"dataset_key": dataset.key},
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        session.add(run)
+        await session.commit()
+        return run.id

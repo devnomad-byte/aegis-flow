@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Float, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -73,6 +73,72 @@ class PromptTemplateVersion(Base, TimestampMixin):
     variables: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     output_schema: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class PromptTemplateRelease(Base, TimestampMixin):
+    __tablename__ = "prompt_template_releases"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "template_id",
+            "version_id",
+            "label",
+            "environment",
+            "created_at",
+            name="uq_prompt_template_release_event",
+        ),
+        Index(
+            "ix_prompt_template_releases_active_label",
+            "project_id",
+            "template_id",
+            "label",
+            "environment",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "uq_prompt_template_releases_active_label",
+            "project_id",
+            "template_id",
+            "label",
+            "environment",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    template_id: Mapped[UUID] = mapped_column(
+        ForeignKey("prompt_templates.id"),
+        nullable=False,
+        index=True,
+    )
+    template_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("prompt_template_versions.id"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[str] = mapped_column(String(160), nullable=False)
+    label: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    environment: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    is_protected: Mapped[bool] = mapped_column(nullable=False, default=False)
+    eval_gate_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_required"
+    )
+    eval_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("retrieval_eval_runs.id"),
+        nullable=True,
+        index=True,
+    )
+    release_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

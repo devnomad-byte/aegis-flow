@@ -23,12 +23,21 @@ from backend.app.model_gateway.schemas import (
     PromptTemplateCreateRequest,
     PromptTemplateListResponse,
     PromptTemplateRead,
+    PromptTemplateReleaseListResponse,
+    PromptTemplateReleasePublishRequest,
+    PromptTemplateReleaseRead,
     PromptTemplateVersionCreate,
     PromptTemplateVersionCreateRequest,
     PromptTemplateVersionListResponse,
     PromptTemplateVersionRead,
 )
-from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
+from backend.app.model_gateway.sqlalchemy_store import (
+    PromptReleaseConflict,
+    PromptReleaseEvalGateFailed,
+    PromptReleaseTargetInvalid,
+    PromptTemplateVersionNotFound,
+    SqlAlchemyModelGatewayStore,
+)
 
 router = APIRouter(prefix="/projects/{project_id}/model-gateway", tags=["model-gateway"])
 CurrentAccount = Depends(get_current_account)
@@ -258,6 +267,116 @@ async def list_prompt_template_versions(
         },
     )
     return PromptTemplateVersionListResponse(versions=versions, count=len(versions))
+
+
+@router.post(
+    "/prompt-templates/{template_ref}/releases",
+    response_model=PromptTemplateReleaseRead,
+)
+async def publish_prompt_template_release(
+    project_id: UUID,
+    template_ref: str,
+    request: PromptTemplateReleasePublishRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateReleaseRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:write",
+    )
+    try:
+        release = await model_gateway_store.publish_prompt_template_release(
+            project_id=project_id,
+            template_ref=template_ref,
+            version=request.version,
+            label=request.label,
+            environment=request.environment,
+            eval_run_id=request.eval_run_id,
+            release_note=request.release_note,
+            actor_id=current_account.account_id,
+        )
+    except PromptReleaseEvalGateFailed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except PromptReleaseTargetInvalid as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except PromptReleaseConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except PromptTemplateVersionNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.release.publish",
+        target_type="prompt_template_release",
+        target_id=str(release.id),
+        metadata={
+            "template_ref": template_ref,
+            "version": release.version,
+            "label": release.label,
+            "environment": release.environment,
+            "eval_gate_status": release.eval_gate_status,
+            "eval_run_id": str(release.eval_run_id) if release.eval_run_id else "",
+        },
+    )
+    return release
+
+
+@router.get(
+    "/prompt-templates/{template_ref}/releases",
+    response_model=PromptTemplateReleaseListResponse,
+)
+async def list_prompt_template_releases(
+    project_id: UUID,
+    template_ref: str,
+    label: str | None = Query(default=None, min_length=1, max_length=80),
+    environment: str | None = Query(default=None, min_length=1, max_length=80),
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> PromptTemplateReleaseListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "model-gateway:view",
+    )
+    releases = await model_gateway_store.list_prompt_template_releases(
+        project_id=project_id,
+        template_ref=template_ref,
+        label=label,
+        environment=environment,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="prompt_library.release.list",
+        target_type="prompt_template_release",
+        target_id=template_ref,
+        metadata={
+            "template_ref": template_ref,
+            "label": label or "",
+            "environment": environment or "",
+            "release_count": len(releases),
+        },
+    )
+    return PromptTemplateReleaseListResponse(releases=releases, count=len(releases))
 
 
 @router.get("/invocations", response_model=ModelGatewayInvocationListResponse)

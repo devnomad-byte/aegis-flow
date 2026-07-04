@@ -79,6 +79,64 @@ describe("ProjectPromptLibrary", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/prompt-templates/incident-summary/releases") && !init) {
+        return new Response(
+          JSON.stringify({
+            releases: [
+              {
+                id: "release-1",
+                project_id: "ops-command",
+                template_id: "template-1",
+                template_ref: "incident-summary",
+                version_id: "version-2",
+                version: "v2",
+                label: "staging",
+                environment: "preprod",
+                status: "active",
+                is_protected: true,
+                eval_gate_status: "passed",
+                eval_run_id: "eval-run-1",
+                release_note: "Promote after eval",
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-04T10:00:00Z",
+                updated_at: "2026-07-04T10:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/prompt-templates/incident-summary/releases?") && !init) {
+        return new Response(
+          JSON.stringify({
+            releases: [
+              {
+                id: "release-1",
+                project_id: "ops-command",
+                template_id: "template-1",
+                template_ref: "incident-summary",
+                version_id: "version-2",
+                version: "v2",
+                label: "staging",
+                environment: "preprod",
+                status: "active",
+                is_protected: true,
+                eval_gate_status: "passed",
+                eval_run_id: "eval-run-1",
+                release_note: "Promote after eval",
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-04T10:00:00Z",
+                updated_at: "2026-07-04T10:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
       return new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 });
     });
 
@@ -86,9 +144,13 @@ describe("ProjectPromptLibrary", () => {
 
     expect(await screen.findByRole("heading", { name: "Prompt Library" })).toBeInTheDocument();
     expect(await screen.findByText("Incident Summary")).toBeInTheDocument();
-    expect(await screen.findByText("v2")).toBeInTheDocument();
-    expect(screen.getByText("latest")).toBeInTheDocument();
+    expect((await screen.findAllByText("v2")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("latest").length).toBeGreaterThan(0);
     expect(screen.getAllByText("active").length).toBeGreaterThan(0);
+    expect(screen.getByText("staging@preprod")).toBeInTheDocument();
+    expect(await screen.findByText("Prompt Releases")).toBeInTheDocument();
+    expect(screen.getByText("preprod")).toBeInTheDocument();
+    expect(screen.getByText("Promote after eval")).toBeInTheDocument();
     expect(screen.getByText("System Prompt Diff")).toBeInTheDocument();
     expect(screen.queryByText("raw-provider-token")).not.toBeInTheDocument();
   });
@@ -122,6 +184,9 @@ describe("ProjectPromptLibrary", () => {
       if (url.endsWith("/versions") && !init) {
         return new Response(JSON.stringify({ versions: [], count: 0 }), { status: 200 });
       }
+      if (url.includes("/releases") && !init) {
+        return new Response(JSON.stringify({ releases: [], count: 0 }), { status: 200 });
+      }
       return new Response(JSON.stringify({ id: "version-2" }), { status: 200 });
     });
 
@@ -150,6 +215,90 @@ describe("ProjectPromptLibrary", () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({
       output_schema: { type: "object" },
       variables: ["incident", "service"],
+      version: "v2",
+    });
+  });
+
+  it("publishes a selected prompt version to a protected label with an eval run", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/prompt-templates") && !init) {
+        return new Response(
+          JSON.stringify({
+            templates: [
+              {
+                id: "template-1",
+                project_id: "ops-command",
+                template_ref: "incident-summary",
+                name: "Incident Summary",
+                description: "",
+                status: "active",
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-04T08:00:00Z",
+                updated_at: "2026-07-04T08:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/versions") && !init) {
+        return new Response(
+          JSON.stringify({
+            versions: [
+              {
+                id: "version-2",
+                project_id: "ops-command",
+                template_id: "template-1",
+                template_ref: "incident-summary",
+                version: "v2",
+                system_prompt: "You summarize incidents.",
+                user_prompt: "Incident: {{incident}}",
+                variables: ["incident"],
+                output_schema: { type: "object" },
+                status: "active",
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-04T08:00:00Z",
+                updated_at: "2026-07-04T08:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/releases") && !init) {
+        return new Response(JSON.stringify({ releases: [], count: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: "release-2", status: "active" }), { status: 200 });
+    });
+
+    renderWithClient(<ProjectPromptLibrary project={defaultProjectContext} />);
+
+    await screen.findByText("Incident Summary");
+    await user.selectOptions(screen.getByLabelText("Publish Label"), "production");
+    await user.clear(screen.getByLabelText("Publish Environment"));
+    await user.type(screen.getByLabelText("Publish Environment"), "prod");
+    await user.type(screen.getByLabelText("Eval Run ID"), "eval-run-2");
+    await user.type(screen.getByLabelText("Release Note"), "Promote v2 to prod");
+    await user.click(screen.getByRole("button", { name: "Publish release" }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/v1/projects/ops-command/model-gateway/prompt-templates/incident-summary/releases",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    const request = fetchSpy.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      environment: "prod",
+      eval_run_id: "eval-run-2",
+      label: "production",
+      release_note: "Promote v2 to prod",
       version: "v2",
     });
   });

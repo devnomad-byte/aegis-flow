@@ -66,6 +66,7 @@ class RecordingPromptStore:
     def __init__(self, prompt_version: PromptTemplateVersionRead | None) -> None:
         self.prompt_version = prompt_version
         self.requests: list[dict[str, object]] = []
+        self.label_requests: list[dict[str, object]] = []
 
     async def get_prompt_template_version(
         self,
@@ -83,6 +84,26 @@ class RecordingPromptStore:
             and self.prompt_version.template_ref == template_ref
             and self.prompt_version.version == version
         ):
+            return self.prompt_version
+        return None
+
+    async def get_prompt_template_version_by_label(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        label: str,
+        environment: str,
+    ) -> PromptTemplateVersionRead | None:
+        self.label_requests.append(
+            {
+                "project_id": project_id,
+                "template_ref": template_ref,
+                "label": label,
+                "environment": environment,
+            }
+        )
+        if self.prompt_version and self.prompt_version.project_id == project_id:
             return self.prompt_version
         return None
 
@@ -186,6 +207,7 @@ def make_prompt_version(
     project_id: UUID,
     actor_id: UUID,
     *,
+    version: str = "v1",
     system_prompt: str = "Library system {{project}}.",
     user_prompt: str = "Library incident {{incident}}",
     output_schema: dict[str, object] | None = None,
@@ -196,7 +218,7 @@ def make_prompt_version(
         project_id=project_id,
         template_id=uuid4(),
         template_ref="incident-summary",
-        version="v1",
+        version=version,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         variables=["project", "incident"],
@@ -247,6 +269,143 @@ async def test_llm_node_runner_calls_gateway_and_records_sanitized_usage() -> No
     assert invocation_store.records[0].prompt_version == "v1"
     assert invocation_store.records[0].schema_validation_status == "not_applicable"
     assert "secret" not in invocation_store.records[0].model_dump_json().lower()
+
+
+@pytest.mark.asyncio
+async def test_llm_node_runner_resolves_prompt_version_by_label_and_environment() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy = make_policy(project_id, actor_id)
+    invocation_store = RecordingInvocationStore()
+    model_client = RecordingModelClient()
+    prompt_store = RecordingPromptStore(
+        make_prompt_version(
+            project_id,
+            actor_id,
+            version="v2",
+            system_prompt="Label system {{project}}.",
+            user_prompt="Label incident {{incident}}",
+        )
+    )
+    runner = LlmNodeRunner(
+        policy_store=RecordingPolicyStore(policy),
+        invocation_store=invocation_store,
+        model_client=model_client,
+        prompt_store=prompt_store,
+    )
+    workflow = WorkflowDefinition(
+        workflow=WorkflowMetadata(
+            id="incident_summary",
+            name="Incident summary",
+            project_id=str(project_id),
+            version=1,
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="llm_1",
+                name="Summarize incident",
+                type="llm",
+                data=LlmNodeData(
+                    model_policy_ref="default",
+                    prompt_template_ref="incident-summary",
+                    prompt_label="staging",
+                    prompt_environment="preprod",
+                    prompt_version="v1",
+                    max_tokens=64,
+                ),
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="llm_1"),
+            EdgeDefinition(source="llm_1", target="end_1"),
+        ],
+    )
+
+    await runner.run(
+        LlmNodeRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            workflow=workflow,
+            node_id="llm_1",
+            run_id="run-label",
+            trace_id="trace-label",
+            inputs={"project": "ops", "incident": "database pool saturation"},
+        )
+    )
+
+    assert prompt_store.requests == []
+    assert prompt_store.label_requests == [
+        {
+            "project_id": project_id,
+            "template_ref": "incident-summary",
+            "label": "staging",
+            "environment": "preprod",
+        }
+    ]
+    assert invocation_store.records[0].prompt_version == "v2"
+    assert "label system" not in invocation_store.records[0].model_dump_json().lower()
+    assert "label incident" not in invocation_store.records[0].model_dump_json().lower()
+
+
+@pytest.mark.asyncio
+async def test_llm_node_runner_resolves_prompt_label_with_default_release_environment() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy = make_policy(project_id, actor_id)
+    invocation_store = RecordingInvocationStore()
+    model_client = RecordingModelClient()
+    prompt_store = RecordingPromptStore(make_prompt_version(project_id, actor_id, version="v2"))
+    runner = LlmNodeRunner(
+        policy_store=RecordingPolicyStore(policy),
+        invocation_store=invocation_store,
+        model_client=model_client,
+        prompt_store=prompt_store,
+    )
+    workflow = WorkflowDefinition(
+        workflow=WorkflowMetadata(
+            id="incident_summary",
+            name="Incident summary",
+            project_id=str(project_id),
+            version=1,
+        ),
+        nodes=[
+            NodeDefinition(id="start_1", name="Start", type="start"),
+            NodeDefinition(
+                id="llm_1",
+                name="Summarize incident",
+                type="llm",
+                data=LlmNodeData(
+                    model_policy_ref="default",
+                    prompt_template_ref="incident-summary",
+                    prompt_label="staging",
+                    prompt_version="v1",
+                    max_tokens=64,
+                ),
+            ),
+            NodeDefinition(id="end_1", name="End", type="end"),
+        ],
+        edges=[
+            EdgeDefinition(source="start_1", target="llm_1"),
+            EdgeDefinition(source="llm_1", target="end_1"),
+        ],
+    )
+
+    await runner.run(
+        LlmNodeRunRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            workflow=workflow,
+            node_id="llm_1",
+            run_id="run-default-env",
+            trace_id="trace-default-env",
+            inputs={"project": "ops", "incident": "database pool saturation"},
+        )
+    )
+
+    assert prompt_store.label_requests[-1]["environment"] == "preprod"
+    assert invocation_store.records[0].prompt_version == "v2"
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,12 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 JsonObject = dict[str, Any]
+TrimmedNonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+DEFAULT_PROMPT_RELEASE_ENVIRONMENT = "preprod"
 ModelGatewayPolicyStatus = Literal["active", "disabled", "archived"]
 ModelGatewayInvocationStatus = Literal[
     "success",
@@ -13,6 +15,8 @@ ModelGatewayInvocationStatus = Literal[
     "schema_validation_failed",
 ]
 PromptTemplateStatus = Literal["active", "disabled", "archived"]
+PromptTemplateReleaseStatus = Literal["active", "archived"]
+PromptReleaseEvalGateStatus = Literal["not_required", "passed", "failed"]
 SchemaValidationStatus = Literal["not_applicable", "passed", "failed"]
 
 
@@ -178,4 +182,51 @@ class PromptTemplateVersionListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     versions: list[PromptTemplateVersionRead]
+    count: int
+
+
+class PromptTemplateReleaseCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project_id: UUID
+    template_id: UUID
+    template_ref: str = Field(min_length=1, max_length=120)
+    version_id: UUID
+    version: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=80)
+    environment: str = Field(min_length=1, max_length=80)
+    status: PromptTemplateReleaseStatus = "active"
+    is_protected: bool = False
+    eval_gate_status: PromptReleaseEvalGateStatus = "not_required"
+    eval_run_id: UUID | None = None
+    release_note: str = Field(default="", max_length=2000)
+    created_by: UUID
+    updated_by: UUID
+
+
+class PromptTemplateReleaseRead(PromptTemplateReleaseCreate):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptTemplateReleasePublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: str = Field(min_length=1, max_length=160)
+    label: TrimmedNonEmptyString = Field(max_length=80)
+    environment: TrimmedNonEmptyString = Field(
+        default=DEFAULT_PROMPT_RELEASE_ENVIRONMENT,
+        max_length=80,
+    )
+    eval_run_id: UUID | None = None
+    release_note: str = Field(default="", max_length=2000)
+
+
+class PromptTemplateReleaseListResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    releases: list[PromptTemplateReleaseRead]
     count: int

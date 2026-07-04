@@ -238,3 +238,16 @@ def test_http_node_requires_target_url_method_and_egress_profile() -> None:
     assert impact.environments == ["prod"]
     assert impact.risk_levels == ["high"]
     assert impact.approval_required is True
+
+
+def test_llm_node_can_reference_prompt_release_label_and_environment() -> None:
+    node_data = LlmNodeData(
+        model_policy_ref="default",
+        prompt_template_ref="incident-summary",
+        prompt_label="staging",
+        prompt_environment="preprod",
+        prompt_version="v1",
+    )
+
+    assert node_data.prompt_label == "staging"
+    assert node_data.prompt_environment == "preprod"

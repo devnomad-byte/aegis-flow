@@ -16,6 +16,7 @@ from backend.app.model_gateway.openai_compatible import (
     redact_sensitive_text,
 )
 from backend.app.model_gateway.schemas import (
+    DEFAULT_PROMPT_RELEASE_ENVIRONMENT,
     ModelGatewayInvocationCreate,
     ModelGatewayInvocationRead,
     ModelGatewayPolicyRead,
@@ -65,6 +66,15 @@ class PromptTemplateVersionStore(Protocol):
         project_id: UUID,
         template_ref: str,
         version: str,
+    ) -> PromptTemplateVersionRead | None: ...
+
+    async def get_prompt_template_version_by_label(
+        self,
+        *,
+        project_id: UUID,
+        template_ref: str,
+        label: str,
+        environment: str,
     ) -> PromptTemplateVersionRead | None: ...
 
 
@@ -316,13 +326,25 @@ class LlmNodeRunner:
                 f"prompt store is not configured for: {node_data.prompt_template_ref}",
             )
 
-        prompt_version = await self.prompt_store.get_prompt_template_version(
-            project_id=request.project_id,
-            template_ref=node_data.prompt_template_ref,
-            version=node_data.prompt_version,
-        )
-        if prompt_version is None:
+        if node_data.prompt_label:
+            prompt_environment = node_data.prompt_environment or DEFAULT_PROMPT_RELEASE_ENVIRONMENT
+            prompt_version = await self.prompt_store.get_prompt_template_version_by_label(
+                project_id=request.project_id,
+                template_ref=node_data.prompt_template_ref,
+                label=node_data.prompt_label,
+                environment=prompt_environment,
+            )
+            prompt_ref = (
+                f"{node_data.prompt_template_ref}#{node_data.prompt_label}@{prompt_environment}"
+            )
+        else:
+            prompt_version = await self.prompt_store.get_prompt_template_version(
+                project_id=request.project_id,
+                template_ref=node_data.prompt_template_ref,
+                version=node_data.prompt_version,
+            )
             prompt_ref = f"{node_data.prompt_template_ref}/{node_data.prompt_version}"
+        if prompt_version is None:
             raise LlmNodePromptNotFound(
                 f"prompt version not found: {prompt_ref}",
             )

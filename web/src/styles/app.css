@@ -1096,10 +1096,15 @@ select {
   grid-column: 1 / -1;
 }
 
+.prompt-release-panel {
+  grid-column: 1 / -1;
+}
+
 .prompt-template-rail,
 .prompt-version-rail,
 .prompt-composer,
-.prompt-diff-panel {
+.prompt-diff-panel,
+.prompt-release-panel {
   align-content: start;
 }
 
@@ -1159,6 +1164,37 @@ select {
   border-top: 1px solid var(--color-border);
   margin-top: var(--space-sm);
   padding-top: var(--space-md);
+}
+
+.prompt-release-filters {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  margin-bottom: var(--space-md);
+}
+
+.prompt-release-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.prompt-release-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: 24px minmax(0, 0.7fr) max-content max-content minmax(0, 1fr);
+  min-height: 64px;
+  padding: var(--space-md);
+}
+
+.prompt-release-row strong,
+.prompt-release-row small,
+.prompt-release-note {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .field-label {
@@ -1502,6 +1538,7 @@ select {
   }
 
   .prompt-diff-panel,
+  .prompt-release-panel,
   .prompt-schema-preview {
     grid-column: auto;
   }
@@ -1569,7 +1606,9 @@ select {
   .policy-row,
   .prompt-library-hero-metrics,
   .prompt-template-row,
-  .prompt-version-row {
+  .prompt-version-row,
+  .prompt-release-filters,
+  .prompt-release-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

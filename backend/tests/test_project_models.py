@@ -39,6 +39,7 @@ def test_rbac_tables_are_registered_in_metadata() -> None:
         "model_gateway_policies",
         "model_gateway_invocations",
         "prompt_templates",
+        "prompt_template_releases",
         "prompt_template_versions",
     }
 
@@ -77,6 +78,7 @@ def test_project_scoped_tables_have_project_id() -> None:
         "model_gateway_policies",
         "model_gateway_invocations",
         "prompt_templates",
+        "prompt_template_releases",
         "prompt_template_versions",
     }
 
@@ -122,6 +124,10 @@ def test_rbac_unique_constraints_prevent_duplicate_identity_and_bindings() -> No
         ("model_gateway_policies", ("project_id", "policy_ref")),
         ("model_gateway_invocations", ("project_id", "invocation_ref")),
         ("prompt_templates", ("project_id", "template_ref")),
+        (
+            "prompt_template_releases",
+            ("project_id", "template_id", "version_id", "label", "environment", "created_at"),
+        ),
         ("prompt_template_versions", ("project_id", "template_id", "version")),
     }
 
@@ -150,3 +156,23 @@ def test_audit_logs_have_query_indexes_for_risk_and_time_filters() -> None:
             actual.add((audit_table.name, tuple(column.name for column in index.columns)))
 
     assert expected.issubset(actual)
+
+
+def test_prompt_template_releases_have_one_active_release_index() -> None:
+    release_table = Base.metadata.tables["prompt_template_releases"]
+    active_indexes = {
+        str(index.name): (
+            tuple(column.name for column in index.columns),
+            index.unique,
+            str(index.dialect_options["postgresql"].get("where", "")),
+            str(index.dialect_options["sqlite"].get("where", "")),
+        )
+        for index in release_table.indexes
+    }
+
+    assert active_indexes["uq_prompt_template_releases_active_label"] == (
+        ("project_id", "template_id", "label", "environment"),
+        True,
+        "status = 'active'",
+        "status = 'active'",
+    )

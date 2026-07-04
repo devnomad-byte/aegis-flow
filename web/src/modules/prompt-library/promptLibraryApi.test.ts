@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPromptTemplate,
   createPromptTemplateVersion,
+  listPromptTemplateReleases,
   listPromptTemplateVersions,
+  publishPromptTemplateRelease,
+  promptLibraryReleasesQueryKey,
   listPromptTemplates,
   promptLibraryTemplatesQueryKey,
   promptLibraryVersionsQueryKey,
@@ -25,15 +28,28 @@ describe("promptLibraryApi", () => {
       "incident-summary",
       "versions",
     ]);
+    expect(promptLibraryReleasesQueryKey("ops-command", "incident-summary", "staging", "preprod")).toEqual([
+      "project",
+      "ops-command",
+      "prompt-library",
+      "templates",
+      "incident-summary",
+      "releases",
+      { environment: "preprod", label: "staging" },
+    ]);
   });
 
-  it("loads templates and versions through the project-scoped API", async () => {
+  it("loads templates, versions and releases through the project-scoped API", async () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify({ templates: [], count: 0 }), { status: 200 })),
     );
 
     await listPromptTemplates("ops-command", fetcher);
     await listPromptTemplateVersions("ops-command", "incident-summary", fetcher);
+    await listPromptTemplateReleases("ops-command", "incident-summary", {
+      environment: "preprod",
+      label: "staging",
+    }, fetcher);
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
@@ -43,9 +59,13 @@ describe("promptLibraryApi", () => {
       2,
       "/api/v1/projects/ops-command/model-gateway/prompt-templates/incident-summary/versions",
     );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      3,
+      "/api/v1/projects/ops-command/model-gateway/prompt-templates/incident-summary/releases?label=staging&environment=preprod",
+    );
   });
 
-  it("creates templates and versions without sending secret-shaped fields", async () => {
+  it("creates templates, versions and releases without sending secret-shaped fields", async () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify({ id: "template-1" }), { status: 200 })),
     );
@@ -73,12 +93,27 @@ describe("promptLibraryApi", () => {
       },
       fetcher,
     );
+    await publishPromptTemplateRelease(
+      "ops-command",
+      "incident-summary",
+      {
+        environment: "preprod",
+        eval_run_id: "eval-run-1",
+        label: "staging",
+        release_note: "Promote after eval",
+        version: "v2",
+      },
+      fetcher,
+    );
 
     const templateBody = JSON.parse(String(fetcher.mock.calls[0][1]?.body)) as Record<string, unknown>;
     const versionBody = JSON.parse(String(fetcher.mock.calls[1][1]?.body)) as Record<string, unknown>;
+    const releaseBody = JSON.parse(String(fetcher.mock.calls[2][1]?.body)) as Record<string, unknown>;
     expect(templateBody).not.toHaveProperty("token");
     expect(templateBody).not.toHaveProperty("secret");
     expect(versionBody).not.toHaveProperty("password");
     expect(versionBody).not.toHaveProperty("api_key");
+    expect(releaseBody).not.toHaveProperty("prompt");
+    expect(releaseBody).not.toHaveProperty("secret");
   });
 });

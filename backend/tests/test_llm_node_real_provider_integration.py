@@ -4,6 +4,7 @@ import pytest
 from backend.app.core.settings import AppSettings
 from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
+from backend.app.knowledge.models import RetrievalEvalDataset, RetrievalEvalRun
 from backend.app.model_gateway.openai_compatible import OpenAICompatibleModelGatewayClient
 from backend.app.model_gateway.runner import LlmNodeRunner, LlmNodeRunRequest
 from backend.app.model_gateway.schemas import (
@@ -97,6 +98,50 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
                 updated_by=actor_id,
             )
         )
+        eval_dataset = RetrievalEvalDataset(
+            project_id=project_id,
+            key="final-acceptance-prompt-release",
+            name="Final Acceptance Prompt Release",
+            description="Gate prompt label release for real provider final acceptance.",
+            evaluation_scope="prompt_release",
+            status="active",
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        session.add(eval_dataset)
+        await session.flush()
+        eval_run = RetrievalEvalRun(
+            project_id=project_id,
+            dataset_id=eval_dataset.id,
+            actor_id=actor_id,
+            status="completed",
+            retrieval_mode="hybrid",
+            top_k=5,
+            candidate_limit=50,
+            case_count=1,
+            average_recall_at_k=1.0,
+            average_mrr=1.0,
+            average_context_precision=1.0,
+            average_context_recall=1.0,
+            average_faithfulness=1.0,
+            leakage_count=0,
+            deleted_visible_count=0,
+            report={"dataset_key": eval_dataset.key},
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        session.add(eval_run)
+        await session.commit()
+        await store.publish_prompt_template_release(
+            project_id=project_id,
+            template_ref="final-acceptance-json",
+            version="v1",
+            label="latest",
+            environment="preprod",
+            eval_run_id=eval_run.id,
+            release_note="Final acceptance label release",
+            actor_id=actor_id,
+        )
         workflow = WorkflowDefinition(
             workflow=WorkflowMetadata(
                 id="real_llm_node",
@@ -113,6 +158,8 @@ async def test_llm_node_runner_uses_real_provider_and_records_usage_ledger() -> 
                     data=LlmNodeData(
                         model_policy_ref="default",
                         prompt_template_ref="final-acceptance-json",
+                        prompt_label="latest",
+                        prompt_environment="preprod",
                         prompt_version="v1",
                         max_tokens=24,
                         output_schema_ref="final-acceptance-json-output",
