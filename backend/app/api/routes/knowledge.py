@@ -19,8 +19,11 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentImportResult,
     KnowledgeDocumentListResponse,
     KnowledgeDocumentRead,
+    RunLessonCreateRequest,
+    RunLessonListResponse,
+    RunLessonRead,
 )
-from backend.app.knowledge.store import KnowledgeIngestionStore
+from backend.app.knowledge.store import KnowledgeIngestionStore, RunLessonStore
 
 router = APIRouter(prefix="/projects/{project_id}/knowledge", tags=["knowledge"])
 CurrentAccount = Depends(get_current_account)
@@ -229,6 +232,95 @@ async def delete_document(
     return deleted
 
 
+@router.post(
+    "/run-lessons",
+    response_model=RunLessonRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_run_lesson(
+    project_id: UUID,
+    request: RunLessonCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: RunLessonStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> RunLessonRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:write",
+    )
+    try:
+        lesson = await knowledge_store.create_run_lesson(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.run_lesson.create",
+        target_type="run_lesson",
+        target_id=str(lesson.id),
+        risk_level=_run_lesson_risk_level(lesson.severity),
+        metadata={
+            "lesson_ref": lesson.lesson_ref,
+            "workflow_run_id": lesson.workflow_run_id,
+            "trace_id": lesson.trace_id,
+            "node_id": lesson.node_id,
+            "severity": lesson.severity,
+            "data_classification": lesson.data_classification,
+        },
+    )
+    return lesson
+
+
+@router.get("/run-lessons", response_model=RunLessonListResponse)
+async def list_run_lessons(
+    project_id: UUID,
+    run_id: str | None = None,
+    trace_id: str | None = None,
+    limit: int = 20,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: RunLessonStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> RunLessonListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:view",
+    )
+    safe_limit = min(max(limit, 1), 100)
+    lessons = await knowledge_store.list_run_lessons(
+        project_id=project_id,
+        run_id=run_id,
+        trace_id=trace_id,
+        limit=safe_limit,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.run_lesson.list",
+        target_type="run_lesson",
+        target_id="project",
+        metadata={
+            "lesson_count": len(lessons),
+            "run_id": run_id or "",
+            "trace_id": trace_id or "",
+        },
+    )
+    return RunLessonListResponse(lessons=lessons, count=len(lessons))
+
+
 def _require_project_permission(
     project_access: ProjectAccessProvider,
     current_account: AccountPrincipal,
@@ -266,3 +358,9 @@ def _document_not_found() -> HTTPException:
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Knowledge document not found",
     )
+
+
+def _run_lesson_risk_level(severity: str) -> str:
+    if severity in {"high", "critical"}:
+        return "medium"
+    return "low"

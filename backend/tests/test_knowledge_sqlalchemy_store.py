@@ -2,9 +2,18 @@ from uuid import uuid4
 
 import pytest
 from backend.app.db.base import Base
-from backend.app.knowledge.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocumentVersion
+from backend.app.knowledge.models import (
+    KnowledgeBase,
+    KnowledgeChunk,
+    KnowledgeDocumentVersion,
+    RunLesson,
+)
 from backend.app.knowledge.object_store import InMemoryKnowledgeObjectStore
-from backend.app.knowledge.schemas import KnowledgeBaseCreateRequest, KnowledgeDocumentImportRequest
+from backend.app.knowledge.schemas import (
+    KnowledgeBaseCreateRequest,
+    KnowledgeDocumentImportRequest,
+    RunLessonCreateRequest,
+)
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -212,3 +221,96 @@ async def test_sqlalchemy_knowledge_ingestion_store_soft_deletes_document_versio
     assert all(version.ingestion_status == "deleted" for version in versions)
     assert all(chunk.status == "deleted" for chunk in chunks)
     assert all(chunk.index_status == "deleted" for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_run_lesson_store_creates_lists_and_redacts_project_scoped_lessons() -> (
+    None
+):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        project_id = uuid4()
+        other_project_id = uuid4()
+        actor_id = uuid4()
+        store = SqlAlchemyKnowledgeIngestionStore(session)
+
+        created = await store.create_run_lesson(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=RunLessonCreateRequest(
+                lesson_ref="run-ui:trace-ui:shell_1",
+                title="Shell recovery lesson",
+                summary="Restart succeeded after policy approval token=raw-token",
+                body="Use approved shell template only. password=raw-password",
+                workflow_id="ops_incident_triage",
+                workflow_run_id="run-ui",
+                node_id="shell_1",
+                trace_id="trace-ui",
+                severity="high",
+                data_classification="internal",
+            ),
+        )
+        await store.create_run_lesson(
+            project_id=other_project_id,
+            actor_id=actor_id,
+            request=RunLessonCreateRequest(
+                lesson_ref="other-run:other-trace",
+                title="Other project lesson",
+                summary="Should not be visible",
+                workflow_run_id="run-ui",
+                trace_id="trace-ui",
+            ),
+        )
+        listed = await store.list_run_lessons(
+            project_id=project_id,
+            run_id="run-ui",
+            trace_id="trace-ui",
+        )
+        persisted = await session.get(RunLesson, created.id)
+
+    await engine.dispose()
+
+    assert created.lesson_ref == "run-ui:trace-ui:shell_1"
+    assert created.project_id == project_id
+    assert created.severity == "high"
+    assert "raw-token" not in created.summary
+    assert "raw-password" not in created.body
+    assert created.content_hash.startswith("sha256:")
+    assert [lesson.id for lesson in listed] == [created.id]
+    assert persisted is not None
+    assert "raw-token" not in persisted.summary
+    assert "raw-password" not in persisted.body
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_run_lesson_store_rejects_duplicate_refs_per_project() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        project_id = uuid4()
+        actor_id = uuid4()
+        store = SqlAlchemyKnowledgeIngestionStore(session)
+        request = RunLessonCreateRequest(
+            lesson_ref="run-ui:trace-ui",
+            title="Duplicate protected lesson",
+            summary="first",
+            workflow_run_id="run-ui",
+            trace_id="trace-ui",
+        )
+        await store.create_run_lesson(project_id=project_id, actor_id=actor_id, request=request)
+
+        with pytest.raises(ValueError, match="Run lesson ref already exists"):
+            await store.create_run_lesson(
+                project_id=project_id,
+                actor_id=actor_id,
+                request=request.model_copy(update={"summary": "second"}),
+            )
+
+    await engine.dispose()

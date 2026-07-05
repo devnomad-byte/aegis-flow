@@ -7,6 +7,8 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentImportRequest,
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
+    RunLessonCreateRequest,
+    RunLessonRead,
 )
 
 
@@ -48,4 +50,25 @@ class KnowledgeIngestionStore(Protocol):
         document_id: UUID,
         actor_id: UUID,
     ) -> KnowledgeDocumentRead | None:
+        raise NotImplementedError
+
+
+class RunLessonStore(Protocol):
+    async def create_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: RunLessonCreateRequest,
+    ) -> RunLessonRead:
+        raise NotImplementedError
+
+    async def list_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 20,
+    ) -> list[RunLessonRead]:
         raise NotImplementedError

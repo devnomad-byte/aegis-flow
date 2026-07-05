@@ -1,6 +1,7 @@
 export type DataClassification = "public" | "internal" | "confidential" | "restricted" | "secret";
 export type ContentFormat = "text" | "markdown";
 export type RetrievalMode = "hybrid" | "keyword" | "vector";
+export type RunLessonSeverity = "info" | "low" | "medium" | "high" | "critical";
 
 export type KnowledgeBase = {
   id: string;
@@ -143,11 +144,66 @@ export type RetrievalQueryResponse = {
   }>;
 };
 
+export type RunLesson = {
+  id: string;
+  project_id: string;
+  lesson_ref: string;
+  title: string;
+  summary: string;
+  body: string;
+  workflow_id: string;
+  workflow_run_id: string;
+  node_id: string;
+  trace_id: string;
+  severity: RunLessonSeverity;
+  data_classification: DataClassification;
+  milvus_collection: string;
+  milvus_vector_id: string;
+  content_hash: string;
+  status: string;
+  is_deleted: boolean;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RunLessonCreateRequest = {
+  lesson_ref: string;
+  title: string;
+  summary: string;
+  body?: string;
+  workflow_id?: string;
+  workflow_run_id: string;
+  node_id?: string;
+  trace_id: string;
+  severity?: RunLessonSeverity;
+  data_classification?: DataClassification;
+};
+
+export type RunLessonListResponse = {
+  lessons: RunLesson[];
+  count: number;
+};
+
 export const knowledgeBasesQueryKey = (projectId: string) =>
   ["project", projectId, "knowledge-center", "bases"] as const;
 
 export const knowledgeBaseDocumentsQueryKey = (projectId: string, baseId: string) =>
   ["project", projectId, "knowledge-center", "bases", baseId, "documents"] as const;
+
+export const runLessonsQueryKey = (
+  projectId: string,
+  filters: { run_id?: string; trace_id?: string } = {},
+) =>
+  [
+    "project",
+    projectId,
+    "knowledge-center",
+    "run-lessons",
+    filters.run_id ?? "",
+    filters.trace_id ?? "",
+  ] as const;
 
 export async function listKnowledgeBases(
   projectId: string,
@@ -238,6 +294,47 @@ export async function queryRetrieval(
       headers: { "Content-Type": "application/json" },
       method: "POST",
     },
+    fetcher,
+  );
+}
+
+export async function createRunLesson(
+  projectId: string,
+  request: RunLessonCreateRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RunLesson> {
+  return requestJson<RunLesson>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/knowledge/run-lessons`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function listRunLessons(
+  projectId: string,
+  filters: { run_id?: string; trace_id?: string; limit?: number } = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RunLessonListResponse> {
+  const params = new URLSearchParams();
+  if (filters.run_id) {
+    params.set("run_id", filters.run_id);
+  }
+  if (filters.trace_id) {
+    params.set("trace_id", filters.trace_id);
+  }
+  if (typeof filters.limit === "number") {
+    params.set("limit", String(filters.limit));
+  }
+  const query = params.toString();
+  return requestJson<RunLessonListResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/knowledge/run-lessons${
+      query ? `?${query}` : ""
+    }`,
+    undefined,
     fetcher,
   );
 }

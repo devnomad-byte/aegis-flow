@@ -2,13 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createKnowledgeBase,
+  createRunLesson,
   deleteKnowledgeDocument,
   importKnowledgeDocument,
   knowledgeBaseDocumentsQueryKey,
   knowledgeBasesQueryKey,
+  listRunLessons,
   listKnowledgeBases,
   listKnowledgeDocuments,
   queryRetrieval,
+  runLessonsQueryKey,
 } from "./knowledgeCenterApi";
 
 describe("knowledgeCenterApi", () => {
@@ -61,6 +64,22 @@ describe("knowledgeCenterApi", () => {
       },
       fetcher,
     );
+    await createRunLesson(
+      "ops-command",
+      {
+        lesson_ref: "run-ui:trace-ui:shell_1",
+        summary: "Approved resume succeeded",
+        title: "Shell recovery lesson",
+        trace_id: "trace-ui",
+        workflow_run_id: "run-ui",
+      },
+      fetcher,
+    );
+    await listRunLessons(
+      "ops-command",
+      { limit: 10, run_id: "run-ui", trace_id: "trace-ui" },
+      fetcher,
+    );
 
     expect(fetcher).toHaveBeenNthCalledWith(1, "/api/v1/projects/ops-command/knowledge/bases");
     expect(fetcher).toHaveBeenNthCalledWith(
@@ -87,6 +106,15 @@ describe("knowledgeCenterApi", () => {
       "/api/v1/projects/ops-command/retrieval/query",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      7,
+      "/api/v1/projects/ops-command/knowledge/run-lessons",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      8,
+      "/api/v1/projects/ops-command/knowledge/run-lessons?run_id=run-ui&trace_id=trace-ui&limit=10",
+    );
     const retrievalBody = JSON.parse(String(fetcher.mock.calls[5][1]?.body)) as Record<string, unknown>;
     expect(retrievalBody).toMatchObject({
       candidate_limit: 10,
@@ -110,6 +138,14 @@ describe("knowledgeCenterApi", () => {
       "bases",
       "base-1",
       "documents",
+    ]);
+    expect(runLessonsQueryKey("ops-command", { run_id: "run-ui", trace_id: "trace-ui" })).toEqual([
+      "project",
+      "ops-command",
+      "knowledge-center",
+      "run-lessons",
+      "run-ui",
+      "trace-ui",
     ]);
   });
 });

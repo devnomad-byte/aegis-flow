@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from backend.app.knowledge.models import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeDocumentVersion,
+    RunLesson,
 )
 from backend.app.knowledge.object_store import InMemoryKnowledgeObjectStore, KnowledgeObjectStore
 from backend.app.knowledge.schemas import (
@@ -20,7 +22,10 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
     KnowledgeDocumentVersionRead,
+    RunLessonCreateRequest,
+    RunLessonRead,
 )
+from backend.app.security.redaction import redact_sensitive_text
 
 
 class SqlAlchemyKnowledgeIngestionStore:
@@ -307,6 +312,69 @@ class SqlAlchemyKnowledgeIngestionStore:
         await self._session.refresh(document)
         return _document_to_read(document)
 
+    async def create_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: RunLessonCreateRequest,
+    ) -> RunLessonRead:
+        sanitized_summary = redact_sensitive_text(request.summary)
+        sanitized_body = redact_sensitive_text(request.body)
+        content_hash = _run_lesson_content_hash(
+            title=request.title,
+            summary=sanitized_summary,
+            body=sanitized_body,
+        )
+        lesson = RunLesson(
+            project_id=project_id,
+            lesson_ref=request.lesson_ref,
+            title=redact_sensitive_text(request.title),
+            summary=sanitized_summary,
+            body=sanitized_body,
+            workflow_id=request.workflow_id,
+            workflow_run_id=request.workflow_run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            severity=request.severity,
+            data_classification=request.data_classification,
+            content_hash=content_hash,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(lesson)
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise ValueError("Run lesson ref already exists for project") from exc
+        await self._session.refresh(lesson)
+        return _run_lesson_to_read(lesson)
+
+    async def list_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 20,
+    ) -> list[RunLessonRead]:
+        statement = select(RunLesson).where(
+            RunLesson.project_id == project_id,
+            RunLesson.is_deleted.is_(False),
+            RunLesson.status == "active",
+        )
+        if run_id:
+            statement = statement.where(RunLesson.workflow_run_id == run_id)
+        if trace_id:
+            statement = statement.where(RunLesson.trace_id == trace_id)
+        result = await self._session.scalars(
+            statement.order_by(RunLesson.updated_at.desc(), RunLesson.created_at.desc()).limit(
+                limit
+            )
+        )
+        return [_run_lesson_to_read(lesson) for lesson in result.all()]
+
     async def _create_chunk(
         self,
         *,
@@ -438,7 +506,16 @@ def _version_to_read(version: KnowledgeDocumentVersion) -> KnowledgeDocumentVers
     return KnowledgeDocumentVersionRead.model_validate(version)
 
 
+def _run_lesson_to_read(lesson: RunLesson) -> RunLessonRead:
+    return RunLessonRead.model_validate(lesson)
+
+
 def _content_type_for_format(content_format: str) -> str:
     if content_format == "markdown":
         return "text/markdown; charset=utf-8"
     return "text/plain; charset=utf-8"
+
+
+def _run_lesson_content_hash(*, title: str, summary: str, body: str) -> str:
+    digest = hashlib.sha256(f"{title}\n{summary}\n{body}".encode()).hexdigest()
+    return f"sha256:{digest}"

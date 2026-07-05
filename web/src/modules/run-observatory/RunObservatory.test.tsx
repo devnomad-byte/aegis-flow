@@ -216,6 +216,34 @@ describe("RunObservatory", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/knowledge/run-lessons") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: "lesson-1",
+            project_id: "ops-command",
+            lesson_ref: "run-ui:trace-ui:run",
+            title: "Recovery memory",
+            summary: "Shell approval recovered safely",
+            body: "Operator confirmed the approved shell template.",
+            workflow_id: "ops_incident_triage",
+            workflow_run_id: "run-ui",
+            node_id: "shell_1",
+            trace_id: "trace-ui",
+            severity: "high",
+            data_classification: "internal",
+            milvus_collection: "",
+            milvus_vector_id: "",
+            content_hash: "sha256:lesson",
+            status: "active",
+            is_deleted: false,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-04T00:00:00Z",
+            updated_at: "2026-07-04T00:00:00Z",
+          }),
+          { status: 201 },
+        );
+      }
       if (url.includes("/audit/raw-trace-access-requests") && init?.method === "POST") {
         return new Response(
           JSON.stringify({
@@ -247,6 +275,7 @@ describe("RunObservatory", () => {
     expect(await screen.findByText("Graph Replay")).toBeInTheDocument();
     expect(screen.getByText("Unified Timeline")).toBeInTheDocument();
     expect(screen.getByText("Sanitized Span Evidence")).toBeInTheDocument();
+    expect(screen.getByText("Run Lesson Capture")).toBeInTheDocument();
     expect(screen.getByText("Runtime Trace Span + Ledger Drilldown")).toBeInTheDocument();
     expect((await screen.findAllByText("llm.model_call")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("tool.call").length).toBeGreaterThan(0);
@@ -288,6 +317,36 @@ describe("RunObservatory", () => {
     expect(await screen.findByText("OTLP export recorded for 3 spans")).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/runtime-traces/spans/otlp-export?run_id=run-ui&trace_id=trace-ui&limit=500",
+    );
+
+    await user.clear(screen.getByLabelText("Run lesson summary"));
+    await user.type(screen.getByLabelText("Run lesson summary"), "Shell approval recovered safely");
+    await user.clear(screen.getByLabelText("Run lesson notes"));
+    await user.type(
+      screen.getByLabelText("Run lesson notes"),
+      "Operator confirmed the approved shell template.",
+    );
+    await user.selectOptions(screen.getByLabelText("Severity"), "high");
+    await user.click(screen.getByRole("button", { name: "Save Run Lesson" }));
+
+    expect(await screen.findByText("Run lesson saved as run-ui:trace-ui:run")).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/knowledge/run-lessons",
+      expect.objectContaining({
+        body: JSON.stringify({
+          body: "Operator confirmed the approved shell template.",
+          data_classification: "internal",
+          lesson_ref: "run-ui:trace-ui:run",
+          node_id: "shell_1",
+          severity: "high",
+          summary: "Shell approval recovered safely",
+          title: "Run recovery lesson",
+          trace_id: "trace-ui",
+          workflow_id: "ops_incident_triage",
+          workflow_run_id: "run-ui",
+        }),
+        method: "POST",
+      }),
     );
 
     await user.clear(screen.getByLabelText("Access reason"));

@@ -3,6 +3,11 @@ import { useMemo, useState } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
+  createRunLesson,
+  runLessonsQueryKey,
+  type RunLessonSeverity,
+} from "../knowledge-center/knowledgeCenterApi";
+import {
   listModelGatewayInvocations,
   type ModelGatewayInvocation,
 } from "../model-gateway/modelGatewayApi";
@@ -70,6 +75,12 @@ type WorkflowRunResumeMutationRequest = {
 };
 
 type RunHistoryStatusFilter = WorkflowRunStatus | "all";
+type RunLessonFormState = {
+  body: string;
+  severity: RunLessonSeverity;
+  summary: string;
+  title: string;
+};
 
 const EMPTY_RUNTIME_SPANS: RuntimeTraceSpan[] = [];
 const EMPTY_MODEL_INVOCATIONS: ModelGatewayInvocation[] = [];
@@ -120,6 +131,12 @@ export function RunObservatory({ project }: RunObservatoryProps) {
   const [historyStatusFilter, setHistoryStatusFilter] =
     useState<RunHistoryStatusFilter>("all");
   const [ledgerDrilldown, setLedgerDrilldown] = useState<LedgerDrilldown>(null);
+  const [runLessonForm, setRunLessonForm] = useState<RunLessonFormState>({
+    body: "",
+    severity: "info",
+    summary: "Record the recovery decision, safe evidence, and follow-up action.",
+    title: "Run recovery lesson",
+  });
   const [runScope, setRunScope] = useState<RunScope>(() => readInitialRunScope());
 
   const hasTraceScope = Boolean(runScope.runId && runScope.traceId);
@@ -211,6 +228,34 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         target_id: runScope.traceId,
       }),
   });
+  const runLessonMutation = useMutation({
+    mutationFn: () => {
+      const detail = runDetailQuery.data;
+      if (!detail) {
+        throw new Error("Load workflow run detail before saving a run lesson.");
+      }
+      return createRunLesson(project.projectId, {
+        body: runLessonForm.body,
+        data_classification: "internal",
+        lesson_ref: buildRunLessonRef(runScope),
+        node_id: runScope.nodeId || firstRelevantNodeId(detail) || "",
+        severity: runLessonForm.severity,
+        summary: runLessonForm.summary,
+        title: runLessonForm.title,
+        trace_id: runScope.traceId,
+        workflow_id: detail.run.workflow_id,
+        workflow_run_id: runScope.runId,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: runLessonsQueryKey(project.projectId, {
+          run_id: runScope.runId,
+          trace_id: runScope.traceId,
+        }),
+      });
+    },
+  });
   const resumeMutation = useMutation({
     mutationFn: (request: WorkflowRunResumeMutationRequest) =>
       resumeWorkflowRun(project.projectId, runScope.versionId, runScope.runId, {
@@ -284,6 +329,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
     resumeMutation.reset();
     cancelMutation.reset();
     retryMutation.reset();
+    runLessonMutation.reset();
     setLedgerDrilldown(null);
     setRunScope({
       nodeId: "",
@@ -343,6 +389,19 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               error={runEventsQuery.error}
               events={runtimeEvents}
               isLoading={runEventsQuery.isLoading}
+            />
+          ) : null}
+          {hasRunDetailScope ? (
+            <RunLessonCapturePanel
+              form={runLessonForm}
+              hasRunDetail={Boolean(runDetailQuery.data)}
+              isPending={runLessonMutation.isPending}
+              lessonRef={buildRunLessonRef(runScope)}
+              mutationError={runLessonMutation.error}
+              mutationResultRef={runLessonMutation.data?.lesson_ref ?? ""}
+              onChange={setRunLessonForm}
+              onSave={() => runLessonMutation.mutate()}
+              runScope={runScope}
             />
           ) : null}
 
@@ -837,6 +896,107 @@ function RuntimeEventStreamPanel({
   );
 }
 
+function RunLessonCapturePanel({
+  form,
+  hasRunDetail,
+  isPending,
+  lessonRef,
+  mutationError,
+  mutationResultRef,
+  onChange,
+  onSave,
+  runScope,
+}: {
+  form: RunLessonFormState;
+  hasRunDetail: boolean;
+  isPending: boolean;
+  lessonRef: string;
+  mutationError: unknown;
+  mutationResultRef: string;
+  onChange: (form: RunLessonFormState) => void;
+  onSave: () => void;
+  runScope: RunScope;
+}) {
+  const canSave =
+    hasRunDetail &&
+    Boolean(runScope.runId && runScope.traceId) &&
+    Boolean(form.title.trim() && form.summary.trim()) &&
+    !isPending;
+
+  return (
+    <section className="global-panel run-detail-panel" aria-label="Run Lesson Capture">
+      <PanelHeader label="MEMORY CAPTURE" title="Run Lesson Capture" />
+      <div className="node-detail-grid">
+        <Detail label="Lesson ref" value={lessonRef || "run scope required"} />
+        <Detail label="Run" value={runScope.runId || "not selected"} />
+        <Detail label="Trace" value={runScope.traceId || "not selected"} />
+        <Detail label="Node" value={runScope.nodeId || "first relevant node"} />
+      </div>
+      <label className="field-label" htmlFor="run-lesson-title">
+        Title
+        <input
+          className="text-field"
+          id="run-lesson-title"
+          onChange={(event) => onChange({ ...form, title: event.target.value })}
+          value={form.title}
+        />
+      </label>
+      <label className="field-label" htmlFor="run-lesson-severity">
+        Severity
+        <select
+          className="text-field"
+          id="run-lesson-severity"
+          onChange={(event) =>
+            onChange({ ...form, severity: event.target.value as RunLessonSeverity })
+          }
+          value={form.severity}
+        >
+          <option value="info">info</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="critical">critical</option>
+        </select>
+      </label>
+      <label className="field-label" htmlFor="run-lesson-summary">
+        Summary
+        <textarea
+          aria-label="Run lesson summary"
+          className="yaml-field workflow-run-inputs"
+          id="run-lesson-summary"
+          onChange={(event) => onChange({ ...form, summary: event.target.value })}
+          rows={3}
+          value={form.summary}
+        />
+      </label>
+      <label className="field-label" htmlFor="run-lesson-body">
+        Operator notes
+        <textarea
+          aria-label="Run lesson notes"
+          className="yaml-field workflow-run-inputs"
+          id="run-lesson-body"
+          onChange={(event) => onChange({ ...form, body: event.target.value })}
+          rows={4}
+          value={form.body}
+        />
+      </label>
+      <button className="toolbar-button" disabled={!canSave} onClick={onSave} type="button">
+        {isPending ? "Saving lesson" : "Save Run Lesson"}
+      </button>
+      {mutationResultRef ? (
+        <div className="preview-alert preview-alert-success">
+          Run lesson saved as {mutationResultRef}
+        </div>
+      ) : null}
+      {mutationError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(mutationError as Error).message}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function WorkflowRunHistoryPanel({
   error,
   onSelectRun,
@@ -1312,6 +1472,23 @@ function buildDebugChatHref(projectId: string, run: WorkflowRunRead) {
     trace_id: run.trace_id,
   });
   return `/projects/${encodeURIComponent(projectId)}/debug-chat?${params.toString()}`;
+}
+
+function buildRunLessonRef(scope: RunScope): string {
+  const parts = [scope.runId, scope.traceId, scope.nodeId || "run"].filter(Boolean);
+  return parts.join(":").slice(0, 160);
+}
+
+function firstRelevantNodeId(detail: WorkflowRunDetailResponse): string {
+  const failed = detail.checkpoints.find((checkpoint) => checkpoint.status === "failed");
+  if (failed) {
+    return failed.node_id;
+  }
+  const pending = detail.checkpoints.find((checkpoint) => checkpoint.status === "pending_approval");
+  if (pending) {
+    return pending.node_id;
+  }
+  return detail.checkpoints[0]?.node_id ?? "";
 }
 
 async function invalidateWorkflowRunQueries(

@@ -17,6 +17,8 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
     KnowledgeDocumentVersionRead,
+    RunLessonCreateRequest,
+    RunLessonRead,
 )
 from backend.app.main import create_app
 from fastapi.testclient import TestClient
@@ -49,6 +51,7 @@ class InMemoryKnowledgeIngestionStore:
         self.imports: list[KnowledgeDocumentImportResult] = []
         self.deleted_ids: list[UUID] = []
         self.bases: list[KnowledgeBaseRead] = []
+        self.run_lessons: list[RunLessonRead] = []
 
     async def create_knowledge_base(
         self,
@@ -178,6 +181,57 @@ class InMemoryKnowledgeIngestionStore:
                     update={"status": "deleted", "is_deleted": True, "updated_by": actor_id}
                 )
         return None
+
+    async def create_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: RunLessonCreateRequest,
+    ) -> RunLessonRead:
+        now = datetime.now(UTC)
+        lesson = RunLessonRead(
+            id=uuid4(),
+            project_id=project_id,
+            lesson_ref=request.lesson_ref,
+            title=request.title,
+            summary=request.summary,
+            body=request.body,
+            workflow_id=request.workflow_id,
+            workflow_run_id=request.workflow_run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            severity=request.severity,
+            data_classification=request.data_classification,
+            milvus_collection="",
+            milvus_vector_id="",
+            content_hash="sha256:test-lesson",
+            status="active",
+            is_deleted=False,
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.run_lessons.append(lesson)
+        return lesson
+
+    async def list_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 20,
+    ) -> list[RunLessonRead]:
+        lessons = [
+            lesson
+            for lesson in self.run_lessons
+            if lesson.project_id == project_id
+            and (run_id is None or lesson.workflow_run_id == run_id)
+            and (trace_id is None or lesson.trace_id == trace_id)
+        ]
+        return lessons[:limit]
 
 
 class InMemoryAuditEventStore:
@@ -354,6 +408,97 @@ def test_knowledge_import_returns_404_for_unknown_knowledge_base() -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_run_lesson_create_and_list_api_records_sanitized_audit() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:write", "knowledge:view"])
+    store = InMemoryKnowledgeIngestionStore(uuid4())
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=store,
+        audit_store=audit_store,
+    )
+
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons",
+        json={
+            "lesson_ref": "run-ui:trace-ui:shell_1",
+            "title": "Shell recovery lesson",
+            "summary": "Approved resume succeeded token=raw-secret-token",
+            "body": "Use approved shell template only password=raw-password",
+            "workflow_id": "ops_incident_triage",
+            "workflow_run_id": "run-ui",
+            "node_id": "shell_1",
+            "trace_id": "trace-ui",
+            "severity": "high",
+            "data_classification": "internal",
+        },
+    )
+    list_response = client.get(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons?run_id=run-ui&trace_id=trace-ui"
+    )
+
+    assert create_response.status_code == 201
+    assert create_response.json()["lesson_ref"] == "run-ui:trace-ui:shell_1"
+    assert list_response.status_code == 200
+    assert list_response.json()["count"] == 1
+    assert [event["action"] for event in audit_store.events] == [
+        "knowledge.run_lesson.create",
+        "knowledge.run_lesson.list",
+    ]
+    rendered_audit = str(audit_store.events)
+    assert "raw-secret-token" not in rendered_audit
+    assert "raw-password" not in rendered_audit
+    assert audit_store.events[0]["metadata"] == {
+        "lesson_ref": "run-ui:trace-ui:shell_1",
+        "workflow_run_id": "run-ui",
+        "trace_id": "trace-ui",
+        "node_id": "shell_1",
+        "severity": "high",
+        "data_classification": "internal",
+    }
+
+
+def test_run_lesson_create_requires_knowledge_write_permission() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:view"])
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=InMemoryKnowledgeIngestionStore(uuid4()),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons",
+        json={
+            "lesson_ref": "run-ui:trace-ui",
+            "title": "Shell recovery lesson",
+            "summary": "Approved resume succeeded",
+            "workflow_run_id": "run-ui",
+            "trace_id": "trace-ui",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_run_lesson_list_requires_knowledge_view_permission() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:write"])
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=InMemoryKnowledgeIngestionStore(uuid4()),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.get(f"/api/v1/projects/{project.id}/knowledge/run-lessons")
+
+    assert response.status_code == 403
 
 
 def build_client(
