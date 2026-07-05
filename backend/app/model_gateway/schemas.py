@@ -12,6 +12,7 @@ ModelGatewayInvocationStatus = Literal[
     "success",
     "failed",
     "denied",
+    "pending_approval",
     "budget_exceeded",
     "schema_validation_failed",
 ]

@@ -3,6 +3,7 @@ import json
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -33,6 +34,11 @@ from backend.app.policy_center.runtime import (
     ApprovalPolicyDecisionRequest,
     ApprovalPolicyRuntimeEvaluator,
 )
+from backend.app.runtime_approvals.schemas import (
+    RuntimeApprovalTaskCreate,
+    RuntimeApprovalTaskRead,
+)
+from backend.app.runtime_approvals.store import RuntimeApprovalTaskStore
 from backend.app.security.egress_policy import EgressPolicy, EgressPolicyViolation
 from backend.app.security.egress_proxy import (
     EgressProxyMode,
@@ -76,6 +82,7 @@ class ShellExecutionRequest(BaseModel):
     template_version: int = Field(ge=1)
     environment: str = Field(min_length=1, max_length=80)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    approved_approval_task_id: UUID | None = None
 
 
 class ShellExecutionResult(BaseModel):
@@ -91,6 +98,7 @@ class ShellExecutionResult(BaseModel):
     sandbox_image: str
     sandbox_image_digest: str = ""
     network_mode: str = "none"
+    approval_task_id: UUID | None = None
     error_type: str = ""
     error_message: str = ""
 
@@ -151,6 +159,24 @@ class ShellTemplateStore(Protocol):
 
 class ShellInvocationStore(Protocol):
     async def record_invocation(self, request: ShellInvocationCreate) -> Any:
+        raise NotImplementedError
+
+    async def update_invocation_by_ref(
+        self,
+        *,
+        project_id: UUID,
+        invocation_ref: str,
+        actor_id: UUID,
+        status: ShellInvocationStatus,
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        resource_usage: dict[str, object] | None = None,
+        stdout_summary: str = "",
+        stderr_summary: str = "",
+        error_type: str = "",
+        error_message: str = "",
+        command_hash: str | None = None,
+    ) -> Any:
         raise NotImplementedError
 
 
@@ -232,6 +258,7 @@ class ShellExecutionGatewayService:
     command_executor: ShellCommandExecutor = DockerShellCommandExecutor()
     sandbox_policy: DockerSandboxPolicy = DockerSandboxPolicy()
     approval_evaluator: ApprovalPolicyRuntimeEvaluator | None = None
+    runtime_approval_store: RuntimeApprovalTaskStore | None = None
 
     async def run_shell(self, request: ShellExecutionRequest) -> ShellExecutionResult:
         started = time.perf_counter()
@@ -249,25 +276,28 @@ class ShellExecutionGatewayService:
         _validate_parameters(template, request.parameters)
 
         invocation_id = f"shell_{uuid4().hex}"
+        if request.approved_approval_task_id is not None:
+            approval_task = await _validate_runtime_approval_for_shell(
+                approval_store=self.runtime_approval_store,
+                request=request,
+                template=template,
+            )
+            invocation_id = approval_task.invocation_ref
         policy_decision = await _evaluate_shell_approval_policy(
             approval_evaluator=self.approval_evaluator,
             request=request,
             template=template,
         )
-        if policy_decision in {"denied", "approval_required"}:
-            error_type = (
-                "approval_policy_denied"
-                if policy_decision == "denied"
-                else "approval_policy_approval_required"
+        if policy_decision == "approval_required" and request.approved_approval_task_id is None:
+            return await self._create_pending_approval(
+                request=request,
+                template=template,
+                invocation_id=invocation_id,
+                started=started,
             )
-            error_message = (
-                "Shell execution denied by approval policy"
-                if policy_decision == "denied"
-                else (
-                    "Shell execution requires approval; "
-                    "shell approval recovery is not available in v1"
-                )
-            )
+        if policy_decision == "denied":
+            error_type = "approval_policy_denied"
+            error_message = "Shell execution denied by approval policy"
             command_hash = hash_command(
                 [
                     "approval-policy",
@@ -277,34 +307,19 @@ class ShellExecutionGatewayService:
                 ]
             )
             duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-            await self.invocation_store.record_invocation(
-                ShellInvocationCreate(
-                    project_id=request.project_id,
-                    actor_id=request.actor_id,
-                    invocation_ref=invocation_id,
-                    template_ref=template.template_ref,
-                    template_version=template.template_version,
-                    command_hash=command_hash,
-                    sandbox_image=template.image_ref,
-                    sandbox_image_digest=template.image_digest,
-                    egress_profile_ref="",
-                    egress_proxy_mode="",
-                    network_mode=self.sandbox_policy.network_mode,
-                    workflow_ref=request.workflow_ref,
-                    run_id=request.run_id,
-                    node_id=request.node_id,
-                    trace_id=request.trace_id,
-                    status="denied",
-                    exit_code=None,
-                    duration_ms=duration_ms,
-                    resource_usage={},
-                    stdout_summary="",
-                    stderr_summary="",
-                    error_type=error_type,
-                    error_message=error_message,
-                    created_by=request.actor_id,
-                    updated_by=request.actor_id,
-                )
+            await self._record_or_update_invocation(
+                request=request,
+                template=template,
+                invocation_id=invocation_id,
+                command_hash=command_hash,
+                status="denied",
+                exit_code=None,
+                duration_ms=duration_ms,
+                resource_usage={},
+                stdout_summary="",
+                stderr_summary="",
+                error_type=error_type,
+                error_message=error_message,
             )
             return ShellExecutionResult(
                 status="denied",
@@ -360,7 +375,183 @@ class ShellExecutionGatewayService:
             error_message = redact_sensitive_text(str(exc))
 
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-        await self.invocation_store.record_invocation(
+        await self._record_or_update_invocation(
+            request=request,
+            template=template,
+            invocation_id=invocation_id,
+            command_hash=command_hash,
+            status=status,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            resource_usage={},
+            stdout_summary=stdout_summary,
+            stderr_summary=stderr_summary,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        if (
+            request.approved_approval_task_id is not None
+            and self.runtime_approval_store is not None
+        ):
+            await self.runtime_approval_store.mark_approval_task_resumed(
+                project_id=request.project_id,
+                approval_task_id=request.approved_approval_task_id,
+                actor_id=request.actor_id,
+            )
+        return ShellExecutionResult(
+            status=status,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            stdout_summary=stdout_summary,
+            stderr_summary=stderr_summary,
+            invocation_id=invocation_id,
+            command_hash=command_hash,
+            sandbox_image=template.image_ref,
+            sandbox_image_digest=template.image_digest,
+            network_mode=self.sandbox_policy.network_mode,
+            error_type=error_type,
+            error_message=error_message,
+        )
+
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
+    ) -> ShellExecutionResult:
+        if self.runtime_approval_store is None:
+            raise ShellExecutionGatewayError("runtime approval store is not configured")
+        approval_task = await self.runtime_approval_store.get_approval_task(
+            project_id=project_id,
+            approval_task_id=approval_task_id,
+        )
+        if approval_task is None:
+            raise ShellExecutionGatewayError("approval task not found")
+        request = ShellExecutionRequest.model_validate(approval_task.request_payload).model_copy(
+            update={
+                "actor_id": actor_id,
+                "approved_approval_task_id": approval_task_id,
+            }
+        )
+        result = await self.run_shell(request)
+        if result.status == "denied":
+            raise ShellExecutionGatewayError(result.error_message or "Shell execution denied")
+        return result
+
+    async def _create_pending_approval(
+        self,
+        *,
+        request: ShellExecutionRequest,
+        template: ShellTemplateRead,
+        invocation_id: str,
+        started: float,
+    ) -> ShellExecutionResult:
+        if self.runtime_approval_store is None:
+            raise ShellExecutionGatewayError("runtime approval store is not configured")
+        command_hash = hash_command(
+            [
+                "approval-policy",
+                "approval_required",
+                template.template_ref,
+                str(template.template_version),
+            ]
+        )
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        await self._record_or_update_invocation(
+            request=request,
+            template=template,
+            invocation_id=invocation_id,
+            command_hash=command_hash,
+            status="pending_approval",
+            exit_code=None,
+            duration_ms=duration_ms,
+            resource_usage={},
+            stdout_summary="",
+            stderr_summary="",
+            error_type="approval_policy_approval_required",
+            error_message="Shell execution requires approval",
+        )
+        approval_task = await self.runtime_approval_store.create_approval_task(
+            RuntimeApprovalTaskCreate(
+                project_id=request.project_id,
+                actor_id=request.actor_id,
+                target_kind="shell_execution",
+                target_ref=template.template_ref,
+                invocation_ref=invocation_id,
+                workflow_ref=request.workflow_ref,
+                run_id=request.run_id,
+                node_id=request.node_id,
+                trace_id=request.trace_id,
+                risk_level=template.risk_level,
+                request_payload=request.model_dump(mode="json"),
+                public_payload={
+                    "template_ref": template.template_ref,
+                    "template_version": template.template_version,
+                    "environment": request.environment,
+                    "parameter_keys": sorted(request.parameters.keys()),
+                },
+                target_snapshot={
+                    "template_ref": template.template_ref,
+                    "template_version": template.template_version,
+                    "image_ref": template.image_ref,
+                    "image_digest": template.image_digest,
+                    "risk_level": template.risk_level,
+                    "network_mode": self.sandbox_policy.network_mode,
+                },
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                created_by=request.actor_id,
+                updated_by=request.actor_id,
+            )
+        )
+        return ShellExecutionResult(
+            status="pending_approval",
+            exit_code=None,
+            duration_ms=duration_ms,
+            stdout_summary="",
+            stderr_summary="",
+            invocation_id=invocation_id,
+            command_hash=command_hash,
+            sandbox_image=template.image_ref,
+            sandbox_image_digest=template.image_digest,
+            network_mode=self.sandbox_policy.network_mode,
+            approval_task_id=approval_task.id,
+            error_type="approval_policy_approval_required",
+            error_message="Shell execution requires approval",
+        )
+
+    async def _record_or_update_invocation(
+        self,
+        *,
+        request: ShellExecutionRequest,
+        template: ShellTemplateRead,
+        invocation_id: str,
+        command_hash: str,
+        status: ShellInvocationStatus,
+        exit_code: int | None,
+        duration_ms: int,
+        resource_usage: dict[str, object],
+        stdout_summary: str,
+        stderr_summary: str,
+        error_type: str,
+        error_message: str,
+    ) -> Any:
+        if request.approved_approval_task_id is not None:
+            return await self.invocation_store.update_invocation_by_ref(
+                project_id=request.project_id,
+                invocation_ref=invocation_id,
+                actor_id=request.actor_id,
+                status=status,
+                exit_code=exit_code,
+                duration_ms=duration_ms,
+                resource_usage=resource_usage,
+                stdout_summary=stdout_summary,
+                stderr_summary=stderr_summary,
+                error_type=error_type,
+                error_message=error_message,
+                command_hash=command_hash,
+            )
+        return await self.invocation_store.record_invocation(
             ShellInvocationCreate(
                 project_id=request.project_id,
                 actor_id=request.actor_id,
@@ -380,7 +571,7 @@ class ShellExecutionGatewayService:
                 status=status,
                 exit_code=exit_code,
                 duration_ms=duration_ms,
-                resource_usage={},
+                resource_usage=resource_usage,
                 stdout_summary=stdout_summary,
                 stderr_summary=stderr_summary,
                 error_type=error_type,
@@ -388,20 +579,6 @@ class ShellExecutionGatewayService:
                 created_by=request.actor_id,
                 updated_by=request.actor_id,
             )
-        )
-        return ShellExecutionResult(
-            status=status,
-            exit_code=exit_code,
-            duration_ms=duration_ms,
-            stdout_summary=stdout_summary,
-            stderr_summary=stderr_summary,
-            invocation_id=invocation_id,
-            command_hash=command_hash,
-            sandbox_image=template.image_ref,
-            sandbox_image_digest=template.image_digest,
-            network_mode=self.sandbox_policy.network_mode,
-            error_type=error_type,
-            error_message=error_message,
         )
 
 
@@ -430,6 +607,37 @@ async def _evaluate_shell_approval_policy(
         )
     )
     return result.decision
+
+
+async def _validate_runtime_approval_for_shell(
+    *,
+    approval_store: RuntimeApprovalTaskStore | None,
+    request: ShellExecutionRequest,
+    template: ShellTemplateRead,
+) -> RuntimeApprovalTaskRead:
+    if approval_store is None or request.approved_approval_task_id is None:
+        raise ShellExecutionGatewayError("runtime approval store is not configured")
+    approval_task = await approval_store.get_approval_task(
+        project_id=request.project_id,
+        approval_task_id=request.approved_approval_task_id,
+    )
+    if approval_task is None:
+        raise ShellExecutionGatewayError("approval task not found")
+    if approval_task.status == "resumed":
+        raise ShellExecutionGatewayError("approval task has already been resumed")
+    if approval_task.status != "approved":
+        raise ShellExecutionGatewayError("approval task is not approved")
+    if approval_task.expires_at <= datetime.now(UTC):
+        raise ShellExecutionGatewayError("approval task expired before resume")
+    if approval_task.target_kind != "shell_execution":
+        raise ShellExecutionGatewayError("approval task target kind mismatch")
+    if approval_task.target_ref != template.template_ref:
+        raise ShellExecutionGatewayError("approval task target ref mismatch")
+    if approval_task.run_id and approval_task.run_id != request.run_id:
+        raise ShellExecutionGatewayError("approval task run mismatch")
+    if approval_task.node_id and approval_task.node_id != request.node_id:
+        raise ShellExecutionGatewayError("approval task node mismatch")
+    return approval_task
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,11 @@ from backend.app.execution.gateway import (
     ShellExecutionRequest,
     ShellExecutionResult,
 )
-from backend.app.model_gateway.runner import LlmNodeRunRequest, LlmNodeRunResult
+from backend.app.model_gateway.runner import (
+    LlmNodeApprovalRequired,
+    LlmNodeRunRequest,
+    LlmNodeRunResult,
+)
 from backend.app.observability.schemas import RuntimeTraceSpanCreate
 from backend.app.policy_gate.schemas import PolicyGateEventCreate
 from backend.app.tool_gateway.schemas import ToolInvocationRequest, ToolInvocationResponse
@@ -34,6 +38,7 @@ from backend.app.workflow_runtime.compiler import (
     _route_condition,
 )
 from backend.app.workflow_runtime.schemas import (
+    WorkflowApprovalKind,
     WorkflowNodeRunResult,
     WorkflowPendingApproval,
     WorkflowRunCheckpointCreate,
@@ -107,6 +112,15 @@ class ToolGatewayRuntimeClient(Protocol):
 
 class ShellExecutionRuntimeClient(Protocol):
     async def run_shell(self, request: ShellExecutionRequest) -> ShellExecutionResult:
+        raise NotImplementedError
+
+    async def resume_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval_task_id: UUID,
+    ) -> ShellExecutionResult:
         raise NotImplementedError
 
 
@@ -706,6 +720,19 @@ class _RuntimeExecution:
                     pending_approval=pending_approval,
                     resume_request=resume_request,
                 )
+        elif pending_approval.approval_kind == "shell":
+            output = await self._resume_shell_node(
+                node=node,
+                pending_approval=pending_approval,
+                resume_request=resume_request,
+            )
+        elif pending_approval.approval_kind == "model":
+            output = await self._resume_llm_node(
+                node=node,
+                state=state,
+                pending_approval=pending_approval,
+                resume_request=resume_request,
+            )
         else:
             output = {
                 "status": "approved",
@@ -956,17 +983,25 @@ class _RuntimeExecution:
     ) -> dict[str, Any]:
         if not isinstance(node.data, LlmNodeData):
             raise WorkflowRuntimeError(f"llm node data is invalid: {node.id}")
-        result = await self.llm_runner.run(
-            LlmNodeRunRequest(
-                project_id=self.request.project_id,
-                actor_id=self.request.actor_id,
-                workflow=self.workflow,
-                node_id=node.id,
-                run_id=self.run_id,
-                trace_id=self.trace_id,
-                inputs=_template_context(state),
+        try:
+            result = await self.llm_runner.run(
+                LlmNodeRunRequest(
+                    project_id=self.request.project_id,
+                    actor_id=self.request.actor_id,
+                    workflow=self.workflow,
+                    node_id=node.id,
+                    run_id=self.run_id,
+                    trace_id=self.trace_id,
+                    inputs=_template_context(state),
+                )
             )
-        )
+        except LlmNodeApprovalRequired as exc:
+            return _runtime_approval_to_output(
+                approval_task=exc.approval_task,
+                node=node,
+                approval_kind="model",
+                message="model invocation is waiting for approval",
+            )
         parsed = _parse_json_object(result.content)
         return {
             **parsed,
@@ -1045,6 +1080,25 @@ class _RuntimeExecution:
             "sandbox_image_digest": result.sandbox_image_digest,
             "network_mode": result.network_mode,
         }
+        if result.status == "pending_approval":
+            return {
+                **output,
+                "pending_approval": WorkflowPendingApproval(
+                    node_id=node.id,
+                    node_name=node.name,
+                    approval_policy_ref="runtime_approval",
+                    message="shell execution is waiting for approval",
+                    approval_kind="shell",
+                    approval_task_id=result.approval_task_id,
+                    payload={
+                        "approval_task_id": str(result.approval_task_id)
+                        if result.approval_task_id
+                        else "",
+                        "invocation_id": result.invocation_id,
+                        "target_kind": "shell_execution",
+                    },
+                ).model_dump(mode="json"),
+            }
         if result.status != "success":
             raise WorkflowRuntimeError(result.error_message or result.status)
         return output
@@ -1140,6 +1194,82 @@ class _RuntimeExecution:
         if response.node_id and response.node_id != node.id:
             raise WorkflowRuntimeError("resumed tool invocation does not match workflow node")
         return _tool_response_to_output(response, node=node)
+
+    async def _resume_shell_node(
+        self,
+        *,
+        node: NodeDefinition,
+        pending_approval: WorkflowPendingApproval,
+        resume_request: WorkflowRunResumeRequest,
+    ) -> dict[str, Any]:
+        if self.execution_gateway is None:
+            raise WorkflowRuntimeError("execution gateway is not configured")
+        approval_task_id = (
+            resume_request.approval_task_id
+            or pending_approval.approval_task_id
+            or _approval_task_id_from_payload(pending_approval.payload)
+        )
+        if approval_task_id is None:
+            raise WorkflowRuntimeError("shell pending approval is missing approval task id")
+        result = await self.execution_gateway.resume_approval(
+            project_id=self.request.project_id,
+            actor_id=self.request.actor_id,
+            approval_task_id=approval_task_id,
+        )
+        if result.status != "success":
+            raise WorkflowRuntimeError(result.error_message or result.status)
+        return {
+            "status": result.status,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+            "stdout_summary": result.stdout_summary,
+            "stderr_summary": result.stderr_summary,
+            "invocation_id": result.invocation_id,
+            "command_hash": result.command_hash,
+            "sandbox_image": result.sandbox_image,
+            "sandbox_image_digest": result.sandbox_image_digest,
+            "network_mode": result.network_mode,
+        }
+
+    async def _resume_llm_node(
+        self,
+        *,
+        node: NodeDefinition,
+        state: WorkflowRuntimeState,
+        pending_approval: WorkflowPendingApproval,
+        resume_request: WorkflowRunResumeRequest,
+    ) -> dict[str, Any]:
+        if not isinstance(node.data, LlmNodeData):
+            raise WorkflowRuntimeError(f"llm node data is invalid: {node.id}")
+        approval_task_id = (
+            resume_request.approval_task_id
+            or pending_approval.approval_task_id
+            or _approval_task_id_from_payload(pending_approval.payload)
+        )
+        if approval_task_id is None:
+            raise WorkflowRuntimeError("model pending approval is missing approval task id")
+        result = await self.llm_runner.run(
+            LlmNodeRunRequest(
+                project_id=self.request.project_id,
+                actor_id=self.request.actor_id,
+                workflow=self.workflow,
+                node_id=node.id,
+                run_id=self.run_id,
+                trace_id=self.trace_id,
+                inputs=_template_context(state),
+                approved_approval_task_id=approval_task_id,
+            )
+        )
+        parsed = _parse_json_object(result.content)
+        return {
+            **parsed,
+            "content": result.content,
+            "provider": result.provider,
+            "model": result.model,
+            "finish_reason": result.finish_reason,
+            "usage": result.usage,
+            "invocation_id": str(result.invocation_id),
+        }
 
     async def _resume_agent_tool_node(
         self,
@@ -1729,6 +1859,36 @@ def _tool_response_to_output(
         "structured_content": result.structured_content if result else {},
         "is_error": result.is_error if result else False,
         "invocation_id": str(response.invocation_id),
+    }
+
+
+def _runtime_approval_to_output(
+    *,
+    approval_task: Any,
+    node: NodeDefinition,
+    approval_kind: str,
+    message: str,
+) -> dict[str, Any]:
+    pending = WorkflowPendingApproval(
+        node_id=node.id,
+        node_name=node.name,
+        approval_policy_ref="runtime_approval",
+        message=message,
+        approval_kind=cast(WorkflowApprovalKind, approval_kind),
+        approval_task_id=approval_task.id,
+        payload={
+            "approval_task_id": str(approval_task.id),
+            "invocation_ref": approval_task.invocation_ref,
+            "target_kind": approval_task.target_kind,
+            "target_ref": approval_task.target_ref,
+            "run_id": approval_task.run_id,
+            "trace_id": approval_task.trace_id,
+        },
+    )
+    return {
+        "status": "pending_approval",
+        "approval_task": approval_task.model_dump(mode="json", exclude={"request_payload"}),
+        "pending_approval": pending.model_dump(mode="json"),
     }
 
 

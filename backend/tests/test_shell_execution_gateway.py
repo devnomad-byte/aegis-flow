@@ -317,6 +317,46 @@ class RecordingShellInvocationStore:
         self.invocations.append(request)
         return request
 
+    async def update_invocation_by_ref(
+        self,
+        *,
+        project_id: UUID,
+        invocation_ref: str,
+        actor_id: UUID,
+        status: str,
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        resource_usage: dict[str, object] | None = None,
+        stdout_summary: str = "",
+        stderr_summary: str = "",
+        error_type: str = "",
+        error_message: str = "",
+        command_hash: str | None = None,
+    ) -> ShellInvocationCreate:
+        for index, invocation in enumerate(self.invocations):
+            if invocation.project_id == project_id and invocation.invocation_ref == invocation_ref:
+                updated = invocation.model_copy(
+                    update={
+                        "status": status,
+                        "exit_code": exit_code,
+                        "duration_ms": duration_ms
+                        if duration_ms is not None
+                        else invocation.duration_ms,
+                        "resource_usage": resource_usage
+                        if resource_usage is not None
+                        else invocation.resource_usage,
+                        "stdout_summary": stdout_summary,
+                        "stderr_summary": stderr_summary,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "command_hash": command_hash or invocation.command_hash,
+                        "updated_by": actor_id,
+                    }
+                )
+                self.invocations[index] = updated
+                return updated
+        raise AssertionError("shell invocation not found")
+
 
 class RecordingCommandExecutor:
     def __init__(self, *, result: subprocess.CompletedProcess[str]) -> None:

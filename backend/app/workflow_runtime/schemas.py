@@ -25,7 +25,7 @@ WorkflowRunQueueStatus = Literal[
     "cancelled",
 ]
 WorkflowNodeStatus = Literal["success", "failed", "pending_approval", "skipped"]
-WorkflowApprovalKind = Literal["human", "tool"]
+WorkflowApprovalKind = Literal["human", "tool", "shell", "model"]
 WorkflowApprovalDecision = Literal["approved"]
 
 

@@ -25,6 +25,7 @@ from backend.app.observability.sqlalchemy_store import SqlAlchemyRuntimeTraceSto
 from backend.app.policy_center.runtime import ApprovalPolicyRuntimeEvaluator
 from backend.app.policy_center.sqlalchemy_store import SqlAlchemyPolicyCenterStore
 from backend.app.policy_gate.sqlalchemy_store import SqlAlchemyPolicyGateEventStore
+from backend.app.runtime_approvals.sqlalchemy_store import SqlAlchemyRuntimeApprovalTaskStore
 from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient
 from backend.app.tool_gateway.service import ToolGatewayService
@@ -374,6 +375,7 @@ class WorkflowRunWorker:
     ) -> WorkflowRuntimeRunner:
         registry_store = SqlAlchemyToolRegistryStore(session)
         model_gateway_store = SqlAlchemyModelGatewayStore(session)
+        runtime_approval_store = SqlAlchemyRuntimeApprovalTaskStore(session)
         approval_evaluator = ApprovalPolicyRuntimeEvaluator(
             policy_store=SqlAlchemyPolicyCenterStore(session),
             policy_gate_store=SqlAlchemyPolicyGateEventStore(session),
@@ -397,12 +399,14 @@ class WorkflowRunWorker:
                 ),
                 prompt_store=model_gateway_store,
                 approval_evaluator=approval_evaluator,
+                runtime_approval_store=runtime_approval_store,
             ),
             tool_gateway=tool_gateway,
             execution_gateway=ShellExecutionGatewayService(
                 template_store=registry_store,
                 invocation_store=SqlAlchemyShellInvocationStore(session),
                 approval_evaluator=approval_evaluator,
+                runtime_approval_store=runtime_approval_store,
             ),
             http_execution_gateway=HttpExecutionGatewayService(
                 environment_store=registry_store,

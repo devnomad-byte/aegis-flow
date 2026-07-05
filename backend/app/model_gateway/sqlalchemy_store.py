@@ -343,6 +343,27 @@ class SqlAlchemyModelGatewayStore:
         await self._session.refresh(invocation)
         return ModelGatewayInvocationRead.model_validate(invocation)
 
+    async def update_invocation_by_ref(
+        self,
+        request: ModelGatewayInvocationCreate,
+    ) -> ModelGatewayInvocationRead:
+        invocation = await self._session.scalar(
+            select(ModelGatewayInvocation).where(
+                ModelGatewayInvocation.project_id == request.project_id,
+                ModelGatewayInvocation.invocation_ref == request.invocation_ref,
+            )
+        )
+        if invocation is None:
+            return await self.record_invocation(request)
+        for field, value in request.model_dump(
+            exclude={"project_id", "invocation_ref", "created_by"},
+        ).items():
+            setattr(invocation, field, value)
+        await self._upsert_invocation_span(invocation)
+        await self._session.commit()
+        await self._session.refresh(invocation)
+        return ModelGatewayInvocationRead.model_validate(invocation)
+
     async def list_invocations(
         self,
         *,
@@ -391,6 +412,21 @@ class SqlAlchemyModelGatewayStore:
             ModelGatewayInvocationRead.model_validate(invocation)
             for invocation in result.scalars().all()
         ]
+
+    async def _upsert_invocation_span(self, invocation: ModelGatewayInvocation) -> None:
+        existing_span = await self._session.scalar(
+            select(RuntimeTraceSpan).where(
+                RuntimeTraceSpan.project_id == invocation.project_id,
+                RuntimeTraceSpan.span_id == f"model:{invocation.invocation_ref}",
+            )
+        )
+        projected_span = model_invocation_to_span(invocation)
+        if existing_span is None:
+            self._session.add(RuntimeTraceSpan(**projected_span.model_dump()))
+            return
+        projected_data = projected_span.model_dump(exclude={"id", "created_at", "updated_at"})
+        for field, value in projected_data.items():
+            setattr(existing_span, field, value)
 
     async def _get_prompt_template_model(
         self,

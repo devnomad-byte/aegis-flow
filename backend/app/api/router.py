@@ -12,6 +12,7 @@ from backend.app.api.routes.project_admin import router as project_admin_router
 from backend.app.api.routes.project_command import router as project_command_router
 from backend.app.api.routes.projects import router as projects_router
 from backend.app.api.routes.retrieval import router as retrieval_router
+from backend.app.api.routes.runtime_approvals import router as runtime_approvals_router
 from backend.app.api.routes.tool_gateway import router as tool_gateway_router
 from backend.app.api.routes.tool_registry import router as tool_registry_router
 from backend.app.api.routes.workflow_checkpoints import router as workflow_checkpoints_router
@@ -32,6 +33,7 @@ api_router.include_router(project_admin_router, prefix="/api/v1")
 api_router.include_router(project_command_router, prefix="/api/v1")
 api_router.include_router(projects_router, prefix="/api/v1")
 api_router.include_router(retrieval_router, prefix="/api/v1")
+api_router.include_router(runtime_approvals_router, prefix="/api/v1")
 api_router.include_router(tool_gateway_router, prefix="/api/v1")
 api_router.include_router(tool_registry_router, prefix="/api/v1")
 api_router.include_router(workflow_runtime_router, prefix="/api/v1")

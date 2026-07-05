@@ -37,6 +37,8 @@ from backend.app.retrieval.milvus_client import build_milvus_retrieval_client
 from backend.app.retrieval.sqlalchemy_eval_store import SqlAlchemyRetrievalEvalStore
 from backend.app.retrieval.sqlalchemy_store import SqlAlchemyRetrievalGatewayStore
 from backend.app.retrieval.store import RetrievalGatewayStore
+from backend.app.runtime_approvals.sqlalchemy_store import SqlAlchemyRuntimeApprovalTaskStore
+from backend.app.runtime_approvals.store import RuntimeApprovalTaskStore
 from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient, McpToolCallClient
 from backend.app.tool_gateway.service import ToolGatewayService
@@ -193,6 +195,12 @@ def get_http_invocation_store(
     return SqlAlchemyHttpInvocationStore(session)
 
 
+def get_runtime_approval_task_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> RuntimeApprovalTaskStore:
+    return SqlAlchemyRuntimeApprovalTaskStore(session)
+
+
 def get_mcp_tools_client() -> McpToolsClient:
     return HttpMcpToolsClient()
 
@@ -229,6 +237,7 @@ WorkflowRunEventStoreDependency = Depends(get_workflow_run_event_store)
 PolicyGateEventStoreDependency = Depends(get_policy_gate_event_store)
 RuntimeTraceStoreDependency = Depends(get_runtime_trace_store)
 PolicyCenterStoreDependency = Depends(get_policy_center_store)
+RuntimeApprovalTaskStoreDependency = Depends(get_runtime_approval_task_store)
 
 
 def get_workflow_checkpointer_provider() -> WorkflowCheckpointerProvider:
@@ -278,11 +287,13 @@ def get_shell_execution_gateway_service(
     registry_store: ToolRegistryStore = ToolRegistryStoreDependency,
     invocation_store: SqlAlchemyShellInvocationStore = ShellInvocationStoreDependency,
     approval_evaluator: ApprovalPolicyRuntimeEvaluator = ApprovalPolicyRuntimeEvaluatorDependency,
+    runtime_approval_store: RuntimeApprovalTaskStore = RuntimeApprovalTaskStoreDependency,
 ) -> ShellExecutionGatewayService:
     return ShellExecutionGatewayService(
         template_store=registry_store,
         invocation_store=invocation_store,
         approval_evaluator=approval_evaluator,
+        runtime_approval_store=runtime_approval_store,
     )
 
 
@@ -308,6 +319,7 @@ def get_http_execution_gateway_service(
 def get_llm_node_runner(
     model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStoreDependency,
     approval_evaluator: ApprovalPolicyRuntimeEvaluator = ApprovalPolicyRuntimeEvaluatorDependency,
+    runtime_approval_store: RuntimeApprovalTaskStore = RuntimeApprovalTaskStoreDependency,
 ) -> LlmNodeRunner:
     settings = AppSettings().model_gateway
     return LlmNodeRunner(
@@ -316,6 +328,7 @@ def get_llm_node_runner(
         model_client=OpenAICompatibleModelGatewayClient(settings.openai_compatible),
         prompt_store=model_gateway_store,
         approval_evaluator=approval_evaluator,
+        runtime_approval_store=runtime_approval_store,
     )
 
 

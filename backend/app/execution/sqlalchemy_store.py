@@ -27,6 +27,48 @@ class SqlAlchemyShellInvocationStore:
         await self._session.refresh(invocation)
         return ShellInvocationRead.model_validate(invocation)
 
+    async def update_invocation_by_ref(
+        self,
+        *,
+        project_id: UUID,
+        invocation_ref: str,
+        actor_id: UUID,
+        status: str,
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        resource_usage: dict[str, object] | None = None,
+        stdout_summary: str = "",
+        stderr_summary: str = "",
+        error_type: str = "",
+        error_message: str = "",
+        command_hash: str | None = None,
+    ) -> ShellInvocationRead:
+        invocation = await self._session.scalar(
+            select(ShellRunnerInvocation).where(
+                ShellRunnerInvocation.project_id == project_id,
+                ShellRunnerInvocation.invocation_ref == invocation_ref,
+            )
+        )
+        if invocation is None:
+            raise LookupError("shell invocation not found")
+        invocation.status = status
+        invocation.exit_code = exit_code
+        if duration_ms is not None:
+            invocation.duration_ms = duration_ms
+        if resource_usage is not None:
+            invocation.resource_usage = resource_usage
+        invocation.stdout_summary = stdout_summary
+        invocation.stderr_summary = stderr_summary
+        invocation.error_type = error_type
+        invocation.error_message = error_message
+        if command_hash is not None:
+            invocation.command_hash = command_hash
+        invocation.updated_by = actor_id
+        await self._upsert_invocation_span(invocation)
+        await self._session.commit()
+        await self._session.refresh(invocation)
+        return ShellInvocationRead.model_validate(invocation)
+
     async def list_invocations(
         self,
         *,
@@ -52,6 +94,21 @@ class SqlAlchemyShellInvocationStore:
         )
         result = await self._session.execute(statement)
         return [ShellInvocationRead.model_validate(row) for row in result.scalars()]
+
+    async def _upsert_invocation_span(self, invocation: ShellRunnerInvocation) -> None:
+        existing_span = await self._session.scalar(
+            select(RuntimeTraceSpan).where(
+                RuntimeTraceSpan.project_id == invocation.project_id,
+                RuntimeTraceSpan.span_id == f"shell:{invocation.invocation_ref}",
+            )
+        )
+        projected_span = shell_invocation_to_span(invocation)
+        if existing_span is None:
+            self._session.add(RuntimeTraceSpan(**projected_span.model_dump()))
+            return
+        projected_data = projected_span.model_dump(exclude={"id", "created_at", "updated_at"})
+        for field, value in projected_data.items():
+            setattr(existing_span, field, value)
 
 
 class SqlAlchemyHttpInvocationStore:

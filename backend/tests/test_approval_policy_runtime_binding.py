@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from backend.app.audit.store import AuditEventStore
 from backend.app.execution.gateway import (
+    ShellExecutionGatewayError,
     ShellExecutionGatewayService,
     ShellExecutionRequest,
 )
@@ -15,6 +16,7 @@ from backend.app.model_gateway.openai_compatible import (
     OpenAICompatibleChatMessage,
 )
 from backend.app.model_gateway.runner import (
+    LlmNodeApprovalRequired,
     LlmNodePolicyDenied,
     LlmNodeRunner,
     LlmNodeRunRequest,
@@ -30,6 +32,11 @@ from backend.app.policy_center.schemas import (
     ApprovalPolicyVersionRead,
 )
 from backend.app.policy_gate.schemas import PolicyGateEventCreate, PolicyGateEventRead
+from backend.app.runtime_approvals.schemas import (
+    RuntimeApprovalDecisionRead,
+    RuntimeApprovalTaskCreate,
+    RuntimeApprovalTaskRead,
+)
 from backend.app.tool_gateway.mcp_client import McpToolCallResult
 from backend.app.tool_gateway.schemas import (
     ToolApprovalDecisionRead,
@@ -287,6 +294,177 @@ async def test_shell_gateway_deny_policy_blocks_before_docker_and_records_gate()
 
 
 @pytest.mark.asyncio
+async def test_shell_gateway_approval_required_creates_task_and_resumes() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy_store = MutablePublishedApprovalPolicyStore(
+        published_policy(
+            project_id=project_id,
+            rules=[
+                {
+                    "rule_id": "review-shell",
+                    "title": "Review shell",
+                    "target_kind": "shell_execution",
+                    "action": "require_approval",
+                    "risk_levels": ["low"],
+                    "match": {"shell_template_refs": ["echo-shell"]},
+                    "reason": "operator review",
+                }
+            ],
+        )
+    )
+    policy_gate_store = RecordingPolicyGateStore()
+    invocation_store = RecordingShellInvocationStore()
+    approval_store = RecordingRuntimeApprovalTaskStore()
+    command_executor = RecordingCommandExecutor()
+    gateway = ShellExecutionGatewayService(
+        template_store=InMemoryShellTemplateStore(
+            template=shell_template(project_id=project_id, actor_id=actor_id),
+        ),
+        invocation_store=invocation_store,
+        runtime_approval_store=approval_store,
+        command_executor=command_executor,
+        approval_evaluator=ApprovalPolicyRuntimeEvaluator(
+            policy_store=policy_store,
+            policy_gate_store=policy_gate_store,
+        ),
+    )
+
+    request = ShellExecutionRequest(
+        project_id=project_id,
+        actor_id=actor_id,
+        workflow_ref="shell-flow:1",
+        run_id="run-shell-approval",
+        node_id="shell_1",
+        trace_id="trace-shell-approval",
+        template_ref="echo-shell",
+        template_version=1,
+        environment="test",
+        parameters={"message": "hello"},
+    )
+    pending = await gateway.run_shell(request)
+
+    assert pending.status == "pending_approval"
+    assert pending.approval_task_id == approval_store.tasks[0].id
+    assert command_executor.command is None
+    assert invocation_store.invocations[0].status == "pending_approval"
+    assert approval_store.tasks[0].target_kind == "shell_execution"
+    assert approval_store.tasks[0].public_payload["parameter_keys"] == ["message"]
+
+    await approval_store.decide_approval_task(
+        project_id=project_id,
+        approval_task_id=approval_store.tasks[0].id,
+        actor_id=actor_id,
+        decision="approved",
+        reason="approved by operator",
+    )
+    resumed = await gateway.resume_approval(
+        project_id=project_id,
+        actor_id=actor_id,
+        approval_task_id=approval_store.tasks[0].id,
+    )
+
+    assert resumed.status == "success"
+    assert command_executor.command is not None
+    assert invocation_store.invocations[0].status == "success"
+    assert approval_store.tasks[0].status == "resumed"
+    assert [event.decision for event in policy_gate_store.events] == [
+        "approval_required",
+        "approval_required",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shell_gateway_resume_rechecks_policy_after_rollback() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy_store = MutablePublishedApprovalPolicyStore(
+        published_policy(
+            project_id=project_id,
+            rules=[
+                {
+                    "rule_id": "review-shell",
+                    "title": "Review shell",
+                    "target_kind": "shell_execution",
+                    "action": "require_approval",
+                    "risk_levels": ["low"],
+                    "match": {"shell_template_refs": ["echo-shell"]},
+                    "reason": "operator review",
+                }
+            ],
+        )
+    )
+    policy_gate_store = RecordingPolicyGateStore()
+    invocation_store = RecordingShellInvocationStore()
+    approval_store = RecordingRuntimeApprovalTaskStore()
+    command_executor = RecordingCommandExecutor()
+    gateway = ShellExecutionGatewayService(
+        template_store=InMemoryShellTemplateStore(
+            template=shell_template(project_id=project_id, actor_id=actor_id),
+        ),
+        invocation_store=invocation_store,
+        runtime_approval_store=approval_store,
+        command_executor=command_executor,
+        approval_evaluator=ApprovalPolicyRuntimeEvaluator(
+            policy_store=policy_store,
+            policy_gate_store=policy_gate_store,
+        ),
+    )
+
+    await gateway.run_shell(
+        ShellExecutionRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            workflow_ref="shell-flow:1",
+            run_id="run-shell-rollback",
+            node_id="shell_1",
+            trace_id="trace-shell-rollback",
+            template_ref="echo-shell",
+            template_version=1,
+            environment="test",
+            parameters={"message": "hello"},
+        )
+    )
+    await approval_store.decide_approval_task(
+        project_id=project_id,
+        approval_task_id=approval_store.tasks[0].id,
+        actor_id=actor_id,
+        decision="approved",
+        reason="approved before rollback",
+    )
+    policy_store.policy = published_policy(
+        project_id=project_id,
+        version=2,
+        rules=[
+            {
+                "rule_id": "deny-shell-after-rollback",
+                "title": "Deny shell after rollback",
+                "target_kind": "shell_execution",
+                "action": "deny",
+                "risk_levels": ["low"],
+                "match": {"shell_template_refs": ["echo-shell"]},
+                "reason": "rollback freeze",
+            }
+        ],
+    )
+
+    with pytest.raises(ShellExecutionGatewayError, match="denied by approval policy"):
+        await gateway.resume_approval(
+            project_id=project_id,
+            actor_id=actor_id,
+            approval_task_id=approval_store.tasks[0].id,
+        )
+
+    assert command_executor.command is None
+    assert invocation_store.invocations[0].status == "denied"
+    assert [event.decision for event in policy_gate_store.events] == [
+        "approval_required",
+        "denied",
+    ]
+    assert policy_gate_store.events[-1].rule_ref == "deny-shell-after-rollback"
+
+
+@pytest.mark.asyncio
 async def test_llm_runner_deny_policy_blocks_before_provider_and_records_gate() -> None:
     project_id = uuid4()
     actor_id = uuid4()
@@ -339,6 +517,169 @@ async def test_llm_runner_deny_policy_blocks_before_provider_and_records_gate() 
     assert policy_gate_store.events[0].target_ref == "default"
     assert "raw-model-secret" not in policy_gate_store.events[0].reason_summary
     assert "raw-input-secret" not in invocation_store.records[0].model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_llm_runner_approval_required_creates_task_and_resumes() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy = model_policy(project_id=project_id, actor_id=actor_id)
+    policy_store = MutablePublishedApprovalPolicyStore(
+        published_policy(
+            project_id=project_id,
+            rules=[
+                {
+                    "rule_id": "review-model",
+                    "title": "Review model",
+                    "target_kind": "model_invocation",
+                    "action": "require_approval",
+                    "risk_levels": ["medium"],
+                    "match": {"model_policy_refs": ["default"]},
+                    "reason": "model review",
+                }
+            ],
+        )
+    )
+    invocation_store = RecordingModelInvocationStore()
+    approval_store = RecordingRuntimeApprovalTaskStore()
+    model_client = RecordingModelClient()
+    policy_gate_store = RecordingPolicyGateStore()
+    runner = LlmNodeRunner(
+        policy_store=RecordingModelPolicyStore(policy),
+        invocation_store=invocation_store,
+        runtime_approval_store=approval_store,
+        model_client=model_client,
+        approval_evaluator=ApprovalPolicyRuntimeEvaluator(
+            policy_store=policy_store,
+            policy_gate_store=policy_gate_store,
+        ),
+    )
+    request = LlmNodeRunRequest(
+        project_id=project_id,
+        actor_id=actor_id,
+        workflow=llm_workflow(project_id),
+        node_id="llm_1",
+        run_id="run-model-approval",
+        trace_id="trace-model-approval",
+        inputs={"incident": "database outage"},
+    )
+
+    with pytest.raises(LlmNodeApprovalRequired) as exc_info:
+        await runner.run(request)
+
+    assert exc_info.value.approval_task.id == approval_store.tasks[0].id
+    assert model_client.calls == []
+    assert invocation_store.records[0].status == "pending_approval"
+    assert approval_store.tasks[0].target_kind == "model_invocation"
+    assert approval_store.tasks[0].public_payload["input_keys"] == ["incident"]
+
+    await approval_store.decide_approval_task(
+        project_id=project_id,
+        approval_task_id=approval_store.tasks[0].id,
+        actor_id=actor_id,
+        decision="approved",
+        reason="approved by operator",
+    )
+    resumed = await runner.run(
+        request.model_copy(
+            update={"approved_approval_task_id": approval_store.tasks[0].id},
+        )
+    )
+
+    assert resumed.content == "ok"
+    assert len(model_client.calls) == 1
+    assert cast(str, invocation_store.records[0].status) == "success"
+    assert approval_store.tasks[0].status == "resumed"
+    assert [event.decision for event in policy_gate_store.events] == [
+        "approval_required",
+        "approval_required",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_runner_resume_rechecks_policy_after_rollback() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    policy = model_policy(project_id=project_id, actor_id=actor_id)
+    policy_store = MutablePublishedApprovalPolicyStore(
+        published_policy(
+            project_id=project_id,
+            rules=[
+                {
+                    "rule_id": "review-model",
+                    "title": "Review model",
+                    "target_kind": "model_invocation",
+                    "action": "require_approval",
+                    "risk_levels": ["medium"],
+                    "match": {"model_policy_refs": ["default"]},
+                    "reason": "model review",
+                }
+            ],
+        )
+    )
+    invocation_store = RecordingModelInvocationStore()
+    approval_store = RecordingRuntimeApprovalTaskStore()
+    model_client = RecordingModelClient()
+    policy_gate_store = RecordingPolicyGateStore()
+    runner = LlmNodeRunner(
+        policy_store=RecordingModelPolicyStore(policy),
+        invocation_store=invocation_store,
+        runtime_approval_store=approval_store,
+        model_client=model_client,
+        approval_evaluator=ApprovalPolicyRuntimeEvaluator(
+            policy_store=policy_store,
+            policy_gate_store=policy_gate_store,
+        ),
+    )
+    request = LlmNodeRunRequest(
+        project_id=project_id,
+        actor_id=actor_id,
+        workflow=llm_workflow(project_id),
+        node_id="llm_1",
+        run_id="run-model-rollback",
+        trace_id="trace-model-rollback",
+        inputs={"incident": "database outage"},
+    )
+
+    with pytest.raises(LlmNodeApprovalRequired):
+        await runner.run(request)
+    await approval_store.decide_approval_task(
+        project_id=project_id,
+        approval_task_id=approval_store.tasks[0].id,
+        actor_id=actor_id,
+        decision="approved",
+        reason="approved before rollback",
+    )
+    policy_store.policy = published_policy(
+        project_id=project_id,
+        version=2,
+        rules=[
+            {
+                "rule_id": "deny-model-after-rollback",
+                "title": "Deny model after rollback",
+                "target_kind": "model_invocation",
+                "action": "deny",
+                "risk_levels": ["medium"],
+                "match": {"model_policy_refs": ["default"]},
+                "reason": "rollback freeze",
+            }
+        ],
+    )
+
+    with pytest.raises(LlmNodePolicyDenied, match="denied by approval policy"):
+        await runner.run(
+            request.model_copy(
+                update={"approved_approval_task_id": approval_store.tasks[0].id},
+            )
+        )
+
+    assert model_client.calls == []
+    assert invocation_store.records[0].status == "denied"
+    assert [event.decision for event in policy_gate_store.events] == [
+        "approval_required",
+        "denied",
+    ]
+    assert policy_gate_store.events[-1].rule_ref == "deny-model-after-rollback"
 
 
 class MutablePublishedApprovalPolicyStore:
@@ -685,6 +1026,46 @@ class RecordingShellInvocationStore:
         self.invocations.append(request)
         return request
 
+    async def update_invocation_by_ref(
+        self,
+        *,
+        project_id: UUID,
+        invocation_ref: str,
+        actor_id: UUID,
+        status: str,
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        resource_usage: dict[str, object] | None = None,
+        stdout_summary: str = "",
+        stderr_summary: str = "",
+        error_type: str = "",
+        error_message: str = "",
+        command_hash: str | None = None,
+    ) -> ShellInvocationCreate:
+        for index, invocation in enumerate(self.invocations):
+            if invocation.project_id == project_id and invocation.invocation_ref == invocation_ref:
+                updated = invocation.model_copy(
+                    update={
+                        "status": status,
+                        "exit_code": exit_code,
+                        "duration_ms": duration_ms
+                        if duration_ms is not None
+                        else invocation.duration_ms,
+                        "resource_usage": resource_usage
+                        if resource_usage is not None
+                        else invocation.resource_usage,
+                        "stdout_summary": stdout_summary,
+                        "stderr_summary": stderr_summary,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "command_hash": command_hash or invocation.command_hash,
+                        "updated_by": actor_id,
+                    }
+                )
+                self.invocations[index] = updated
+                return updated
+        raise LookupError("shell invocation not found")
+
 
 class RecordingCommandExecutor:
     def __init__(self) -> None:
@@ -715,6 +1096,7 @@ class RecordingModelPolicyStore:
 class RecordingModelInvocationStore:
     def __init__(self) -> None:
         self.records: list[ModelGatewayInvocationCreate] = []
+        self.reads: dict[str, ModelGatewayInvocationRead] = {}
 
     async def record_invocation(
         self,
@@ -722,12 +1104,145 @@ class RecordingModelInvocationStore:
     ) -> ModelGatewayInvocationRead:
         now = datetime.now(UTC)
         self.records.append(request)
-        return ModelGatewayInvocationRead(
+        read = ModelGatewayInvocationRead(
             id=uuid4(),
             created_at=now,
             updated_at=now,
             **request.model_dump(),
         )
+        self.reads[request.invocation_ref] = read
+        return read
+
+    async def update_invocation_by_ref(
+        self,
+        request: ModelGatewayInvocationCreate,
+    ) -> ModelGatewayInvocationRead:
+        now = datetime.now(UTC)
+        for index, record in enumerate(self.records):
+            if (
+                record.project_id == request.project_id
+                and record.invocation_ref == request.invocation_ref
+            ):
+                self.records[index] = request
+                existing = self.reads[request.invocation_ref]
+                read = ModelGatewayInvocationRead(
+                    id=existing.id,
+                    created_at=existing.created_at,
+                    updated_at=now,
+                    **request.model_dump(),
+                )
+                self.reads[request.invocation_ref] = read
+                return read
+        return await self.record_invocation(request)
+
+
+class RecordingRuntimeApprovalTaskStore:
+    def __init__(self) -> None:
+        self.tasks: list[RuntimeApprovalTaskRead] = []
+
+    async def create_approval_task(
+        self,
+        request: RuntimeApprovalTaskCreate,
+    ) -> RuntimeApprovalTaskRead:
+        now = datetime.now(UTC)
+        task = RuntimeApprovalTaskRead(
+            id=uuid4(),
+            decided_by=None,
+            decided_at=None,
+            resumed_at=None,
+            created_at=now,
+            updated_at=now,
+            **request.model_dump(),
+        )
+        self.tasks.append(task)
+        return task
+
+    async def get_approval_task(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+    ) -> RuntimeApprovalTaskRead | None:
+        return next(
+            (
+                task
+                for task in self.tasks
+                if task.project_id == project_id and task.id == approval_task_id
+            ),
+            None,
+        )
+
+    async def decide_approval_task(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+        actor_id: UUID,
+        decision: RuntimeApprovalDecisionRead,
+        reason: str,
+    ) -> RuntimeApprovalTaskRead:
+        task = await self.get_approval_task(
+            project_id=project_id,
+            approval_task_id=approval_task_id,
+        )
+        if task is None:
+            raise LookupError("runtime approval task not found")
+        return self._replace_task(
+            task.model_copy(
+                update={
+                    "status": decision,
+                    "decision": decision,
+                    "decision_reason": reason,
+                    "decided_by": actor_id,
+                    "decided_at": datetime.now(UTC),
+                    "updated_by": actor_id,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        )
+
+    async def mark_approval_task_resumed(
+        self,
+        *,
+        project_id: UUID,
+        approval_task_id: UUID,
+        actor_id: UUID,
+    ) -> RuntimeApprovalTaskRead:
+        task = await self.get_approval_task(
+            project_id=project_id,
+            approval_task_id=approval_task_id,
+        )
+        if task is None:
+            raise LookupError("runtime approval task not found")
+        return self._replace_task(
+            task.model_copy(
+                update={
+                    "status": "resumed",
+                    "resumed_at": datetime.now(UTC),
+                    "updated_by": actor_id,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        )
+
+    def _replace_task(self, task: RuntimeApprovalTaskRead) -> RuntimeApprovalTaskRead:
+        for index, existing in enumerate(self.tasks):
+            if existing.id == task.id:
+                self.tasks[index] = task
+                return task
+        raise LookupError("runtime approval task not found")
+
+    async def list_approval_tasks(
+        self,
+        *,
+        project_id: UUID,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[RuntimeApprovalTaskRead]:
+        tasks = [task for task in self.tasks if task.project_id == project_id]
+        if status is not None:
+            tasks = [task for task in tasks if task.status == status]
+        return tasks[:limit]
 
 
 class RecordingModelClient:

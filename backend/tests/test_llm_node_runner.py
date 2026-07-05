@@ -61,6 +61,25 @@ class RecordingInvocationStore:
             **request.model_dump(),
         )
 
+    async def update_invocation_by_ref(
+        self,
+        request: ModelGatewayInvocationCreate,
+    ) -> ModelGatewayInvocationRead:
+        for index, record in enumerate(self.records):
+            if (
+                record.project_id == request.project_id
+                and record.invocation_ref == request.invocation_ref
+            ):
+                self.records[index] = request
+                now = datetime.now(UTC)
+                return ModelGatewayInvocationRead(
+                    id=uuid4(),
+                    created_at=now,
+                    updated_at=now,
+                    **request.model_dump(),
+                )
+        return await self.record_invocation(request)
+
 
 class RecordingPromptStore:
     def __init__(self, prompt_version: PromptTemplateVersionRead | None) -> None:

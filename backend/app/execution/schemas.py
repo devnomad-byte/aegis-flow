@@ -4,7 +4,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ShellInvocationStatus = Literal["success", "failed", "denied", "timeout", "cancelled"]
+ShellInvocationStatus = Literal[
+    "success",
+    "failed",
+    "denied",
+    "timeout",
+    "cancelled",
+    "expired",
+    "pending_approval",
+]
 HttpInvocationStatus = Literal["success", "failed", "denied", "timeout", "cancelled"]
 
 

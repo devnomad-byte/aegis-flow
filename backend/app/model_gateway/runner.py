@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -26,6 +27,11 @@ from backend.app.policy_center.runtime import (
     ApprovalPolicyDecisionRequest,
     ApprovalPolicyRuntimeEvaluator,
 )
+from backend.app.runtime_approvals.schemas import (
+    RuntimeApprovalTaskCreate,
+    RuntimeApprovalTaskRead,
+)
+from backend.app.runtime_approvals.store import RuntimeApprovalTaskStore
 from backend.app.workflows.dsl import LlmNodeData, WorkflowDefinition
 
 _TEMPLATE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
@@ -47,6 +53,20 @@ class LlmNodePolicyDenied(ModelGatewayError):
     """Raised when a runtime approval policy blocks an LLM node call."""
 
 
+class LlmNodeApprovalRequired(ModelGatewayError):
+    """Raised when a runtime approval task must be decided before model invocation."""
+
+    def __init__(
+        self,
+        *,
+        approval_task: RuntimeApprovalTaskRead,
+        invocation: ModelGatewayInvocationRead,
+    ) -> None:
+        super().__init__("model invocation requires approval")
+        self.approval_task = approval_task
+        self.invocation = invocation
+
+
 class LlmNodeStructuredOutputInvalid(ModelGatewayError):
     """Raised when an LLM node response fails JSON Schema validation."""
 
@@ -62,6 +82,11 @@ class ModelPolicyStore(Protocol):
 
 class ModelInvocationStore(Protocol):
     async def record_invocation(
+        self,
+        request: ModelGatewayInvocationCreate,
+    ) -> ModelGatewayInvocationRead: ...
+
+    async def update_invocation_by_ref(
         self,
         request: ModelGatewayInvocationCreate,
     ) -> ModelGatewayInvocationRead: ...
@@ -107,6 +132,7 @@ class LlmNodeRunRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=160)
     trace_id: str = Field(min_length=1, max_length=160)
     inputs: dict[str, object] = Field(default_factory=dict)
+    approved_approval_task_id: UUID | None = None
 
 
 class LlmNodeRunResult(BaseModel):
@@ -128,6 +154,7 @@ class LlmNodeRunner:
     model_client: ChatCompletionClient
     prompt_store: PromptTemplateVersionStore | None = None
     approval_evaluator: ApprovalPolicyRuntimeEvaluator | None = None
+    runtime_approval_store: RuntimeApprovalTaskStore | None = None
 
     async def run(self, request: LlmNodeRunRequest) -> LlmNodeRunResult:
         node_data = _load_llm_node_data(request.workflow, request.node_id, request.project_id)
@@ -144,25 +171,54 @@ class LlmNodeRunner:
 
         invocation_ref = _build_invocation_ref(request.run_id, request.node_id)
         prompt_version_for_policy = node_data.prompt_version or policy.prompt_version
+        if request.approved_approval_task_id is not None:
+            approval_task = await _validate_runtime_approval_for_model(
+                approval_store=self.runtime_approval_store,
+                request=request,
+                policy=policy,
+            )
+            invocation_ref = approval_task.invocation_ref
         policy_decision = await _evaluate_model_approval_policy(
             approval_evaluator=self.approval_evaluator,
             request=request,
             policy=policy,
         )
-        if policy_decision in {"denied", "approval_required"}:
-            error_type = (
-                "approval_policy_denied"
-                if policy_decision == "denied"
-                else "approval_policy_approval_required"
+        if policy_decision == "approval_required" and request.approved_approval_task_id is None:
+            invocation = await self._record_invocation(
+                request=request,
+                policy=policy,
+                invocation_ref=invocation_ref,
+                prompt_version=prompt_version_for_policy,
+                request_hash=_hash_model_request(
+                    policy_ref=policy.policy_ref,
+                    node_id=request.node_id,
+                    prompt_version=prompt_version_for_policy,
+                    system_prompt="",
+                    user_prompt="",
+                ),
+                status="pending_approval",
+                output_summary="",
+                usage={},
+                error_type="approval_policy_approval_required",
+                error_message="Model invocation requires approval",
+                output_schema_ref=node_data.output_schema_ref,
+                schema_validation_status="not_applicable",
+                schema_validation_error="",
+                latency_ms=0,
             )
-            message = (
-                "Model invocation denied by approval policy"
-                if policy_decision == "denied"
-                else (
-                    "Model invocation requires approval; "
-                    "model approval recovery is not available in v1"
-                )
+            approval_task = await self._create_pending_approval_task(
+                request=request,
+                policy=policy,
+                node_data=node_data,
+                invocation_ref=invocation_ref,
+                prompt_version=prompt_version_for_policy,
             )
+            raise LlmNodeApprovalRequired(
+                approval_task=approval_task,
+                invocation=invocation,
+            )
+        if policy_decision == "denied":
+            message = "Model invocation denied by approval policy"
             await self._record_invocation(
                 request=request,
                 policy=policy,
@@ -178,7 +234,7 @@ class LlmNodeRunner:
                 status="denied",
                 output_summary="",
                 usage={},
-                error_type=error_type,
+                error_type="approval_policy_denied",
                 error_message=message,
                 output_schema_ref=node_data.output_schema_ref,
                 schema_validation_status="not_applicable",
@@ -304,6 +360,15 @@ class LlmNodeRunner:
             schema_validation_error=schema_validation_error,
             latency_ms=response.latency_ms,
         )
+        if (
+            request.approved_approval_task_id is not None
+            and self.runtime_approval_store is not None
+        ):
+            await self.runtime_approval_store.mark_approval_task_resumed(
+                project_id=request.project_id,
+                approval_task_id=request.approved_approval_task_id,
+                actor_id=request.actor_id,
+            )
         return LlmNodeRunResult(
             provider=response.provider,
             model=response.model,
@@ -332,29 +397,73 @@ class LlmNodeRunner:
         schema_validation_error: str,
         latency_ms: int,
     ) -> ModelGatewayInvocationRead:
-        return await self.invocation_store.record_invocation(
-            ModelGatewayInvocationCreate(
+        invocation_create = ModelGatewayInvocationCreate(
+            project_id=request.project_id,
+            actor_id=request.actor_id,
+            policy_id=policy.id,
+            policy_ref=policy.policy_ref,
+            invocation_ref=invocation_ref,
+            provider=policy.provider,
+            model_name=policy.model_name,
+            prompt_version=prompt_version,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            status=status,
+            request_hash=request_hash,
+            output_summary=output_summary,
+            usage=usage,
+            error_type=error_type,
+            error_message=redact_sensitive_text(error_message),
+            output_schema_ref=output_schema_ref,
+            schema_validation_status=schema_validation_status,
+            schema_validation_error=redact_sensitive_text(schema_validation_error),
+            latency_ms=latency_ms,
+            created_by=request.actor_id,
+            updated_by=request.actor_id,
+        )
+        if request.approved_approval_task_id is not None:
+            return await self.invocation_store.update_invocation_by_ref(invocation_create)
+        return await self.invocation_store.record_invocation(invocation_create)
+
+    async def _create_pending_approval_task(
+        self,
+        *,
+        request: LlmNodeRunRequest,
+        policy: ModelGatewayPolicyRead,
+        node_data: LlmNodeData,
+        invocation_ref: str,
+        prompt_version: str,
+    ) -> RuntimeApprovalTaskRead:
+        if self.runtime_approval_store is None:
+            raise LlmNodePolicyDenied("runtime approval store is not configured")
+        return await self.runtime_approval_store.create_approval_task(
+            RuntimeApprovalTaskCreate(
                 project_id=request.project_id,
                 actor_id=request.actor_id,
-                policy_id=policy.id,
-                policy_ref=policy.policy_ref,
+                target_kind="model_invocation",
+                target_ref=policy.policy_ref,
                 invocation_ref=invocation_ref,
-                provider=policy.provider,
-                model_name=policy.model_name,
-                prompt_version=prompt_version,
+                workflow_ref=f"{request.workflow.workflow.id}:{request.workflow.workflow.version}",
                 run_id=request.run_id,
                 node_id=request.node_id,
                 trace_id=request.trace_id,
-                status=status,
-                request_hash=request_hash,
-                output_summary=output_summary,
-                usage=usage,
-                error_type=error_type,
-                error_message=redact_sensitive_text(error_message),
-                output_schema_ref=output_schema_ref,
-                schema_validation_status=schema_validation_status,
-                schema_validation_error=redact_sensitive_text(schema_validation_error),
-                latency_ms=latency_ms,
+                risk_level="medium",
+                request_payload=request.model_dump(mode="json"),
+                public_payload={
+                    "policy_ref": policy.policy_ref,
+                    "model_name": policy.model_name,
+                    "prompt_version": prompt_version,
+                    "input_keys": sorted(request.inputs.keys()),
+                },
+                target_snapshot={
+                    "policy_ref": policy.policy_ref,
+                    "provider": policy.provider,
+                    "model_name": policy.model_name,
+                    "prompt_version": prompt_version,
+                    "output_schema_ref": node_data.output_schema_ref,
+                },
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
                 created_by=request.actor_id,
                 updated_by=request.actor_id,
             )
@@ -444,6 +553,37 @@ async def _evaluate_model_approval_policy(
         )
     )
     return result.decision
+
+
+async def _validate_runtime_approval_for_model(
+    *,
+    approval_store: RuntimeApprovalTaskStore | None,
+    request: LlmNodeRunRequest,
+    policy: ModelGatewayPolicyRead,
+) -> RuntimeApprovalTaskRead:
+    if approval_store is None or request.approved_approval_task_id is None:
+        raise LlmNodePolicyDenied("runtime approval store is not configured")
+    approval_task = await approval_store.get_approval_task(
+        project_id=request.project_id,
+        approval_task_id=request.approved_approval_task_id,
+    )
+    if approval_task is None:
+        raise LlmNodePolicyDenied("approval task not found")
+    if approval_task.status == "resumed":
+        raise LlmNodePolicyDenied("approval task has already been resumed")
+    if approval_task.status != "approved":
+        raise LlmNodePolicyDenied("approval task is not approved")
+    if approval_task.expires_at <= datetime.now(UTC):
+        raise LlmNodePolicyDenied("approval task expired before resume")
+    if approval_task.target_kind != "model_invocation":
+        raise LlmNodePolicyDenied("approval task target kind mismatch")
+    if approval_task.target_ref != policy.policy_ref:
+        raise LlmNodePolicyDenied("approval task target ref mismatch")
+    if approval_task.run_id and approval_task.run_id != request.run_id:
+        raise LlmNodePolicyDenied("approval task run mismatch")
+    if approval_task.node_id and approval_task.node_id != request.node_id:
+        raise LlmNodePolicyDenied("approval task node mismatch")
+    return approval_task
 
 
 def _load_llm_node_data(
