@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from ipaddress import ip_address
 from uuid import uuid4
 
@@ -5,10 +6,12 @@ import pytest
 from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_artifacts import InMemoryShellImageArtifactObjectStore
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
     EnvironmentCreateRequest,
     McpServerCreateRequest,
+    NotationTrustCertificateCreateRequest,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionResolveRequest,
     ShellTemplateCreateRequest,
@@ -16,7 +19,27 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ToolRegistryEgressPolicyError
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+def _public_certificate_pem(common_name: str = "AegisFlow Test Root") -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime(2026, 7, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2027, 7, 1, tzinfo=UTC))
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
 
 
 @pytest.mark.asyncio
@@ -263,3 +286,46 @@ async def test_sqlalchemy_tool_registry_upserts_project_shell_image_policy() -> 
     assert reread_policy.id == updated_policy.id
     assert reread_policy.notation_trust_policy["trustPolicies"][0]["name"] == "runtime-images"
     assert other_policy.configured is False
+
+
+@pytest.mark.asyncio
+async def test_notation_trust_certificate_descriptor_persists_without_raw_pem() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid4()
+    actor_id = uuid4()
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="notation@example.com", display_name="Notation"))
+        session.add(Project(id=project_id, slug="notation", name="Notation"))
+        await session.commit()
+        store = SqlAlchemyToolRegistryStore(
+            session,
+            notation_trust_object_store=InMemoryShellImageArtifactObjectStore(bucket="capievo"),
+        )
+
+        created = await store.create_notation_trust_certificate(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=NotationTrustCertificateCreateRequest(
+                store_type="ca",
+                store_name="aegis-flow",
+                certificate_ref="root",
+                certificate_pem=_public_certificate_pem(),
+            ),
+        )
+        listed = await store.list_notation_trust_certificates(project_id)
+
+    await engine.dispose()
+
+    assert created.version == 1
+    assert created.artifact_ref.startswith("s3://")
+    assert len(created.artifact_sha256) == 64
+    assert created.certificate_subject == "CN=AegisFlow Test Root"
+    assert created.certificate_not_after is not None
+    assert listed == [created]
+    rendered = created.model_dump_json()
+    assert "BEGIN CERTIFICATE" not in rendered
+    assert "PRIVATE KEY" not in rendered

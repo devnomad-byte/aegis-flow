@@ -215,6 +215,48 @@ class ToolRegistryShellImagePolicy(Base, TimestampMixin):
     updated_at: Mapped[datetime]
 
 
+class ToolRegistryNotationTrustCertificate(Base, TimestampMixin):
+    __tablename__ = "tool_registry_notation_trust_certificates"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "store_type",
+            "store_name",
+            "certificate_ref",
+            "version",
+            name="uq_tool_notation_trust_cert_project_store_ref_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    store_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    store_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    certificate_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[int] = mapped_column(nullable=False)
+    artifact_ref: Mapped[str] = mapped_column(String(1024), nullable=False)
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_size_bytes: Mapped[int] = mapped_column(nullable=False)
+    artifact_content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    certificate_subject: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    certificate_issuer: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    certificate_not_before: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    certificate_not_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    certificate_count: Mapped[int] = mapped_column(nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
 class ToolRegistryCredentialRef(Base, TimestampMixin):
     __tablename__ = "tool_registry_credential_refs"
     __table_args__ = (

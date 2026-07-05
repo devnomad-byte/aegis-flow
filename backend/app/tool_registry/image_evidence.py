@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -7,7 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol
 
-from backend.app.tool_registry.image_artifacts import ShellImageArtifactWriter
+from backend.app.tool_registry.image_artifacts import (
+    ShellImageArtifactObjectStore,
+    ShellImageArtifactWriter,
+)
+from backend.app.tool_registry.notation_trust import normalize_certificate_pem
 
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
 ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
@@ -66,6 +71,16 @@ class ShellImageToolCommand:
     argv: tuple[str, ...]
     timeout_seconds: float
     env: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class NotationTrustCertificateBundle:
+    store_type: str
+    store_name: str
+    certificate_ref: str
+    version: int
+    artifact_ref: str
+    artifact_sha256: str
 
 
 class ShellImageCommandRunner(Protocol):
@@ -188,6 +203,8 @@ class NotationCliEvidenceProvider:
     notation_command: str = "notation"
     timeout_seconds: float = 120.0
     trust_policy: dict[str, Any] = field(default_factory=dict)
+    trust_certificates: tuple[NotationTrustCertificateBundle, ...] = ()
+    trust_certificate_object_store: ShellImageArtifactObjectStore | None = None
     work_dir: str = r"D:\agent-platform-cache\notation"
     runner: ShellImageCommandRunner = field(default_factory=AsyncSubprocessJsonRunner)
 
@@ -210,6 +227,10 @@ class NotationCliEvidenceProvider:
                 encoding="utf-8",
             )
             trust_policy_path.chmod(0o444)
+            try:
+                await self._materialize_trust_certificates(config_home)
+            except Exception:
+                return _failed_notation_result("Notation trust certificate materialization failed")
 
             command = ShellImageToolCommand(
                 argv=(
@@ -232,6 +253,37 @@ class NotationCliEvidenceProvider:
             decision_reason="Notation signature verification passed",
             evidence={"signature": {"tool": "notation", "status": "passed"}},
         )
+
+    async def _materialize_trust_certificates(self, config_home: Path) -> None:
+        if not self.trust_certificates:
+            return
+        if self.trust_certificate_object_store is None:
+            raise ShellImageEvidenceError("Notation trust certificate store is not configured")
+
+        for certificate in self.trust_certificates:
+            stored = await self.trust_certificate_object_store.get_artifact(
+                certificate.artifact_ref
+            )
+            if certificate.artifact_sha256:
+                digest = hashlib.sha256(stored.body).hexdigest()
+                if digest != certificate.artifact_sha256:
+                    raise ShellImageEvidenceError("Notation trust certificate digest mismatch")
+            normalized_pem = normalize_certificate_pem(stored.body.decode("utf-8"))
+            trust_store_dir = (
+                config_home
+                / "notation"
+                / "truststore"
+                / "x509"
+                / certificate.store_type
+                / certificate.store_name
+            )
+            trust_store_dir.mkdir(parents=True, exist_ok=True)
+            target_path = trust_store_dir / (
+                f"{_safe_notation_file_stem(certificate.certificate_ref)}-"
+                f"v{certificate.version}.pem"
+            )
+            target_path.write_text(normalized_pem, encoding="utf-8")
+            target_path.chmod(0o444)
 
 
 @dataclass(frozen=True)
@@ -530,3 +582,8 @@ def _failed_notation_result(reason: str) -> ShellImageEvidenceResult:
         decision_reason=reason,
         evidence={"signature": {"tool": "notation", "status": "failed"}},
     )
+
+
+def _safe_notation_file_stem(value: str) -> str:
+    cleaned = "".join(character for character in value if character.isalnum() or character in "._-")
+    return cleaned or "certificate"

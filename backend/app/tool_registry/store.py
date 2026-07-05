@@ -16,6 +16,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    NotationTrustCertificateCreateRequest,
+    NotationTrustCertificateRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellImageAdmissionGovernanceRead,
@@ -176,6 +178,21 @@ class ToolRegistryStore(Protocol):
         actor_id: UUID,
         request: ShellImageAdmissionPolicyUpdateRequest,
     ) -> ShellImageAdmissionPolicyRead:
+        raise NotImplementedError
+
+    async def create_notation_trust_certificate(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: NotationTrustCertificateCreateRequest,
+    ) -> NotationTrustCertificateRead:
+        raise NotImplementedError
+
+    async def list_notation_trust_certificates(
+        self,
+        project_id: UUID,
+    ) -> list[NotationTrustCertificateRead]:
         raise NotImplementedError
 
     async def create_credential_ref(

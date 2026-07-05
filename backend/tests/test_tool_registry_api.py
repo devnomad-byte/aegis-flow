@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
@@ -47,6 +48,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    NotationTrustCertificateCreateRequest,
+    NotationTrustCertificateRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellImageAdmissionGovernanceRead,
@@ -74,6 +77,10 @@ from backend.app.tool_registry.store import (
     ToolSyncFailedError,
 )
 from backend.app.workflows.yaml_io import ProjectResourceCatalog
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
 
@@ -111,6 +118,7 @@ class InMemoryToolRegistryStore:
         self.shell_templates: dict[UUID, list[ShellTemplateRead]] = {}
         self.image_admissions: dict[UUID, list[ShellImageAdmissionRead]] = {}
         self.image_policies: dict[UUID, ShellImageAdmissionPolicyRead] = {}
+        self.notation_trust_certificates: dict[UUID, list[NotationTrustCertificateRead]] = {}
         self.fail_next_sync = False
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
@@ -770,6 +778,61 @@ class InMemoryToolRegistryStore:
         self.image_policies[project_id] = policy
         return policy
 
+    async def create_notation_trust_certificate(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: NotationTrustCertificateCreateRequest,
+    ) -> NotationTrustCertificateRead:
+        now = datetime.now(UTC)
+        version = (
+            len(
+                [
+                    item
+                    for item in self.notation_trust_certificates.get(project_id, [])
+                    if item.store_type == request.store_type
+                    and item.store_name == request.store_name
+                    and item.certificate_ref == request.certificate_ref
+                ]
+            )
+            + 1
+        )
+        certificate = NotationTrustCertificateRead(
+            id=uuid4(),
+            project_id=project_id,
+            store_type=request.store_type,
+            store_name=request.store_name,
+            certificate_ref=request.certificate_ref,
+            version=version,
+            artifact_ref=(
+                f"s3://capievo/notation-trust/{project_id}/"
+                f"{request.store_type}/{request.store_name}/{version}.pem"
+            ),
+            artifact_sha256="a" * 64,
+            artifact_size_bytes=len(request.certificate_pem.encode("utf-8")),
+            artifact_content_type="application/x-pem-file",
+            certificate_subject="CN=AegisFlow Test Root",
+            certificate_issuer="CN=AegisFlow Test Root",
+            certificate_not_before=now,
+            certificate_not_after=now + timedelta(days=365),
+            certificate_count=1,
+            description=request.description,
+            status="active",
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.notation_trust_certificates.setdefault(project_id, []).append(certificate)
+        return certificate
+
+    async def list_notation_trust_certificates(
+        self,
+        project_id: UUID,
+    ) -> list[NotationTrustCertificateRead]:
+        return self.notation_trust_certificates.get(project_id, [])
+
     async def list_project_shell_templates(self, project_id: UUID) -> list[ShellTemplateRead]:
         return self.shell_templates.get(project_id, [])
 
@@ -894,6 +957,22 @@ def _resource(
     if key is not None:
         resource["key"] = key
     return resource
+
+
+def _public_certificate_pem(common_name: str = "AegisFlow Test Root") -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime(2026, 7, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2027, 7, 1, tzinfo=UTC))
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
 
 
 def _highest_test_risk(risk_levels: list[str]) -> str:
@@ -1076,6 +1155,80 @@ def test_tool_registry_shell_image_policy_rejects_secret_like_trust_policy_keys(
 
     assert response.status_code == 422
     assert "raw-secret-token" not in response.text
+
+
+def test_tool_registry_notation_trust_certificate_api_stores_descriptor_without_raw_pem() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+    certificate_pem = _public_certificate_pem()
+
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/notation/trust-certificates",
+        json={
+            "store_type": "ca",
+            "store_name": "aegis-flow",
+            "certificate_ref": "root",
+            "certificate_pem": certificate_pem,
+            "description": "AegisFlow public root CA",
+        },
+    )
+    list_response = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/notation/trust-certificates"
+    )
+
+    assert create_response.status_code == 201
+    body = create_response.json()
+    assert body["store_type"] == "ca"
+    assert body["store_name"] == "aegis-flow"
+    assert body["certificate_ref"] == "root"
+    assert body["version"] == 1
+    assert body["artifact_ref"].startswith("s3://")
+    assert "certificate_pem" not in body
+    assert "BEGIN CERTIFICATE" not in create_response.text
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["artifact_sha256"] == "a" * 64
+    create_event = next(
+        event
+        for event in audit_store.events
+        if event["action"] == "tool_registry.notation_trust_certificate.create"
+    )
+    metadata = cast(dict[str, object], create_event["metadata"])
+    assert metadata["store_type"] == "ca"
+    assert metadata["store_name"] == "aegis-flow"
+    assert "BEGIN CERTIFICATE" not in json.dumps(metadata)
+
+
+def test_tool_registry_notation_trust_certificate_api_rejects_private_key_material() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/notation/trust-certificates",
+        json={
+            "store_type": "ca",
+            "store_name": "aegis-flow",
+            "certificate_ref": "root",
+            "certificate_pem": (
+                "-----BEGIN PRIVATE KEY-----\nprivate-key-material\n-----END PRIVATE KEY-----\n"
+            ),
+        },
+    )
+
+    assert response.status_code == 422
+    assert "private-key-material" not in response.text
+    assert "private" in response.text.lower()
 
 
 def test_tool_registry_shell_image_policy_write_requires_permission() -> None:

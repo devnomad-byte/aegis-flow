@@ -16,6 +16,7 @@ from backend.app.tool_registry.image_artifacts import (
 from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
     NotationCliEvidenceProvider,
+    NotationTrustCertificateBundle,
     ShellImageCommandRunner,
     ShellImageEvidenceError,
     ShellImageEvidenceResult,
@@ -38,6 +39,10 @@ from backend.app.tool_registry.schemas import (
 )
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from backend.app.tool_registry.store import ShellImageAdmissionRequiredError
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.responses import Response
@@ -61,6 +66,26 @@ def _manifest_payload() -> bytes:
 
 def _digest(payload: bytes) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _public_certificate_pem(common_name: str = "AegisFlow Test Root") -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+        ]
+    )
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime(2026, 7, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2027, 7, 1, tzinfo=UTC))
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
 
 
 def test_trivy_report_summaries_keep_only_sanitized_counts() -> None:
@@ -298,6 +323,79 @@ async def test_trivy_provider_retains_sbom_and_scan_report_as_artifact_descripto
     assert result.evidence["vulnerabilities"]["artifact_retention_days"] == 14
     assert len(object_store.objects) == 2
     assert "raw vulnerability detail" not in json.dumps(result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_notation_provider_materializes_project_trust_certificate_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    trust_policy = {
+        "version": "1.0",
+        "trustPolicies": [
+            {
+                "name": "aegis-runtime",
+                "registryScopes": ["registry.example/aegis/runtime"],
+                "signatureVerification": {"level": "strict"},
+                "trustStores": ["ca:aegis-flow", "signingAuthority:aegis-sa"],
+                "trustedIdentities": ["*"],
+            }
+        ],
+    }
+    object_store = InMemoryShellImageArtifactObjectStore(bucket="capievo")
+    ca_ref = await object_store.put_artifact(
+        "notation-trust/project/ca/aegis-flow/v1/root.pem",
+        _public_certificate_pem("AegisFlow Root").encode("utf-8"),
+        content_type="application/x-pem-file",
+        metadata={"artifact-kind": "notation_trust_certificate"},
+    )
+    signing_ref = await object_store.put_artifact(
+        "notation-trust/project/signingAuthority/aegis-sa/v1/sa.pem",
+        _public_certificate_pem("AegisFlow Signing Authority").encode("utf-8"),
+        content_type="application/x-pem-file",
+        metadata={"artifact-kind": "notation_trust_certificate"},
+    )
+    runner = RecordingRunner()
+    monkeypatch.setattr(
+        "backend.app.tool_registry.image_evidence.shutil.which",
+        lambda _: "notation",
+    )
+    provider = NotationCliEvidenceProvider(
+        trust_policy=trust_policy,
+        trust_certificates=(
+            NotationTrustCertificateBundle(
+                store_type="ca",
+                store_name="aegis-flow",
+                certificate_ref="root",
+                version=1,
+                artifact_ref=ca_ref,
+                artifact_sha256="",
+            ),
+            NotationTrustCertificateBundle(
+                store_type="signingAuthority",
+                store_name="aegis-sa",
+                certificate_ref="sa",
+                version=1,
+                artifact_ref=signing_ref,
+                artifact_sha256="",
+            ),
+        ),
+        trust_certificate_object_store=object_store,
+        work_dir=str(tmp_path),
+        runner=runner,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime:7-alpine",
+        image_digest="sha256:" + ("f" * 64),
+    )
+
+    assert result.policy_decision == "approved"
+    assert runner.notation_trust_store_files == {
+        "x509/ca/aegis-flow/root-v1.pem",
+        "x509/signingAuthority/aegis-sa/sa-v1.pem",
+    }
+    assert runner.notation_trust_store_private_key_found is False
 
 
 @pytest.mark.asyncio
@@ -916,6 +1014,8 @@ class RecordingRunner(ShellImageCommandRunner):
         self.json_results = json_results or []
         self.notation_trust_policy: dict[str, Any] | None = None
         self.notation_trust_policy_read_only = False
+        self.notation_trust_store_files: set[str] = set()
+        self.notation_trust_store_private_key_found = False
 
     async def run_json(self, command: ShellImageToolCommand) -> dict[str, Any]:
         self.commands.append(command)
@@ -928,9 +1028,19 @@ class RecordingRunner(ShellImageCommandRunner):
     async def run_text(self, command: ShellImageToolCommand) -> str:
         self.commands.append(command)
         if command.env is not None and "XDG_CONFIG_HOME" in command.env:
-            policy_path = Path(command.env["XDG_CONFIG_HOME"]) / "notation" / "trustpolicy.oci.json"
+            config_home = Path(command.env["XDG_CONFIG_HOME"])
+            policy_path = config_home / "notation" / "trustpolicy.oci.json"
             self.notation_trust_policy = json.loads(policy_path.read_text(encoding="utf-8"))
             self.notation_trust_policy_read_only = not policy_path.stat().st_mode & 0o222
+            truststore_root = config_home / "notation" / "truststore"
+            if truststore_root.exists():
+                for path in truststore_root.rglob("*.pem"):
+                    self.notation_trust_store_files.add(
+                        path.relative_to(truststore_root).as_posix()
+                    )
+                    text = path.read_text(encoding="utf-8")
+                    if "PRIVATE KEY" in text:
+                        self.notation_trust_store_private_key_found = True
         if self.error is not None:
             raise self.error
         return ""

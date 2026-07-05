@@ -25,6 +25,7 @@ from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
     NoopShellImageEvidenceProvider,
     NotationCliEvidenceProvider,
+    NotationTrustCertificateBundle,
     ShellImageEvidenceProvider,
     TrivyCliEvidenceProvider,
     merge_evidence_providers,
@@ -46,6 +47,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    NotationTrustCertificateCreateRequest,
+    NotationTrustCertificateRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellImageAdmissionGovernanceRead,
@@ -776,6 +779,7 @@ async def resolve_shell_image_admission(
         "tool-registry:write",
     )
     policy = await registry_store.get_shell_image_admission_policy(project_id)
+    trust_certificates = await registry_store.list_notation_trust_certificates(project_id)
     service = ShellImageAdmissionService(
         store=registry_store,
         digest_resolver=digest_resolver,
@@ -783,6 +787,7 @@ async def resolve_shell_image_admission(
             policy=policy,
             base_provider=evidence_provider,
             project_id=project_id,
+            trust_certificates=trust_certificates,
         ),
     )
     try:
@@ -829,6 +834,7 @@ def _policy_aware_evidence_provider(
     policy: ShellImageAdmissionPolicyRead,
     base_provider: ShellImageEvidenceProvider,
     project_id: UUID,
+    trust_certificates: list[NotationTrustCertificateRead] | None = None,
 ) -> ShellImageEvidenceProvider:
     settings = AppSettings().shell_image_supply_chain
     s3_settings = AppSettings().s3
@@ -839,6 +845,11 @@ def _policy_aware_evidence_provider(
                 notation_command=settings.notation_command,
                 timeout_seconds=settings.scan_timeout_seconds,
                 trust_policy=policy.notation_trust_policy,
+                trust_certificates=_notation_trust_certificate_bundles(
+                    policy=policy,
+                    certificates=trust_certificates or [],
+                ),
+                trust_certificate_object_store=build_shell_image_artifact_object_store(s3_settings),
                 work_dir=settings.notation_work_dir,
             )
         )
@@ -863,6 +874,78 @@ def _policy_aware_evidence_provider(
             )
         )
     return merge_evidence_providers(*providers)
+
+
+@router.get(
+    "/shell-images/notation/trust-certificates",
+    response_model=list[NotationTrustCertificateRead],
+)
+async def list_notation_trust_certificates(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[NotationTrustCertificateRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    certificates = await registry_store.list_notation_trust_certificates(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.notation_trust_certificate.list",
+        target_type="tool_registry_notation_trust_certificate",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={"certificate_count": len(certificates)},
+    )
+    return certificates
+
+
+@router.post(
+    "/shell-images/notation/trust-certificates",
+    response_model=NotationTrustCertificateRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_notation_trust_certificate(
+    project_id: UUID,
+    request: NotationTrustCertificateCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> NotationTrustCertificateRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    try:
+        certificate = await registry_store.create_notation_trust_certificate(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.notation_trust_certificate.create",
+        target_type="tool_registry_notation_trust_certificate",
+        target_id=str(certificate.id),
+        risk_level="high",
+        metadata=_notation_trust_certificate_metadata(certificate),
+    )
+    return certificate
 
 
 @router.get(
@@ -1181,6 +1264,67 @@ def _shell_image_policy_metadata(policy: ShellImageAdmissionPolicyRead) -> dict[
         "scan_report_retention_enabled": policy.scan_report_retention_enabled,
         "artifact_retention_days": policy.artifact_retention_days,
         "blocked_severities": policy.blocked_severities,
+    }
+
+
+def _notation_trust_certificate_bundles(
+    *,
+    policy: ShellImageAdmissionPolicyRead,
+    certificates: list[NotationTrustCertificateRead],
+) -> tuple[NotationTrustCertificateBundle, ...]:
+    referenced_stores = _referenced_notation_trust_stores(policy.notation_trust_policy)
+    return tuple(
+        NotationTrustCertificateBundle(
+            store_type=certificate.store_type,
+            store_name=certificate.store_name,
+            certificate_ref=certificate.certificate_ref,
+            version=certificate.version,
+            artifact_ref=certificate.artifact_ref,
+            artifact_sha256=certificate.artifact_sha256,
+        )
+        for certificate in certificates
+        if (certificate.store_type, certificate.store_name) in referenced_stores
+    )
+
+
+def _referenced_notation_trust_stores(trust_policy: dict[str, object]) -> set[tuple[str, str]]:
+    referenced: set[tuple[str, str]] = set()
+    trust_policies = trust_policy.get("trustPolicies")
+    if not isinstance(trust_policies, list):
+        return referenced
+    for policy in trust_policies:
+        if not isinstance(policy, dict):
+            continue
+        trust_stores = policy.get("trustStores")
+        if not isinstance(trust_stores, list):
+            continue
+        for value in trust_stores:
+            if not isinstance(value, str) or ":" not in value:
+                continue
+            store_type, store_name = value.split(":", maxsplit=1)
+            if store_type in {"ca", "signingAuthority", "tsa"} and store_name:
+                referenced.add((store_type, store_name))
+    return referenced
+
+
+def _notation_trust_certificate_metadata(
+    certificate: NotationTrustCertificateRead,
+) -> dict[str, object]:
+    return {
+        "store_type": certificate.store_type,
+        "store_name": certificate.store_name,
+        "certificate_ref": certificate.certificate_ref,
+        "version": certificate.version,
+        "artifact_sha256": certificate.artifact_sha256,
+        "artifact_size_bytes": certificate.artifact_size_bytes,
+        "artifact_content_type": certificate.artifact_content_type,
+        "certificate_subject": certificate.certificate_subject,
+        "certificate_issuer": certificate.certificate_issuer,
+        "certificate_not_after": certificate.certificate_not_after.isoformat()
+        if certificate.certificate_not_after
+        else None,
+        "certificate_count": certificate.certificate_count,
+        "status": certificate.status,
     }
 
 

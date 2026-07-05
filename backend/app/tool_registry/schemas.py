@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from backend.app.security.egress_policy import normalize_allowed_hosts
+from backend.app.tool_registry.notation_trust import reject_private_key_material
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ResourceStatus = Literal["active", "disabled", "archived"]
@@ -40,6 +41,7 @@ SecretLeaseStatus = Literal["active", "revoked", "expired", "denied"]
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
 ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
 ShellImageAdmissionEnforcementMode = Literal["dry_run", "enforce"]
+NotationTrustStoreType = Literal["ca", "signingAuthority", "tsa"]
 
 DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}
 DEFAULT_BLOCKED_SEVERITIES = ["HIGH", "CRITICAL"]
@@ -211,6 +213,25 @@ class ShellImageAdmissionPolicyUpdateRequest(BaseModel):
         if unsupported:
             raise ValueError("Blocked severities contain unsupported values")
         return sorted(normalized, key=lambda severity: _SEVERITY_ORDER[severity])
+
+
+class NotationTrustCertificateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    store_type: NotationTrustStoreType
+    store_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    certificate_ref: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    certificate_pem: str = Field(min_length=1, max_length=200_000)
+    description: str = Field(default="", max_length=500)
+
+    @field_validator("certificate_pem")
+    @classmethod
+    def validate_certificate_pem(cls, value: str) -> str:
+        try:
+            reject_private_key_material(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
 
 
 class CredentialRefCreateRequest(BaseModel):
@@ -404,6 +425,32 @@ class ShellImageAdmissionPolicyRead(BaseModel):
     updated_by: UUID | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class NotationTrustCertificateRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    store_type: NotationTrustStoreType
+    store_name: str
+    certificate_ref: str
+    version: int
+    artifact_ref: str
+    artifact_sha256: str
+    artifact_size_bytes: int
+    artifact_content_type: str
+    certificate_subject: str
+    certificate_issuer: str
+    certificate_not_before: datetime | None
+    certificate_not_after: datetime | None
+    certificate_count: int
+    description: str
+    status: ResourceStatus
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class ShellImageAdmissionStatusCounts(BaseModel):

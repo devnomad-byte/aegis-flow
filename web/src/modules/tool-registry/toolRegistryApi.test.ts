@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createNotationTrustCertificate,
   createShellTemplate,
   getShellImageAdmissionGovernance,
   getShellImageAdmissionPolicy,
+  listNotationTrustCertificates,
   listShellTemplates,
+  notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
   shellImageGovernanceQueryKey,
@@ -102,6 +105,60 @@ describe("toolRegistryApi", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/notation/trust-certificates") && !init) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "cert-1",
+              project_id: "ops-command",
+              store_type: "ca",
+              store_name: "aegis-flow",
+              certificate_ref: "root",
+              version: 1,
+              artifact_ref: "s3://capievo/notation-trust/root.pem",
+              artifact_sha256: "c".repeat(64),
+              artifact_size_bytes: 1024,
+              artifact_content_type: "application/x-pem-file",
+              certificate_subject: "CN=AegisFlow Root",
+              certificate_issuer: "CN=AegisFlow Root",
+              certificate_count: 1,
+              description: "",
+              status: "active",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-05T00:00:00Z",
+              updated_at: "2026-07-05T00:00:00Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/notation/trust-certificates") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            id: "cert-2",
+            project_id: "ops-command",
+            store_type: "ca",
+            store_name: "aegis-flow",
+            certificate_ref: "root",
+            version: 2,
+            artifact_ref: "s3://capievo/notation-trust/root-v2.pem",
+            artifact_sha256: "d".repeat(64),
+            artifact_size_bytes: 2048,
+            artifact_content_type: "application/x-pem-file",
+            certificate_subject: "CN=AegisFlow Root",
+            certificate_issuer: "CN=AegisFlow Root",
+            certificate_count: 1,
+            description: "rotated root",
+            status: "active",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 201 },
+        );
+      }
       return new Response(
         JSON.stringify({
           template_ref: "diag",
@@ -172,6 +229,22 @@ describe("toolRegistryApi", () => {
       artifact_counts: { sbom: 1, scan_report: 1, expired: 1 },
       blocked_vulnerability_count: 1,
     });
+    await expect(listNotationTrustCertificates("ops-command", fetcher)).resolves.toMatchObject([
+      { store_type: "ca", store_name: "aegis-flow", certificate_ref: "root" },
+    ]);
+    await expect(
+      createNotationTrustCertificate(
+        "ops-command",
+        {
+          store_type: "ca",
+          store_name: "aegis-flow",
+          certificate_ref: "root",
+          certificate_pem: "-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----",
+          description: "rotated root",
+        },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ version: 2, artifact_sha256: "d".repeat(64) });
     await expect(
       updateShellImageAdmissionPolicy(
         "ops-command",
@@ -208,6 +281,12 @@ describe("toolRegistryApi", () => {
       "tool-registry",
       "shell-image-governance",
     ]);
+    expect(notationTrustCertificatesQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "notation-trust-certificates",
+    ]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-templates/preview",
       expect.objectContaining({ method: "POST" }),
@@ -222,6 +301,10 @@ describe("toolRegistryApi", () => {
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 });

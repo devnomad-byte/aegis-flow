@@ -1,11 +1,13 @@
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.settings import AppSettings
 from backend.app.execution.shell_policy import (
     ShellTemplatePolicyInput,
     build_shell_template_preview,
@@ -20,6 +22,10 @@ from backend.app.security.egress_proxy import (
     EgressProxyPolicy,
     EgressProxyPolicyViolation,
     build_egress_proxy_plan,
+)
+from backend.app.tool_registry.image_artifacts import (
+    ShellImageArtifactObjectStore,
+    build_shell_image_artifact_object_store,
 )
 from backend.app.tool_registry.image_governance import (
     summarize_shell_image_admission_governance,
@@ -38,6 +44,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryEnvironment,
     ToolRegistryImageAdmission,
     ToolRegistryMcpServer,
+    ToolRegistryNotationTrustCertificate,
     ToolRegistrySecretLease,
     ToolRegistryShellImagePolicy,
     ToolRegistryShellTemplate,
@@ -45,6 +52,12 @@ from backend.app.tool_registry.models import (
     ToolRegistryToolGroup,
     ToolRegistryToolGroupItem,
     ToolRegistryToolSyncRun,
+)
+from backend.app.tool_registry.notation_trust import (
+    CERTIFICATE_CONTENT_TYPE,
+    certificate_pem_sha256,
+    normalize_certificate_pem,
+    summarize_certificate_bundle,
 )
 from backend.app.tool_registry.schemas import (
     AuthorizedToolRead,
@@ -57,6 +70,8 @@ from backend.app.tool_registry.schemas import (
     EnvironmentRead,
     McpServerCreateRequest,
     McpServerRead,
+    NotationTrustCertificateCreateRequest,
+    NotationTrustCertificateRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
     ShellImageAdmissionGovernanceRead,
@@ -98,12 +113,21 @@ ModelT = TypeVar(
     ToolRegistryToolSyncRun,
     ToolRegistryCredentialRef,
     ToolRegistrySecretLease,
+    ToolRegistryNotationTrustCertificate,
 )
 
 
 class SqlAlchemyToolRegistryStore:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        notation_trust_object_store: ShellImageArtifactObjectStore | None = None,
+    ) -> None:
         self._session = session
+        self._notation_trust_object_store = (
+            notation_trust_object_store or build_shell_image_artifact_object_store(AppSettings().s3)
+        )
 
     async def build_project_resource_catalog(self, project_id: UUID) -> ProjectResourceCatalog:
         environments = await self._active_values(
@@ -416,6 +440,85 @@ class SqlAlchemyToolRegistryStore:
         return ShellImageAdmissionPolicyRead.model_validate(policy).model_copy(
             update={"configured": True}
         )
+
+    async def create_notation_trust_certificate(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: NotationTrustCertificateCreateRequest,
+    ) -> NotationTrustCertificateRead:
+        normalized_pem = normalize_certificate_pem(request.certificate_pem)
+        body = normalized_pem.encode("utf-8")
+        artifact_sha256 = certificate_pem_sha256(normalized_pem)
+        version = await self._next_notation_trust_certificate_version(
+            project_id=project_id,
+            store_type=request.store_type,
+            store_name=request.store_name,
+            certificate_ref=request.certificate_ref,
+        )
+        summary = summarize_certificate_bundle(normalized_pem)
+        key = _notation_trust_certificate_object_key(
+            project_id=project_id,
+            store_type=request.store_type,
+            store_name=request.store_name,
+            certificate_ref=request.certificate_ref,
+            version=version,
+            artifact_sha256=artifact_sha256,
+        )
+        artifact_ref = await self._notation_trust_object_store.put_artifact(
+            key,
+            body,
+            content_type=CERTIFICATE_CONTENT_TYPE,
+            metadata={
+                "artifact-kind": "notation_trust_certificate",
+                "artifact-sha256": artifact_sha256,
+                "certificate-ref": request.certificate_ref,
+                "project-id": str(project_id),
+                "store-name": request.store_name,
+                "store-type": request.store_type,
+                "version": str(version),
+            },
+        )
+        resource = ToolRegistryNotationTrustCertificate(
+            project_id=project_id,
+            store_type=request.store_type,
+            store_name=request.store_name,
+            certificate_ref=request.certificate_ref,
+            version=version,
+            artifact_ref=artifact_ref,
+            artifact_sha256=artifact_sha256,
+            artifact_size_bytes=len(body),
+            artifact_content_type=CERTIFICATE_CONTENT_TYPE,
+            certificate_subject=summary.certificate_subject,
+            certificate_issuer=summary.certificate_issuer,
+            certificate_not_before=summary.certificate_not_before,
+            certificate_not_after=summary.certificate_not_after,
+            certificate_count=summary.certificate_count,
+            description=request.description,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        return NotationTrustCertificateRead.model_validate(await self._insert(resource))
+
+    async def list_notation_trust_certificates(
+        self,
+        project_id: UUID,
+    ) -> list[NotationTrustCertificateRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryNotationTrustCertificate)
+            .where(
+                ToolRegistryNotationTrustCertificate.project_id == project_id,
+                ToolRegistryNotationTrustCertificate.status == "active",
+            )
+            .order_by(
+                ToolRegistryNotationTrustCertificate.store_type,
+                ToolRegistryNotationTrustCertificate.store_name,
+                ToolRegistryNotationTrustCertificate.certificate_ref,
+                ToolRegistryNotationTrustCertificate.version.desc(),
+            )
+        )
+        return [NotationTrustCertificateRead.model_validate(resource) for resource in result.all()]
 
     async def preview_shell_template(
         self,
@@ -1173,6 +1276,24 @@ class SqlAlchemyToolRegistryStore:
             ),
         )
 
+    async def _next_notation_trust_certificate_version(
+        self,
+        *,
+        project_id: UUID,
+        store_type: str,
+        store_name: str,
+        certificate_ref: str,
+    ) -> int:
+        current_version = await self._session.scalar(
+            select(func.max(ToolRegistryNotationTrustCertificate.version)).where(
+                ToolRegistryNotationTrustCertificate.project_id == project_id,
+                ToolRegistryNotationTrustCertificate.store_type == store_type,
+                ToolRegistryNotationTrustCertificate.store_name == store_name,
+                ToolRegistryNotationTrustCertificate.certificate_ref == certificate_ref,
+            )
+        )
+        return int(current_version or 0) + 1
+
     async def _ensure_active_credential_ref(
         self,
         *,
@@ -1404,6 +1525,25 @@ def _required_image_admission_message(policy: ShellImageAdmissionPolicyRead) -> 
             "templates"
         )
     return "Approved shell image admission is required for production or high risk templates"
+
+
+def _notation_trust_certificate_object_key(
+    *,
+    project_id: UUID,
+    store_type: str,
+    store_name: str,
+    certificate_ref: str,
+    version: int,
+    artifact_sha256: str,
+) -> str:
+    digest_prefix = hashlib.sha256(
+        f"{project_id}:{store_type}:{store_name}:{certificate_ref}:{version}".encode()
+    ).hexdigest()[:12]
+    return (
+        "notation-trust/"
+        f"{project_id}/{store_type}/{store_name}/{certificate_ref}/"
+        f"v{version}-{artifact_sha256[:12]}-{digest_prefix}.pem"
+    )
 
 
 def _authorized_context_matches(

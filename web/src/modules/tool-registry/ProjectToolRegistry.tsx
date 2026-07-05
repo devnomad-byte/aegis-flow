@@ -4,12 +4,17 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
+  createNotationTrustCertificate,
   createShellTemplate,
   getShellImageAdmissionGovernance,
   getShellImageAdmissionPolicy,
+  listNotationTrustCertificates,
   listShellTemplates,
+  notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
+  type NotationTrustCertificate,
+  type NotationTrustCertificateCreateRequest,
   type ShellImageAdmission,
   type ShellImageAdmissionGovernance,
   type ShellImageAdmissionPolicy,
@@ -63,6 +68,14 @@ const defaultPolicyForm: ShellImageAdmissionPolicyUpdateRequest = {
   blocked_severities: ["HIGH", "CRITICAL"],
 };
 
+const emptyNotationTrustCertificateForm: NotationTrustCertificateCreateRequest = {
+  store_type: "ca",
+  store_name: "aegis-flow",
+  certificate_ref: "root",
+  certificate_pem: "",
+  description: "",
+};
+
 export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => shellTemplatesQueryKey(project.projectId), [project.projectId]);
@@ -74,11 +87,18 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     () => shellImageGovernanceQueryKey(project.projectId),
     [project.projectId],
   );
+  const notationTrustQueryKey = useMemo(
+    () => notationTrustCertificatesQueryKey(project.projectId),
+    [project.projectId],
+  );
   const [form, setForm] = useState<ShellTemplateCreateRequest>(emptyShellTemplateForm);
   const [argvText, setArgvText] = useState("-lc\necho {{message}}");
   const [schemaText, setSchemaText] = useState(JSON.stringify(emptyShellTemplateForm.parameter_schema, null, 2));
   const [parameterText, setParameterText] = useState('{"message":"hello"}');
   const [policyForm, setPolicyForm] = useState<ShellImageAdmissionPolicyUpdateRequest>(defaultPolicyForm);
+  const [notationTrustForm, setNotationTrustForm] = useState<NotationTrustCertificateCreateRequest>(
+    emptyNotationTrustCertificateForm,
+  );
   const [trustPolicyText, setTrustPolicyText] = useState(JSON.stringify(defaultPolicyForm.notation_trust_policy, null, 2));
   const [localError, setLocalError] = useState("");
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
@@ -97,6 +117,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const governanceQuery = useQuery({
     queryFn: () => getShellImageAdmissionGovernance(project.projectId),
     queryKey: governanceQueryKey,
+    retry: false,
+  });
+  const notationTrustQuery = useQuery({
+    queryFn: () => listNotationTrustCertificates(project.projectId),
+    queryKey: notationTrustQueryKey,
     retry: false,
   });
   const createMutation = useMutation({
@@ -139,6 +164,14 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
       void queryClient.invalidateQueries({ queryKey: policyQueryKey });
     },
   });
+  const notationTrustMutation = useMutation({
+    mutationFn: (request: NotationTrustCertificateCreateRequest) =>
+      createNotationTrustCertificate(project.projectId, request),
+    onSuccess: () => {
+      setNotationTrustForm((current) => ({ ...current, certificate_pem: "" }));
+      void queryClient.invalidateQueries({ queryKey: notationTrustQueryKey });
+    },
+  });
 
   useEffect(() => {
     const firstTemplate = templatesQuery.data?.[0];
@@ -173,6 +206,8 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     previewMutation.error ||
     admissionMutation.error ||
     policyMutation.error ||
+    notationTrustMutation.error ||
+    notationTrustQuery.error ||
     policyQuery.error ||
     governanceQuery.error ||
     templatesQuery.error;
@@ -351,6 +386,17 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               setTrustPolicyText={setTrustPolicyText}
               trustPolicyText={trustPolicyText}
             />
+            <NotationTrustStoresPanel
+              certificates={notationTrustQuery.data ?? []}
+              form={notationTrustForm}
+              isLoading={notationTrustQuery.isLoading}
+              isSaving={notationTrustMutation.isPending}
+              onSave={() => {
+                setLocalError("");
+                notationTrustMutation.mutate(notationTrustForm);
+              }}
+              setForm={setNotationTrustForm}
+            />
             {preview ? (
               <PreviewPanel preview={preview} />
             ) : (
@@ -490,6 +536,107 @@ function PolicyPanel({
         <button className="toolbar-button" disabled={isSaving} onClick={onSave} type="button">
           <Save aria-hidden="true" size={16} />
           Save policy
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function NotationTrustStoresPanel({
+  certificates,
+  form,
+  isLoading,
+  isSaving,
+  onSave,
+  setForm,
+}: {
+  certificates: NotationTrustCertificate[];
+  form: NotationTrustCertificateCreateRequest;
+  isLoading: boolean;
+  isSaving: boolean;
+  onSave: () => void;
+  setForm: (
+    updater: (
+      current: NotationTrustCertificateCreateRequest,
+    ) => NotationTrustCertificateCreateRequest,
+  ) => void;
+}) {
+  if (isLoading) {
+    return <div className="preview-alert">Loading Notation trust stores</div>;
+  }
+
+  return (
+    <section className="shell-policy-panel" aria-label="Notation Trust Stores">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">NOTATION TRUST</div>
+          <h3>Notation Trust Stores</h3>
+        </div>
+        <span className="status-pill status-ready">{certificates.length}</span>
+      </div>
+      <div className="notation-certificate-list">
+        {certificates.length === 0 ? (
+          <div className="preview-alert">No project trust certificates</div>
+        ) : null}
+        {certificates.map((certificate) => (
+          <div className="preview-alert notation-certificate-row" key={certificate.id}>
+            <strong>{certificate.store_type}:{certificate.store_name}</strong>
+            <span>{certificate.certificate_ref}@v{certificate.version}</span>
+            <code>{certificate.artifact_sha256.slice(0, 12)}</code>
+            <small>{certificate.certificate_subject}</small>
+            <small>expires {certificate.certificate_not_after ?? "unknown"}</small>
+          </div>
+        ))}
+      </div>
+      <div className="tool-registry-form-grid">
+        <label className="field-label" htmlFor="notation-store-type">
+          Store type
+          <select
+            className="text-field"
+            id="notation-store-type"
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                store_type: event.target.value as "ca" | "signingAuthority" | "tsa",
+              }))
+            }
+            value={form.store_type}
+          >
+            <option value="ca">ca</option>
+            <option value="signingAuthority">signingAuthority</option>
+            <option value="tsa">tsa</option>
+          </select>
+        </label>
+        <TextField
+          label="Trust store name"
+          onChange={(value) => setForm((current) => ({ ...current, store_name: value }))}
+          value={form.store_name}
+        />
+        <TextField
+          label="Certificate ref"
+          onChange={(value) => setForm((current) => ({ ...current, certificate_ref: value }))}
+          value={form.certificate_ref}
+        />
+        <TextField
+          label="Certificate note"
+          onChange={(value) => setForm((current) => ({ ...current, description: value }))}
+          value={form.description}
+        />
+      </div>
+      <TextAreaField
+        label="Certificate PEM bundle"
+        onChange={(value) => setForm((current) => ({ ...current, certificate_pem: value }))}
+        value={form.certificate_pem}
+      />
+      <div className="release-action-row">
+        <button
+          className="toolbar-button"
+          disabled={isSaving || !form.certificate_pem.trim()}
+          onClick={onSave}
+          type="button"
+        >
+          <Save aria-hidden="true" size={16} />
+          Save certificate
         </button>
       </div>
     </section>

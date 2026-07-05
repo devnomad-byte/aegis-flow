@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from backend.app.core.settings import S3Settings
 
-ShellImageArtifactKind = Literal["sbom", "scan_report"]
+ShellImageArtifactKind = Literal["sbom", "scan_report", "notation_trust_certificate"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,9 @@ class ShellImageArtifactObjectStore(Protocol):
         raise NotImplementedError
 
     async def head_artifact(self, artifact_ref: str) -> ShellImageArtifactMetadata:
+        raise NotImplementedError
+
+    async def get_artifact(self, artifact_ref: str) -> StoredShellImageArtifact:
         raise NotImplementedError
 
     async def delete_artifact(self, artifact_ref: str) -> None:
@@ -71,6 +74,9 @@ class InMemoryShellImageArtifactObjectStore:
             content_type=stored.content_type,
             metadata=stored.metadata,
         )
+
+    async def get_artifact(self, artifact_ref: str) -> StoredShellImageArtifact:
+        return self.objects[artifact_ref]
 
     async def delete_artifact(self, artifact_ref: str) -> None:
         self.objects.pop(artifact_ref, None)
@@ -122,6 +128,28 @@ class S3ShellImageArtifactObjectStore:
             response = await client.head_object(Bucket=bucket, Key=key)
         return ShellImageArtifactMetadata(
             size_bytes=int(response.get("ContentLength", 0)),
+            content_type=str(response.get("ContentType", "")),
+            metadata={
+                str(key): str(value) for key, value in dict(response.get("Metadata", {})).items()
+            },
+        )
+
+    async def get_artifact(self, artifact_ref: str) -> StoredShellImageArtifact:
+        import aioboto3
+
+        bucket, key = _parse_s3_ref(artifact_ref)
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            response = await client.get_object(Bucket=bucket, Key=key)
+            body = await response["Body"].read()
+        return StoredShellImageArtifact(
+            body=bytes(body),
             content_type=str(response.get("ContentType", "")),
             metadata={
                 str(key): str(value) for key, value in dict(response.get("Metadata", {})).items()
@@ -219,6 +247,8 @@ def _digest_prefix(image_digest: str) -> str:
 def _content_type_for_kind(kind: ShellImageArtifactKind) -> str:
     if kind == "sbom":
         return "application/vnd.cyclonedx+json"
+    if kind == "notation_trust_certificate":
+        return "application/x-pem-file"
     return "application/vnd.aegis.trivy.vulnerability-report+json"
 
 

@@ -94,6 +94,69 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/notation/trust-certificates") && !init) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "cert-1",
+              project_id: "ops-command",
+              store_type: "ca",
+              store_name: "aegis-flow",
+              certificate_ref: "root",
+              version: 1,
+              artifact_ref: "s3://capievo/notation-trust/root.pem",
+              artifact_sha256: "c".repeat(64),
+              artifact_size_bytes: 1024,
+              artifact_content_type: "application/x-pem-file",
+              certificate_subject: "CN=AegisFlow Root",
+              certificate_issuer: "CN=AegisFlow Root",
+              certificate_not_before: "2026-07-01T00:00:00Z",
+              certificate_not_after: "2027-07-01T00:00:00Z",
+              certificate_count: 1,
+              description: "root",
+              status: "active",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-05T00:00:00Z",
+              updated_at: "2026-07-05T00:00:00Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/notation/trust-certificates") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        expect(body.store_type).toBe("ca");
+        expect(body.store_name).toBe("aegis-flow");
+        expect(body.certificate_ref).toBe("root");
+        expect(String(body.certificate_pem)).toContain("BEGIN CERTIFICATE");
+        return new Response(
+          JSON.stringify({
+            id: "cert-2",
+            project_id: "ops-command",
+            store_type: "ca",
+            store_name: "aegis-flow",
+            certificate_ref: "root",
+            version: 2,
+            artifact_ref: "s3://capievo/notation-trust/root-v2.pem",
+            artifact_sha256: "d".repeat(64),
+            artifact_size_bytes: 1024,
+            artifact_content_type: "application/x-pem-file",
+            certificate_subject: "CN=AegisFlow Root",
+            certificate_issuer: "CN=AegisFlow Root",
+            certificate_not_before: "2026-07-01T00:00:00Z",
+            certificate_not_after: "2027-07-01T00:00:00Z",
+            certificate_count: 1,
+            description: "root",
+            status: "active",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 201 },
+        );
+      }
       if (url.endsWith("/shell-images/admission-policy") && init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         expect(body.enforcement_mode).toBe("enforce");
@@ -218,8 +281,16 @@ describe("ProjectToolRegistry", () => {
 
     expect(await screen.findByText("Runtime Shell Echo")).toBeInTheDocument();
     expect(await screen.findByText("Shell Image Admission Policy")).toBeInTheDocument();
+    expect(await screen.findByText("Notation Trust Stores")).toBeInTheDocument();
     expect(screen.getByText("registry.example/aegis/runtime:7-alpine")).toBeInTheDocument();
+    expect(screen.getByText("CN=AegisFlow Root")).toBeInTheDocument();
 
+    const certificatePem = "-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----";
+    await user.type(screen.getByLabelText("Certificate PEM bundle"), certificatePem);
+    await user.click(screen.getByRole("button", { name: "Save certificate" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Certificate PEM bundle")).toHaveValue("");
+    });
     await user.selectOptions(screen.getByLabelText("Enforcement mode"), "enforce");
     await user.click(screen.getByLabelText("Require Cosign"));
     await user.click(screen.getByLabelText("Enable Notation"));
@@ -258,6 +329,7 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText(/SBOM artifact: s3:\/\/capievo\/shell-image-admissions\/sbom\.json/)).toBeInTheDocument();
     expect(screen.getByText(/Scan artifact: s3:\/\/capievo\/shell-image-admissions\/scan\.json/)).toBeInTheDocument();
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
+    expect(screen.queryByText(/BEGIN CERTIFICATE/)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute(
       "href",
       "/projects/ops-command/runs?run_id=run-shell-ui&trace_id=trace-shell-ui",
@@ -279,6 +351,10 @@ describe("ProjectToolRegistry", () => {
     );
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 
@@ -364,6 +440,9 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/notation/trust-certificates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
       return new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 });
     });
     const runtime = createAegisRuntime({ queryClient: new QueryClient() });
@@ -426,6 +505,9 @@ describe("ProjectToolRegistry", () => {
           }),
           { status: 200 },
         );
+      }
+      if (url.endsWith("/shell-images/notation/trust-certificates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
       }
       return new Response(
         JSON.stringify({ detail: "Shell template image digest is required" }),

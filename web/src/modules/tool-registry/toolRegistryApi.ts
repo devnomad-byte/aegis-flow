@@ -94,6 +94,37 @@ export type ShellImageAdmissionGovernance = {
   generated_at: string;
 };
 
+export type NotationTrustCertificate = {
+  id: string;
+  project_id: string;
+  store_type: "ca" | "signingAuthority" | "tsa";
+  store_name: string;
+  certificate_ref: string;
+  version: number;
+  artifact_ref: string;
+  artifact_sha256: string;
+  artifact_size_bytes: number;
+  artifact_content_type: string;
+  certificate_subject: string;
+  certificate_issuer: string;
+  certificate_not_before?: string | null;
+  certificate_not_after?: string | null;
+  certificate_count: number;
+  description: string;
+  status: "active" | "disabled" | "archived";
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NotationTrustCertificateCreateRequest = Pick<
+  NotationTrustCertificate,
+  "store_type" | "store_name" | "certificate_ref" | "description"
+> & {
+  certificate_pem: string;
+};
+
 export type ShellImageAdmissionPolicyUpdateRequest = Pick<
   ShellImageAdmissionPolicy,
   | "enforcement_mode"
@@ -161,6 +192,9 @@ export const shellImagePolicyQueryKey = (projectId: string) =>
 export const shellImageGovernanceQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-image-governance"] as const;
 
+export const notationTrustCertificatesQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "notation-trust-certificates"] as const;
+
 export async function listShellTemplates(
   projectId: string,
   fetcher: typeof fetch = globalThis.fetch,
@@ -205,6 +239,33 @@ export async function updateShellImageAdmissionPolicy(
       body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },
       method: "PUT",
+    },
+    fetcher,
+  );
+}
+
+export async function listNotationTrustCertificates(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<NotationTrustCertificate[]> {
+  return requestJson<NotationTrustCertificate[]>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/notation/trust-certificates`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function createNotationTrustCertificate(
+  projectId: string,
+  request: NotationTrustCertificateCreateRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<NotationTrustCertificate> {
+  return requestJson<NotationTrustCertificate>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/notation/trust-certificates`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     fetcher,
   );
