@@ -2451,11 +2451,13 @@ select {
 .policy-rbac-panel,
 .policy-risk-panel,
 .policy-event-panel,
-.policy-approval-panel {
+.policy-approval-panel,
+.policy-editor-panel {
   min-width: 0;
 }
 
-.policy-event-panel {
+.policy-event-panel,
+.policy-editor-panel {
   grid-column: 1 / -1;
 }
 
@@ -2464,6 +2466,13 @@ select {
 .policy-surface-list,
 .policy-event-list,
 .policy-approval-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.policy-editor-stack,
+.policy-version-list,
+.policy-empty-state {
   display: grid;
   gap: var(--space-sm);
 }
@@ -2574,6 +2583,87 @@ select {
 
 .policy-approval-row {
   grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.policy-empty-state {
+  align-content: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 96px;
+  padding: var(--space-lg);
+}
+
+.policy-empty-state strong {
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.policy-empty-state p {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.policy-current-version,
+.policy-version-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-height: 52px;
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.policy-current-version {
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+}
+
+.policy-current-version strong,
+.policy-current-version small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.policy-current-version small,
+.policy-version-row small {
+  color: var(--color-text-muted);
+}
+
+.policy-impact-grid {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.policy-version-row {
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  grid-template-columns: 22px minmax(0, 1fr) max-content;
+  text-align: left;
+  width: 100%;
+}
+
+.policy-version-row svg {
+  color: var(--color-accent);
+}
+
+.policy-version-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.policy-version-row:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.policy-version-row:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .project-admin-main {
@@ -2884,6 +2974,7 @@ select {
   .template-gallery-metrics,
   .template-detail-stat-grid,
   .policy-hero-metrics,
+  .policy-impact-grid,
   .project-admin-hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3020,7 +3111,9 @@ select {
   .policy-role-row,
   .policy-surface-row,
   .policy-event-row,
-  .policy-approval-row {
+  .policy-approval-row,
+  .policy-current-version,
+  .policy-version-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

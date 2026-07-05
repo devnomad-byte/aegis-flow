@@ -19,6 +19,8 @@ from backend.app.iam.models import (
 )
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
+from backend.app.policy_center.schemas import ApprovalPolicyDraftCreateRequest
+from backend.app.policy_center.sqlalchemy_store import SqlAlchemyPolicyCenterStore
 from backend.app.policy_gate.models import PolicyGateEvent
 from backend.app.tool_gateway.models import ToolGatewayApprovalTask
 from backend.app.tool_registry.models import ToolRegistryToolGroup
@@ -124,6 +126,162 @@ async def test_policy_center_overview_forbids_members_without_policy_center_perm
 
     assert response.status_code == 403
     assert response.json() == {"detail": "Missing required project permission"}
+
+
+@pytest.mark.asyncio
+async def test_approval_policy_draft_validate_publish_and_rollback_require_write_scope_and_audit(
+    policy_center_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    actor_id = uuid4()
+    project_id = uuid4()
+    await seed_policy_center_data(policy_center_session_factory, actor_id, project_id)
+    client = build_client(
+        account=AccountPrincipal(account_id=actor_id, status="active"),
+        provider=PermissionAwareProjectProvider(
+            {
+                project_id: make_project(
+                    project_id,
+                    permissions=["policy-center:view", "policy-center:write"],
+                )
+            }
+        ),
+        session_factory=policy_center_session_factory,
+    )
+
+    draft_response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/drafts",
+        json={
+            "policy_ref": "default",
+            "title": "Critical approval policy",
+            "description": "token=raw-policy-secret",
+            "rules": [
+                {
+                    "rule_id": "critical-tool",
+                    "title": "Critical tool approval",
+                    "target_kind": "tool_invocation",
+                    "action": "require_approval",
+                    "risk_levels": ["critical"],
+                    "match": {"tool_group_refs": ["k8s.admin"]},
+                    "approver_role_refs": ["ops_admin"],
+                    "reason": "token=raw-policy-secret",
+                }
+            ],
+        },
+    )
+    assert draft_response.status_code == 200
+    draft = draft_response.json()
+
+    validation_response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/"
+        f"drafts/{draft['id']}/validate"
+    )
+    assert validation_response.status_code == 200
+    assert validation_response.json()["valid"] is True
+
+    publish_response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/"
+        f"drafts/{draft['id']}/publish"
+    )
+    assert publish_response.status_code == 200
+    assert publish_response.json()["status"] == "published"
+
+    rollback_response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/default/rollback",
+        json={"target_version": 1, "reason": "restore stable policy"},
+    )
+    assert rollback_response.status_code == 200
+    assert rollback_response.json()["version"] == 2
+
+    async with policy_center_session_factory() as session:
+        audits = (
+            await session.scalars(
+                select(AuditLog).where(AuditLog.action.like("policy_center.approval_policy.%"))
+            )
+        ).all()
+
+    assert {audit.action for audit in audits} >= {
+        "policy_center.approval_policy.draft.create",
+        "policy_center.approval_policy.validate",
+        "policy_center.approval_policy.publish",
+        "policy_center.approval_policy.rollback",
+    }
+    assert "raw-policy-secret" not in str([audit.event_metadata for audit in audits])
+
+
+@pytest.mark.asyncio
+async def test_approval_policy_write_endpoints_forbid_members_without_write_permission(
+    policy_center_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    actor_id = uuid4()
+    project_id = uuid4()
+    await seed_policy_center_data(policy_center_session_factory, actor_id, project_id)
+    client = build_client(
+        account=AccountPrincipal(account_id=actor_id, status="active"),
+        provider=PermissionAwareProjectProvider(
+            {project_id: make_project(project_id, permissions=["policy-center:view"])}
+        ),
+        session_factory=policy_center_session_factory,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/drafts",
+        json={
+            "policy_ref": "default",
+            "title": "Forbidden draft",
+            "rules": [],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing required project permission"}
+
+
+@pytest.mark.asyncio
+async def test_approval_policy_draft_ids_cannot_cross_project_scope(
+    policy_center_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    actor_id = uuid4()
+    project_id = uuid4()
+    other_project_id = uuid4()
+    await seed_policy_center_data(policy_center_session_factory, actor_id, project_id)
+    async with policy_center_session_factory() as session:
+        session.add(
+            Project(
+                id=other_project_id,
+                slug=f"policy-other-{other_project_id.hex[:8]}",
+                name="Other Policy Project",
+            )
+        )
+        await session.flush()
+        draft = await SqlAlchemyPolicyCenterStore(session).create_approval_policy_draft(
+            project_id=other_project_id,
+            actor_id=actor_id,
+            request=ApprovalPolicyDraftCreateRequest(
+                policy_ref="default",
+                title="Other project draft",
+                rules=[],
+            ),
+        )
+
+    client = build_client(
+        account=AccountPrincipal(account_id=actor_id, status="active"),
+        provider=PermissionAwareProjectProvider(
+            {
+                project_id: make_project(
+                    project_id,
+                    permissions=["policy-center:view", "policy-center:write"],
+                )
+            }
+        ),
+        session_factory=policy_center_session_factory,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project_id}/policy-center/approval-policies/drafts/{draft.id}/validate"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Approval policy draft not found"}
 
 
 async def seed_policy_center_data(

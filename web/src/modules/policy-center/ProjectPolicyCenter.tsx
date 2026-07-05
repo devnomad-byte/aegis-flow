@@ -1,9 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Clock3,
+  GitCompareArrows,
   KeyRound,
   Network,
+  RotateCcw,
   ShieldCheck,
   UsersRound,
 } from "lucide-react";
@@ -11,8 +13,13 @@ import type { ReactNode } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
+  getApprovalPolicyVersions,
   getPolicyCenterOverview,
+  policyCenterApprovalPolicyVersionsQueryKey,
   policyCenterOverviewQueryKey,
+  rollbackApprovalPolicy,
+  type ApprovalPolicyImpactSummary,
+  type ApprovalPolicyVersion,
   type PolicyCenterOverviewResponse,
   type PolicyCenterPendingApproval,
   type PolicyCenterPolicyEvent,
@@ -25,13 +32,36 @@ type ProjectPolicyCenterProps = {
 };
 
 export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
+  const queryClient = useQueryClient();
   const overviewQuery = useQuery({
     queryFn: () => getPolicyCenterOverview(project.projectId),
     queryKey: policyCenterOverviewQueryKey(project.projectId),
     retry: false,
     refetchInterval: 60_000,
   });
+  const approvalPoliciesQuery = useQuery({
+    queryFn: () => getApprovalPolicyVersions(project.projectId),
+    queryKey: policyCenterApprovalPolicyVersionsQueryKey(project.projectId),
+    retry: false,
+    refetchInterval: 60_000,
+  });
+  const rollbackMutation = useMutation({
+    mutationFn: (version: ApprovalPolicyVersion) =>
+      rollbackApprovalPolicy(project.projectId, version.policy_ref, {
+        target_version: version.version,
+        reason: "Rollback from Policy Center",
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: policyCenterApprovalPolicyVersionsQueryKey(project.projectId),
+        }),
+        queryClient.invalidateQueries({ queryKey: policyCenterOverviewQueryKey(project.projectId) }),
+      ]);
+    },
+  });
   const overview = overviewQuery.data;
+  const approvalPolicies = approvalPoliciesQuery.data;
 
   return (
     <main className="aegis-main policy-center-main">
@@ -51,6 +81,16 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
       {overviewQuery.isError ? (
         <div className="preview-alert preview-alert-danger" role="alert">
           {(overviewQuery.error as Error).message}
+        </div>
+      ) : null}
+      {approvalPoliciesQuery.isError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(approvalPoliciesQuery.error as Error).message}
+        </div>
+      ) : null}
+      {rollbackMutation.isError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(rollbackMutation.error as Error).message}
         </div>
       ) : null}
 
@@ -154,9 +194,109 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
               <div className="global-empty-row">No pending approvals</div>
             )}
           </section>
+
+          <section className="global-panel policy-editor-panel">
+            <PanelHeader
+              eyebrow="APPROVAL POLICY"
+              title="Approval Policy"
+              count={approvalPolicies?.count ?? 0}
+            />
+            <ApprovalPolicyPanel
+              current={approvalPolicies?.current ?? null}
+              versions={approvalPolicies?.versions ?? []}
+              rollbackPending={rollbackMutation.isPending}
+              onRollback={(version) => rollbackMutation.mutate(version)}
+            />
+          </section>
         </section>
       ) : null}
     </main>
+  );
+}
+
+function ApprovalPolicyPanel({
+  current,
+  onRollback,
+  rollbackPending,
+  versions,
+}: {
+  current: ApprovalPolicyVersion | null;
+  onRollback: (version: ApprovalPolicyVersion) => void;
+  rollbackPending: boolean;
+  versions: ApprovalPolicyVersion[];
+}) {
+  if (!current) {
+    return (
+      <div className="policy-empty-state">
+        <strong>No approval policy published</strong>
+        <p>High and critical tool approvals remain enforced by default</p>
+      </div>
+    );
+  }
+
+  const impact = current.impact_summary ?? current.validation_result?.impact_summary ?? null;
+  const rollbackVersions = versions.filter((version) => version.status === "superseded");
+
+  return (
+    <div className="policy-editor-stack">
+      <article className="policy-current-version">
+        <div>
+          <strong>{current.title}</strong>
+          <small className="telemetry">
+            {current.policy_ref} / v{current.version} / {current.status}
+          </small>
+        </div>
+        <span className="status-pill">v{current.version}</span>
+        <span className="status-pill">{current.rule_count} rules</span>
+      </article>
+      {impact ? <ApprovalPolicyImpact impact={impact} /> : null}
+      <div className="policy-version-list">
+        {rollbackVersions.length ? (
+          rollbackVersions.slice(0, 4).map((version) => (
+            <button
+              className="policy-version-row"
+              disabled={rollbackPending}
+              key={version.id}
+              onClick={() => onRollback(version)}
+              type="button"
+            >
+              <RotateCcw aria-hidden="true" size={15} />
+              <span>Rollback to v{version.version}</span>
+              <small>{version.rule_count} rules</small>
+            </button>
+          ))
+        ) : (
+          <div className="global-empty-row">No previous policy versions</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ApprovalPolicyImpact({ impact }: { impact: ApprovalPolicyImpactSummary }) {
+  return (
+    <div className="policy-impact-grid">
+      <PostureRow
+        icon={<GitCompareArrows aria-hidden="true" size={16} />}
+        label="Matched surfaces"
+        value={String(impact.matched_surface_count)}
+      />
+      <PostureRow
+        icon={<AlertTriangle aria-hidden="true" size={16} />}
+        label="High risk"
+        value={String(impact.high_risk_surface_count)}
+      />
+      <PostureRow
+        icon={<ShieldCheck aria-hidden="true" size={16} />}
+        label="Approval rules"
+        value={String(impact.approval_rule_count)}
+      />
+      <PostureRow
+        icon={<Network aria-hidden="true" size={16} />}
+        label="Model policies"
+        value={String(impact.model_policy_count)}
+      />
+    </div>
   );
 }
 

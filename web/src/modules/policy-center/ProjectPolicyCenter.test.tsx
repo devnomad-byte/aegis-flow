@@ -12,8 +12,88 @@ describe("ProjectPolicyCenter", () => {
   });
 
   it("renders policy posture, RBAC, risk surfaces and pending approvals without raw payload", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/approval-policies/versions")) {
+        return new Response(
+          JSON.stringify({
+            current: {
+              id: "policy-version-1",
+              project_id: "ops-command",
+              policy_ref: "default",
+              version: 2,
+              status: "published",
+              title: "Default approval policy",
+              description: "Published approval policy",
+              rule_count: 2,
+              validation_result: {
+                valid: true,
+                blocking_issues: [],
+                warnings: [],
+                impact_summary: {
+                  matched_surface_count: 3,
+                  high_risk_surface_count: 2,
+                  tool_surface_count: 1,
+                  shell_surface_count: 1,
+                  model_policy_count: 1,
+                  deny_rule_count: 0,
+                  approval_rule_count: 2,
+                },
+              },
+              impact_summary: {
+                matched_surface_count: 3,
+                high_risk_surface_count: 2,
+                tool_surface_count: 1,
+                shell_surface_count: 1,
+                model_policy_count: 1,
+                deny_rule_count: 0,
+                approval_rule_count: 2,
+              },
+              published_at: "2026-07-06T01:00:00Z",
+              published_by: "acct-1",
+              created_at: "2026-07-06T00:00:00Z",
+              updated_at: "2026-07-06T01:00:00Z",
+            },
+            versions: [
+              {
+                id: "policy-version-1",
+                project_id: "ops-command",
+                policy_ref: "default",
+                version: 2,
+                status: "published",
+                title: "Default approval policy",
+                description: "Published approval policy",
+                rule_count: 2,
+                validation_result: null,
+                impact_summary: null,
+                published_at: "2026-07-06T01:00:00Z",
+                published_by: "acct-1",
+                created_at: "2026-07-06T00:00:00Z",
+                updated_at: "2026-07-06T01:00:00Z",
+              },
+              {
+                id: "policy-version-0",
+                project_id: "ops-command",
+                policy_ref: "default",
+                version: 1,
+                status: "superseded",
+                title: "Default approval policy v1",
+                description: "",
+                rule_count: 1,
+                validation_result: null,
+                impact_summary: null,
+                published_at: "2026-07-05T23:00:00Z",
+                published_by: "acct-1",
+                created_at: "2026-07-05T23:00:00Z",
+                updated_at: "2026-07-05T23:00:00Z",
+              },
+            ],
+            count: 2,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
         JSON.stringify({
           project: {
             project_id: "ops-command",
@@ -119,8 +199,8 @@ describe("ProjectPolicyCenter", () => {
           ],
         }),
         { status: 200 },
-      ),
-    );
+      );
+    });
 
     renderWithClient(<ProjectPolicyCenter project={defaultProjectContext} />);
 
@@ -130,6 +210,11 @@ describe("ProjectPolicyCenter", () => {
     expect(screen.getByText("Risk Surfaces")).toBeInTheDocument();
     expect(screen.getByText("Recent Policy Decisions")).toBeInTheDocument();
     expect(screen.getByText("Pending Approvals")).toBeInTheDocument();
+    expect(await screen.findByText("Approval Policy")).toBeInTheDocument();
+    expect(screen.getByText("Default approval policy")).toBeInTheDocument();
+    expect(screen.getByText("v2")).toBeInTheDocument();
+    expect(screen.getByText("Matched surfaces")).toBeInTheDocument();
+    expect(screen.getByText("Rollback to v1")).toBeInTheDocument();
 
     expect(screen.getByText("Kubernetes Admin")).toBeInTheDocument();
     expect(screen.getByText("ops_admin")).toBeInTheDocument();
@@ -140,8 +225,14 @@ describe("ProjectPolicyCenter", () => {
   });
 
   it("renders empty policy states from real API responses", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/approval-policies/versions")) {
+        return new Response(JSON.stringify({ current: null, versions: [], count: 0 }), {
+          status: 200,
+        });
+      }
+      return new Response(
         JSON.stringify({
           project: {
             project_id: "ops-command",
@@ -167,8 +258,8 @@ describe("ProjectPolicyCenter", () => {
           recent_policy_events: [],
         }),
         { status: 200 },
-      ),
-    );
+      );
+    });
 
     renderWithClient(<ProjectPolicyCenter project={defaultProjectContext} />);
 
@@ -176,6 +267,8 @@ describe("ProjectPolicyCenter", () => {
     expect(screen.getByText("No risk surfaces detected")).toBeInTheDocument();
     expect(screen.getByText("No recent policy decisions")).toBeInTheDocument();
     expect(screen.getByText("No pending approvals")).toBeInTheDocument();
+    expect(screen.getByText("No approval policy published")).toBeInTheDocument();
+    expect(screen.getByText("High and critical tool approvals remain enforced by default")).toBeInTheDocument();
   });
 });
 

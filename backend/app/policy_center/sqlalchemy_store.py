@@ -1,7 +1,9 @@
 from collections import defaultdict
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.iam.models import (
@@ -13,7 +15,16 @@ from backend.app.iam.models import (
     ProjectRolePermission,
 )
 from backend.app.model_gateway.models import ModelGatewayPolicy
+from backend.app.policy_center.models import ApprovalPolicyVersion
 from backend.app.policy_center.schemas import (
+    ApprovalPolicyDraftCreateRequest,
+    ApprovalPolicyImpactSummary,
+    ApprovalPolicyRule,
+    ApprovalPolicyValidationIssue,
+    ApprovalPolicyValidationResult,
+    ApprovalPolicyVersionListResponse,
+    ApprovalPolicyVersionRead,
+    ApprovalPolicyVersionSummary,
     PolicyCenterOverviewResponse,
     PolicyCenterPendingApproval,
     PolicyCenterPermissionGroup,
@@ -34,6 +45,21 @@ from backend.app.tool_registry.models import (
 )
 
 HIGH_RISK_LEVELS = {"high", "critical"}
+APPROVAL_POLICY_STATUS_DRAFT = "draft"
+APPROVAL_POLICY_STATUS_PUBLISHED = "published"
+APPROVAL_POLICY_STATUS_SUPERSEDED = "superseded"
+
+
+class ApprovalPolicyValidationFailed(ValueError):
+    """Raised when a policy draft cannot pass the publish gate."""
+
+
+class ApprovalPolicyNotFound(LookupError):
+    """Raised when an approval policy draft or version is outside the project scope."""
+
+
+class ApprovalPolicyPublishConflict(RuntimeError):
+    """Raised when a policy publish races with another version change."""
 
 
 class SqlAlchemyPolicyCenterStore:
@@ -126,6 +152,184 @@ class SqlAlchemyPolicyCenterStore:
             recent_policy_events=recent_policy_events,
         )
 
+    async def create_approval_policy_draft(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ApprovalPolicyDraftCreateRequest,
+    ) -> ApprovalPolicyVersionRead:
+        version = await self._next_approval_policy_version(
+            project_id=project_id,
+            policy_ref=request.policy_ref,
+        )
+        draft = ApprovalPolicyVersion(
+            project_id=project_id,
+            policy_ref=request.policy_ref,
+            version=version,
+            status=APPROVAL_POLICY_STATUS_DRAFT,
+            title=request.title,
+            description=request.description,
+            rules=[rule.model_dump(mode="json") for rule in request.rules],
+            validation_result={},
+            impact_summary={},
+            source_version_id=request.source_version_id,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(draft)
+        await self._session.commit()
+        await self._session.refresh(draft)
+        return _approval_policy_version_read(draft)
+
+    async def validate_approval_policy_draft(
+        self,
+        *,
+        project_id: UUID,
+        draft_id: UUID,
+    ) -> ApprovalPolicyValidationResult:
+        draft = await self._get_approval_policy_model(
+            project_id=project_id,
+            version_id=draft_id,
+            status=APPROVAL_POLICY_STATUS_DRAFT,
+        )
+        validation = await self._validate_approval_policy(
+            project_id=project_id,
+            rules=_rules_from_json(draft.rules),
+        )
+        draft.validation_result = validation.model_dump(mode="json")
+        draft.impact_summary = validation.impact_summary.model_dump(mode="json")
+        await self._session.commit()
+        return validation
+
+    async def publish_approval_policy_draft(
+        self,
+        *,
+        project_id: UUID,
+        draft_id: UUID,
+        actor_id: UUID,
+    ) -> ApprovalPolicyVersionRead:
+        draft = await self._get_approval_policy_model(
+            project_id=project_id,
+            version_id=draft_id,
+            status=APPROVAL_POLICY_STATUS_DRAFT,
+        )
+        validation = await self._validate_approval_policy(
+            project_id=project_id,
+            rules=_rules_from_json(draft.rules),
+        )
+        if not validation.valid:
+            draft.validation_result = validation.model_dump(mode="json")
+            draft.impact_summary = validation.impact_summary.model_dump(mode="json")
+            await self._session.commit()
+            raise ApprovalPolicyValidationFailed("approval policy has blocking validation issues")
+
+        await self._supersede_current_policy(
+            project_id=project_id,
+            policy_ref=draft.policy_ref,
+            actor_id=actor_id,
+        )
+        draft.status = APPROVAL_POLICY_STATUS_PUBLISHED
+        draft.validation_result = validation.model_dump(mode="json")
+        draft.impact_summary = validation.impact_summary.model_dump(mode="json")
+        draft.published_at = datetime.now(UTC)
+        draft.published_by = actor_id
+        draft.updated_by = actor_id
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise ApprovalPolicyPublishConflict(
+                "approval policy changed concurrently; retry publish",
+            ) from exc
+        await self._session.refresh(draft)
+        return _approval_policy_version_read(draft)
+
+    async def rollback_approval_policy(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+        target_version: int,
+        actor_id: UUID,
+    ) -> ApprovalPolicyVersionRead:
+        target = await self._get_approval_policy_by_version(
+            project_id=project_id,
+            policy_ref=policy_ref,
+            version=target_version,
+        )
+        rules = _rules_from_json(target.rules)
+        validation = await self._validate_approval_policy(project_id=project_id, rules=rules)
+        if not validation.valid:
+            raise ApprovalPolicyValidationFailed(
+                "target approval policy version is no longer valid"
+            )
+
+        await self._supersede_current_policy(
+            project_id=project_id,
+            policy_ref=policy_ref,
+            actor_id=actor_id,
+        )
+        rollback = ApprovalPolicyVersion(
+            project_id=project_id,
+            policy_ref=policy_ref,
+            version=await self._next_approval_policy_version(
+                project_id=project_id,
+                policy_ref=policy_ref,
+            ),
+            status=APPROVAL_POLICY_STATUS_PUBLISHED,
+            title=target.title,
+            description=target.description,
+            rules=target.rules,
+            validation_result=validation.model_dump(mode="json"),
+            impact_summary=validation.impact_summary.model_dump(mode="json"),
+            source_version_id=target.id,
+            published_at=datetime.now(UTC),
+            published_by=actor_id,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(rollback)
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise ApprovalPolicyPublishConflict(
+                "approval policy changed concurrently; retry rollback",
+            ) from exc
+        await self._session.refresh(rollback)
+        return _approval_policy_version_read(rollback)
+
+    async def list_approval_policy_versions(
+        self,
+        *,
+        project_id: UUID,
+    ) -> list[ApprovalPolicyVersionSummary]:
+        versions = list(
+            await self._session.scalars(
+                select(ApprovalPolicyVersion)
+                .where(ApprovalPolicyVersion.project_id == project_id)
+                .order_by(ApprovalPolicyVersion.version.desc(), ApprovalPolicyVersion.id.desc())
+            )
+        )
+        return [_approval_policy_version_summary(version) for version in versions]
+
+    async def load_approval_policy_versions(
+        self,
+        *,
+        project_id: UUID,
+    ) -> ApprovalPolicyVersionListResponse:
+        versions = await self.list_approval_policy_versions(project_id=project_id)
+        current = next(
+            (version for version in versions if version.status == APPROVAL_POLICY_STATUS_PUBLISHED),
+            None,
+        )
+        return ApprovalPolicyVersionListResponse(
+            current=current,
+            versions=versions,
+            count=len(versions),
+        )
+
     async def _active_member_count(self, project_id: UUID) -> int:
         members = await self._session.scalars(
             select(ProjectMember.id)
@@ -133,6 +337,178 @@ class SqlAlchemyPolicyCenterStore:
             .where(ProjectMember.status == "active")
         )
         return len(list(members))
+
+    async def _next_approval_policy_version(self, *, project_id: UUID, policy_ref: str) -> int:
+        current_version = await self._session.scalar(
+            select(func.max(ApprovalPolicyVersion.version)).where(
+                ApprovalPolicyVersion.project_id == project_id,
+                ApprovalPolicyVersion.policy_ref == policy_ref,
+            )
+        )
+        return int(current_version or 0) + 1
+
+    async def _get_approval_policy_model(
+        self,
+        *,
+        project_id: UUID,
+        version_id: UUID,
+        status: str | None = None,
+    ) -> ApprovalPolicyVersion:
+        conditions = [
+            ApprovalPolicyVersion.project_id == project_id,
+            ApprovalPolicyVersion.id == version_id,
+        ]
+        if status is not None:
+            conditions.append(ApprovalPolicyVersion.status == status)
+        version = await self._session.scalar(select(ApprovalPolicyVersion).where(*conditions))
+        if version is None:
+            raise ApprovalPolicyNotFound("Approval policy draft not found")
+        return version
+
+    async def _get_approval_policy_by_version(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+        version: int,
+    ) -> ApprovalPolicyVersion:
+        policy_version = await self._session.scalar(
+            select(ApprovalPolicyVersion).where(
+                ApprovalPolicyVersion.project_id == project_id,
+                ApprovalPolicyVersion.policy_ref == policy_ref,
+                ApprovalPolicyVersion.version == version,
+                ApprovalPolicyVersion.status.in_(
+                    [APPROVAL_POLICY_STATUS_PUBLISHED, APPROVAL_POLICY_STATUS_SUPERSEDED]
+                ),
+            )
+        )
+        if policy_version is None:
+            raise ApprovalPolicyNotFound("Approval policy version not found")
+        return policy_version
+
+    async def _supersede_current_policy(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+        actor_id: UUID,
+    ) -> None:
+        await self._session.execute(
+            update(ApprovalPolicyVersion)
+            .where(
+                ApprovalPolicyVersion.project_id == project_id,
+                ApprovalPolicyVersion.policy_ref == policy_ref,
+                ApprovalPolicyVersion.status == APPROVAL_POLICY_STATUS_PUBLISHED,
+            )
+            .values(status=APPROVAL_POLICY_STATUS_SUPERSEDED, updated_by=actor_id)
+        )
+
+    async def _validate_approval_policy(
+        self,
+        *,
+        project_id: UUID,
+        rules: list[ApprovalPolicyRule],
+    ) -> ApprovalPolicyValidationResult:
+        blocking_issues: list[ApprovalPolicyValidationIssue] = []
+        warnings: list[ApprovalPolicyValidationIssue] = []
+        seen_rule_ids: set[str] = set()
+        signatures_by_rule: dict[tuple[str, str, str], str] = {}
+
+        for rule in rules:
+            if rule.rule_id in seen_rule_ids:
+                blocking_issues.append(
+                    ApprovalPolicyValidationIssue(
+                        code="duplicate_rule_id",
+                        message=f"Duplicate approval policy rule_id: {rule.rule_id}",
+                        rule_id=rule.rule_id,
+                    )
+                )
+            seen_rule_ids.add(rule.rule_id)
+
+            if rule.action == "allow" and HIGH_RISK_LEVELS.intersection(rule.risk_levels):
+                blocking_issues.append(
+                    ApprovalPolicyValidationIssue(
+                        code="high_risk_approval_floor",
+                        message=(
+                            "High and critical actions cannot be lowered below the default "
+                            "approval floor"
+                        ),
+                        rule_id=rule.rule_id,
+                    )
+                )
+
+            match_signature = _approval_policy_match_signature(rule)
+            for risk_level in rule.risk_levels:
+                signature = (rule.target_kind, risk_level, match_signature)
+                previous_action = signatures_by_rule.get(signature)
+                if previous_action is not None and previous_action != rule.action:
+                    blocking_issues.append(
+                        ApprovalPolicyValidationIssue(
+                            code="conflicting_rule",
+                            message=(
+                                "Conflicting actions target the same kind, risk level and match"
+                            ),
+                            rule_id=rule.rule_id,
+                        )
+                    )
+                signatures_by_rule[signature] = rule.action
+
+        if not rules:
+            warnings.append(
+                ApprovalPolicyValidationIssue(
+                    code="empty_policy",
+                    message=(
+                        "No explicit approval rules are defined; default high risk floor remains"
+                    ),
+                )
+            )
+
+        impact_summary = await self._approval_policy_impact_summary(
+            project_id=project_id,
+            rules=rules,
+        )
+        return ApprovalPolicyValidationResult(
+            valid=not blocking_issues,
+            blocking_issues=blocking_issues,
+            warnings=warnings,
+            impact_summary=impact_summary,
+        )
+
+    async def _approval_policy_impact_summary(
+        self,
+        *,
+        project_id: UUID,
+        rules: list[ApprovalPolicyRule],
+    ) -> ApprovalPolicyImpactSummary:
+        surfaces = await self._risk_surfaces(project_id)
+        matched_surface_keys: set[tuple[str, str]] = set()
+        for rule in rules:
+            for surface in surfaces:
+                if _approval_policy_rule_matches_surface(rule, surface):
+                    matched_surface_keys.add((surface.kind, surface.id))
+
+        matched_surfaces = [
+            surface for surface in surfaces if (surface.kind, surface.id) in matched_surface_keys
+        ]
+        return ApprovalPolicyImpactSummary(
+            matched_surface_count=len(matched_surfaces),
+            high_risk_surface_count=sum(
+                1 for surface in matched_surfaces if surface.risk_level in HIGH_RISK_LEVELS
+            ),
+            tool_surface_count=sum(
+                1
+                for surface in matched_surfaces
+                if surface.kind in {"tool_group", "tool_group_item"}
+            ),
+            shell_surface_count=sum(
+                1 for surface in matched_surfaces if surface.kind == "shell_image_policy"
+            ),
+            model_policy_count=sum(
+                1 for surface in matched_surfaces if surface.kind == "model_policy"
+            ),
+            deny_rule_count=sum(1 for rule in rules if rule.action == "deny"),
+            approval_rule_count=sum(1 for rule in rules if rule.action == "require_approval"),
+        )
 
     async def _pending_approvals(self, project_id: UUID) -> list[PolicyCenterPendingApproval]:
         tasks = list(
@@ -363,3 +739,111 @@ def _shell_policy_status(surfaces: list[PolicyCenterRiskSurface]) -> str:
         if surface.kind == "shell_image_policy":
             return surface.status
     return "not_configured"
+
+
+def _rules_from_json(rows: list[dict[str, object]]) -> list[ApprovalPolicyRule]:
+    return [ApprovalPolicyRule.model_validate(row) for row in rows]
+
+
+def _approval_policy_version_read(version: ApprovalPolicyVersion) -> ApprovalPolicyVersionRead:
+    rules = _rules_from_json(version.rules)
+    validation = _validation_from_json(version.validation_result)
+    impact = _impact_from_json(version.impact_summary)
+    return ApprovalPolicyVersionRead(
+        id=version.id,
+        project_id=version.project_id,
+        policy_ref=version.policy_ref,
+        version=version.version,
+        status=version.status,
+        title=version.title,
+        description=version.description,
+        rules=rules,
+        rule_count=len(rules),
+        validation_result=validation,
+        impact_summary=impact,
+        source_version_id=version.source_version_id,
+        published_at=version.published_at,
+        published_by=version.published_by,
+        created_at=version.created_at,
+        updated_at=version.updated_at,
+    )
+
+
+def _approval_policy_version_summary(
+    version: ApprovalPolicyVersion,
+) -> ApprovalPolicyVersionSummary:
+    rules = _rules_from_json(version.rules)
+    return ApprovalPolicyVersionSummary(
+        id=version.id,
+        project_id=version.project_id,
+        policy_ref=version.policy_ref,
+        version=version.version,
+        status=version.status,
+        title=version.title,
+        description=version.description,
+        rule_count=len(rules),
+        validation_result=_validation_from_json(version.validation_result),
+        impact_summary=_impact_from_json(version.impact_summary),
+        source_version_id=version.source_version_id,
+        published_at=version.published_at,
+        published_by=version.published_by,
+        created_at=version.created_at,
+        updated_at=version.updated_at,
+    )
+
+
+def _validation_from_json(payload: dict[str, object]) -> ApprovalPolicyValidationResult | None:
+    if not payload:
+        return None
+    return ApprovalPolicyValidationResult.model_validate(payload)
+
+
+def _impact_from_json(payload: dict[str, object]) -> ApprovalPolicyImpactSummary | None:
+    if not payload:
+        return None
+    return ApprovalPolicyImpactSummary.model_validate(payload)
+
+
+def _approval_policy_match_signature(rule: ApprovalPolicyRule) -> str:
+    match = rule.match
+    parts = [
+        ",".join(sorted(match.tool_group_refs)),
+        ",".join(sorted(match.tool_refs)),
+        ",".join(sorted(match.shell_template_refs)),
+        ",".join(sorted(match.model_policy_refs)),
+        ",".join(sorted(match.environment_keys)),
+    ]
+    return "|".join(parts)
+
+
+def _approval_policy_rule_matches_surface(
+    rule: ApprovalPolicyRule,
+    surface: PolicyCenterRiskSurface,
+) -> bool:
+    if surface.risk_level not in set(rule.risk_levels):
+        return False
+    if not _target_kind_matches_surface(rule.target_kind, surface.kind):
+        return False
+
+    match = rule.match
+    if match.environment_keys and surface.environment_key not in set(match.environment_keys):
+        return False
+    if match.tool_group_refs and surface.policy_ref not in set(match.tool_group_refs):
+        return False
+    if match.tool_refs and not any(tool_ref in surface.summary for tool_ref in match.tool_refs):
+        return False
+    if match.model_policy_refs and surface.policy_ref not in set(match.model_policy_refs):
+        return False
+    return not (
+        match.shell_template_refs and surface.policy_ref not in set(match.shell_template_refs)
+    )
+
+
+def _target_kind_matches_surface(target_kind: str, surface_kind: str) -> bool:
+    if target_kind == "tool_invocation":
+        return surface_kind in {"tool_group", "tool_group_item"}
+    if target_kind == "shell_execution":
+        return surface_kind in {"shell_image_policy", "shell_template"}
+    if target_kind == "model_invocation":
+        return surface_kind == "model_policy"
+    return False
