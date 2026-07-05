@@ -88,3 +88,11 @@ test("renders debug chat run diagnosis workspace", async ({ page }) => {
   await expect(page.getByText("Waiting for scope")).toBeVisible();
   await expect(page.getByRole("button", { name: "Diagnose run" })).toBeDisabled();
 });
+
+test("renders the agent console workspace", async ({ page }) => {
+  await page.goto("/projects/ops-command/agents");
+
+  await expect(page.getByRole("heading", { name: "Agent Console" })).toBeVisible();
+  await expect(page.getByText("RUN COMPOSER")).toBeVisible();
+  await expect(page.getByText("No published agents")).toBeVisible();
+});

@@ -15,11 +15,20 @@ describe("resolveAegisManualChunk", () => {
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/workflow-studio/WorkflowStudio.tsx")).toBe(
       "workflow-studio",
     );
+    expect(resolveAegisManualChunk("D:/projects/web/src/modules/workflow-studio/workflowApi.ts")).toBe(
+      "workflow-core",
+    );
+    expect(resolveAegisManualChunk("D:/projects/web/src/modules/workflow-runtime/workflowRuntimeApi.ts")).toBe(
+      "workflow-core",
+    );
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/run-observatory/RunObservatory.tsx")).toBe(
       "run-observatory",
     );
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/tool-registry/ProjectToolRegistry.tsx")).toBe(
       "tool-registry",
+    );
+    expect(resolveAegisManualChunk("D:/projects/web/src/modules/agent-console/ProjectAgentConsole.tsx")).toBe(
+      "agent-console",
     );
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/global-command-center/globalCommandCenter.ts")).toBe(
       "global-command-center",
@@ -30,6 +39,7 @@ describe("resolveAegisManualChunk", () => {
     expect(PROJECT_FEATURE_LOADERS.workflows.toString()).toContain("workflow-studio");
     expect(PROJECT_FEATURE_LOADERS.runs.toString()).toContain("run-observatory");
     expect(PROJECT_FEATURE_LOADERS["tool-registry"].toString()).toContain("tool-registry");
+    expect(PROJECT_FEATURE_LOADERS["agent-console"].toString()).toContain("agent-console");
     expect(PROJECT_FEATURE_LOADERS.command.toString()).toContain("project-command-center");
   });
 });

@@ -1907,6 +1907,125 @@ select {
   resize: vertical;
 }
 
+.agent-console-main {
+  min-width: 0;
+}
+
+.agent-console-stage {
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.agent-console-hero {
+  align-items: center;
+  background:
+    linear-gradient(90deg, rgba(96, 165, 250, 0.12), transparent 46%),
+    rgba(16, 22, 21, 0.94);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  display: flex;
+  gap: var(--space-lg);
+  justify-content: space-between;
+  min-width: 0;
+  padding: var(--space-xl);
+}
+
+.agent-console-hero h2 {
+  font-size: 30px;
+  line-height: 1.1;
+  margin: 10px 0 0;
+}
+
+.agent-console-hero p {
+  color: var(--color-text-muted);
+  margin: var(--space-sm) 0 0;
+}
+
+.agent-console-hero-metrics {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(2, minmax(128px, 1fr));
+  min-width: 280px;
+}
+
+.agent-console-grid {
+  display: grid;
+  gap: var(--space-lg);
+  grid-template-columns: minmax(260px, 0.72fr) minmax(380px, 1.08fr) minmax(320px, 0.9fr);
+}
+
+.agent-console-runs {
+  grid-column: 1 / -1;
+}
+
+.agent-console-agent-list,
+.agent-console-recent-list,
+.agent-console-run-result,
+.agent-console-node-results {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.agent-console-agent-row,
+.agent-console-recent-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  cursor: pointer;
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: 24px minmax(0, 1fr) max-content;
+  min-height: 72px;
+  min-width: 0;
+  padding: var(--space-md);
+  text-align: left;
+  text-decoration: none;
+}
+
+.agent-console-agent-row-active,
+.agent-console-agent-row[aria-pressed="true"] {
+  background: rgba(46, 243, 197, 0.1);
+  border-color: rgba(46, 243, 197, 0.7);
+}
+
+.agent-console-agent-row strong,
+.agent-console-agent-row small,
+.agent-console-recent-row strong,
+.agent-console-recent-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.agent-console-agent-row small,
+.agent-console-recent-row small {
+  color: var(--color-text-muted);
+}
+
+.agent-console-inputs {
+  min-height: 180px;
+  resize: vertical;
+}
+
+.agent-console-summary {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.agent-console-tool-groups {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  grid-column: 1 / -1;
+}
+
+.agent-console-recent-row {
+  grid-template-columns: 24px minmax(0, 1fr) max-content max-content;
+}
+
 @media (max-width: 1180px) {
   .aegis-shell {
     grid-template-areas:
@@ -2015,6 +2134,14 @@ select {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .agent-console-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-console-runs {
+    grid-column: auto;
+  }
+
   .global-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2094,6 +2221,22 @@ select {
     align-items: flex-start;
     display: grid;
     padding: var(--space-lg);
+  }
+
+  .agent-console-hero {
+    align-items: flex-start;
+    display: grid;
+    padding: var(--space-lg);
+  }
+
+  .agent-console-hero h2 {
+    font-size: 24px;
+  }
+
+  .agent-console-hero-metrics,
+  .agent-console-summary,
+  .agent-console-recent-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .project-command-hero h2 {

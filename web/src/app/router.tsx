@@ -54,6 +54,12 @@ const projectWorkflowsRoute = createRoute({
   component: ProjectWorkflowsRoute,
 });
 
+const projectAgentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/agents",
+  component: ProjectAgentsRoute,
+});
+
 const projectToolRegistryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId/tools",
@@ -90,6 +96,7 @@ const routeTree = rootRoute.addChildren([
   globalRoute,
   projectRoute,
   projectWorkflowsRoute,
+  projectAgentsRoute,
   projectToolRegistryRoute,
   projectModelGatewaySettingsRoute,
   projectPromptLibraryRoute,
@@ -144,6 +151,18 @@ function ProjectWorkflowsRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="workflows" />;
+}
+
+function ProjectAgentsRoute() {
+  const context = projectAgentsRoute.useRouteContext();
+  const params = projectAgentsRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="agent-console" />;
 }
 
 function ProjectToolRegistryRoute() {

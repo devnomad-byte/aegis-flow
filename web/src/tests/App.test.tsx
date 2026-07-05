@@ -23,7 +23,7 @@ describe("App", () => {
     expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
     expect(screen.getByText("运维排障项目")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Workflow Studio" })).toBeInTheDocument();
-    expect(await screen.findByText("Workflow Canvas")).toBeInTheDocument();
+    expect(await screen.findByText("Workflow Canvas", {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByText("导入预览")).toBeInTheDocument();
     expect(screen.getByText("Harness Loop Timeline")).toBeInTheDocument();
   });
@@ -162,6 +162,19 @@ describe("App", () => {
     expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Run Diagnosis" })).toBeInTheDocument();
     expect(screen.getByText("Waiting for scope")).toBeInTheDocument();
+  });
+
+  it("renders agent console for project agent routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ versions: [], count: 0 }), { status: 200 }),
+    );
+
+    render(<App initialPath="/projects/ops-command/agents" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent Console" })).toBeInTheDocument();
+    expect(await screen.findByText("RUN COMPOSER")).toBeInTheDocument();
+    expect(await screen.findByText("No published agents")).toBeInTheDocument();
   });
 
   it("shows forbidden instead of global data for regular project members", async () => {

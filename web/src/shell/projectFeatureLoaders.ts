@@ -3,6 +3,7 @@ import type { ComponentType } from "react";
 import type { ProjectContext } from "./projectContext";
 
 export type ProjectFeatureView =
+  | "agent-console"
   | "command"
   | "debug-chat"
   | "workflows"
@@ -17,6 +18,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   ProjectFeatureView,
   () => Promise<{ default: ProjectFeatureComponent }>
 > = {
+  "agent-console": () =>
+    import("../modules/agent-console/ProjectAgentConsole").then((module) => ({
+      default: module.ProjectAgentConsole,
+    })),
   command: () =>
     import("../modules/project-command-center/ProjectCommandCenter").then((module) => ({
       default: module.ProjectCommandCenter,

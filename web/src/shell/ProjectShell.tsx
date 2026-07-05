@@ -20,7 +20,7 @@ import { ProjectSwitcher } from "./ProjectSwitcher";
 const navItems = [
   { label: "Project Command", icon: LayoutDashboard, route: "command" },
   { label: "Workflow Studio", icon: GitBranch, route: "workflows" },
-  { label: "Agent Console", icon: Bot, route: "workflows" },
+  { label: "Agent Console", icon: Bot, route: "agent-console" },
   { label: "Tool Registry", icon: Boxes, route: "tool-registry" },
   { label: "Run Observatory", icon: Activity, route: "runs" },
   { label: "Debug Chat", icon: MessageSquareText, route: "debug-chat" },
@@ -36,6 +36,7 @@ type ProjectShellProps = {
 };
 
 const ProjectFeatureComponents = {
+  "agent-console": lazy(PROJECT_FEATURE_LOADERS["agent-console"]),
   command: lazy(PROJECT_FEATURE_LOADERS.command),
   "debug-chat": lazy(PROJECT_FEATURE_LOADERS["debug-chat"]),
   workflows: lazy(PROJECT_FEATURE_LOADERS.workflows),
@@ -64,6 +65,7 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
             const Icon = item.icon;
             const isActive =
               (view === "command" && item.route === "command") ||
+              (view === "agent-console" && item.route === "agent-console") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
               (view === "debug-chat" && item.route === "debug-chat") ||
               (view === "tool-registry" && item.route === "tool-registry") ||
@@ -114,6 +116,13 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId",
+                    });
+                    return;
+                  }
+                  if (item.route === "agent-console") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/agents",
                     });
                     return;
                   }
@@ -175,6 +184,8 @@ function ProjectFeatureFallback({ view }: { view: ProjectFeatureView }) {
 
 function getFeatureLabel(view: ProjectFeatureView) {
   switch (view) {
+    case "agent-console":
+      return "Agent Console";
     case "command":
       return "Project Command Center";
     case "debug-chat":

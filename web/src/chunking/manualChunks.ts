@@ -22,6 +22,15 @@ const vendorChunkRules: Array<{ chunk: string; markers: string[] }> = [
 ];
 
 const featureChunkRules: Array<{ chunk: string; markers: string[] }> = [
+  {
+    chunk: "workflow-core",
+    markers: [
+      "/src/modules/workflow-runtime/",
+      "/src/modules/workflow-studio/workflowApi.ts",
+      "/src/modules/workflow-studio/workflowTypes.ts",
+    ],
+  },
+  { chunk: "agent-console", markers: ["/src/modules/agent-console/"] },
   { chunk: "workflow-studio", markers: ["/src/modules/workflow-studio/"] },
   { chunk: "run-observatory", markers: ["/src/modules/run-observatory/", "/src/modules/runtime-trace/"] },
   { chunk: "global-command-center", markers: ["/src/modules/global-command-center/"] },
