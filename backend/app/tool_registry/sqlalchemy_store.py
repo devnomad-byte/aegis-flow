@@ -21,6 +21,9 @@ from backend.app.security.egress_proxy import (
     EgressProxyPolicyViolation,
     build_egress_proxy_plan,
 )
+from backend.app.tool_registry.image_governance import (
+    summarize_shell_image_admission_governance,
+)
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.mcp_client import (
     McpServerConnection,
@@ -56,6 +59,7 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionGovernanceRead,
     ShellImageAdmissionPolicyRead,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
@@ -365,6 +369,22 @@ class SqlAlchemyToolRegistryStore:
         return ShellImageAdmissionPolicyRead.model_validate(policy).model_copy(
             update={"configured": True}
         )
+
+    async def summarize_shell_image_admission_governance(
+        self,
+        project_id: UUID,
+        *,
+        now: datetime | None = None,
+    ) -> ShellImageAdmissionGovernanceRead:
+        result = await self._session.scalars(
+            select(ToolRegistryImageAdmission)
+            .where(ToolRegistryImageAdmission.project_id == project_id)
+            .order_by(ToolRegistryImageAdmission.checked_at.desc())
+        )
+        admissions = [
+            ShellImageAdmissionRead.model_validate(admission) for admission in result.all()
+        ]
+        return summarize_shell_image_admission_governance(admissions, now=now)
 
     async def upsert_shell_image_admission_policy(
         self,

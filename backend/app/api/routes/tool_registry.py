@@ -17,6 +17,10 @@ from backend.app.execution.shell_policy import ShellTemplatePolicyError
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_artifacts import (
+    ShellImageArtifactWriter,
+    build_shell_image_artifact_object_store,
+)
 from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
     NoopShellImageEvidenceProvider,
@@ -44,6 +48,7 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionGovernanceRead,
     ShellImageAdmissionPolicyRead,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
@@ -777,6 +782,7 @@ async def resolve_shell_image_admission(
         evidence_provider=_policy_aware_evidence_provider(
             policy=policy,
             base_provider=evidence_provider,
+            project_id=project_id,
         ),
     )
     try:
@@ -812,6 +818,7 @@ async def resolve_shell_image_admission(
             "artifact_retention_requested": (
                 policy.sbom_artifact_retention_enabled or policy.scan_report_retention_enabled
             ),
+            "artifact_count": _artifact_count(admission),
         },
     )
     return admission.model_copy(update={"evidence": _sanitize_image_evidence(admission.evidence)})
@@ -821,8 +828,10 @@ def _policy_aware_evidence_provider(
     *,
     policy: ShellImageAdmissionPolicyRead,
     base_provider: ShellImageEvidenceProvider,
+    project_id: UUID,
 ) -> ShellImageEvidenceProvider:
     settings = AppSettings().shell_image_supply_chain
+    s3_settings = AppSettings().s3
     providers = [base_provider]
     if policy.notation_enabled:
         providers.append(
@@ -834,15 +843,62 @@ def _policy_aware_evidence_provider(
             )
         )
     if settings.trivy_enabled:
+        artifact_writer = None
+        if policy.sbom_artifact_retention_enabled or policy.scan_report_retention_enabled:
+            artifact_writer = ShellImageArtifactWriter(
+                project_id=project_id,
+                object_store=build_shell_image_artifact_object_store(s3_settings),
+                artifact_store_prefix=policy.artifact_store_prefix,
+                retention_days=policy.artifact_retention_days,
+            )
         providers.append(
             TrivyCliEvidenceProvider(
                 trivy_command=settings.trivy_command,
                 timeout_seconds=settings.scan_timeout_seconds,
                 blocked_severities=frozenset(policy.blocked_severities),
                 cache_dir=settings.trivy_cache_dir,
+                artifact_writer=artifact_writer,
+                retain_sbom_report=policy.sbom_artifact_retention_enabled,
+                retain_vulnerability_report=policy.scan_report_retention_enabled,
             )
         )
     return merge_evidence_providers(*providers)
+
+
+@router.get(
+    "/shell-images/admissions/governance",
+    response_model=ShellImageAdmissionGovernanceRead,
+)
+async def get_shell_image_admission_governance(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellImageAdmissionGovernanceRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    governance = await registry_store.summarize_shell_image_admission_governance(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_admission.governance",
+        target_type="tool_registry_image_admission",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={
+            "total_admissions": governance.total_admissions,
+            "blocked_vulnerability_count": governance.blocked_vulnerability_count,
+            "expired_artifact_count": governance.artifact_counts.expired,
+            "sbom_artifact_count": governance.artifact_counts.sbom,
+            "scan_report_artifact_count": governance.artifact_counts.scan_report,
+        },
+    )
+    return governance
 
 
 @router.get(
@@ -1170,3 +1226,12 @@ def _blocked_vulnerability_count(admission: ShellImageAdmissionRead) -> int:
         return 0
     blocked_count = vulnerabilities.get("blocked_count")
     return blocked_count if isinstance(blocked_count, int) else 0
+
+
+def _artifact_count(admission: ShellImageAdmissionRead) -> int:
+    count = 0
+    for key in ("sbom", "vulnerabilities"):
+        evidence = admission.evidence.get(key)
+        if isinstance(evidence, dict) and isinstance(evidence.get("artifact_ref"), str):
+            count += 1
+    return count

@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from typing import cast
 from uuid import UUID, uuid4
@@ -33,6 +33,9 @@ from backend.app.tool_registry.image_evidence import (
     ShellImageEvidenceResult,
     StaticShellImageEvidenceProvider,
 )
+from backend.app.tool_registry.image_governance import (
+    summarize_shell_image_admission_governance,
+)
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
 from backend.app.tool_registry.schemas import (
     AuthorizedToolRead,
@@ -46,6 +49,7 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionGovernanceRead,
     ShellImageAdmissionPolicyRead,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
@@ -729,6 +733,12 @@ class InMemoryToolRegistryStore:
         return self.image_policies.get(project_id) or default_shell_image_admission_policy(
             project_id
         )
+
+    async def summarize_shell_image_admission_governance(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionGovernanceRead:
+        return summarize_shell_image_admission_governance(self.image_admissions.get(project_id, []))
 
     async def upsert_shell_image_admission_policy(
         self,
@@ -2057,6 +2067,111 @@ def test_tool_registry_shell_image_admission_records_real_evidence_statuses_safe
     assert metadata["sbom_status"] == "passed"
     assert metadata["vulnerability_status"] == "passed"
     assert metadata["blocked_vulnerability_count"] == 0
+
+
+def test_tool_registry_shell_image_governance_summarizes_artifacts_and_blocks() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    now = datetime.now(UTC)
+    registry_store.image_admissions[project.id] = [
+        ShellImageAdmissionRead(
+            id=uuid4(),
+            project_id=project.id,
+            image_ref="registry.example/aegis/runtime:7-alpine",
+            image_digest="sha256:" + ("a" * 64),
+            registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+            registry_digest="sha256:" + ("a" * 64),
+            digest_match=True,
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="failed",
+            policy_decision="would_reject",
+            decision_reason=("dry-run would reject: vulnerability scan found blocked severities"),
+            checked_at=now,
+            evidence={
+                "sbom": {
+                    "tool": "trivy",
+                    "format": "CycloneDX",
+                    "component_count": 2,
+                    "status": "passed",
+                    "artifact_ref": "s3://capievo/shell-image-admissions/sbom.json",
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 120,
+                    "artifact_retention_days": 1,
+                    "artifact_retention_expires_at": (now - timedelta(days=1)).isoformat(),
+                },
+                "vulnerabilities": {
+                    "tool": "trivy",
+                    "severity_counts": {"HIGH": 1},
+                    "total_count": 1,
+                    "blocked_severities": ["HIGH"],
+                    "blocked_count": 1,
+                    "status": "failed",
+                    "artifact_ref": "s3://capievo/shell-image-admissions/scan.json",
+                    "artifact_sha256": "b" * 64,
+                    "artifact_size_bytes": 240,
+                    "artifact_retention_days": 30,
+                    "artifact_retention_expires_at": (now + timedelta(days=30)).isoformat(),
+                },
+            },
+            created_by=uuid4(),
+            updated_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+        ),
+        ShellImageAdmissionRead(
+            id=uuid4(),
+            project_id=project.id,
+            image_ref="registry.example/aegis/worker:7-alpine",
+            image_digest="sha256:" + ("b" * 64),
+            registry_url="https://registry.example/v2/aegis/worker/manifests/7-alpine",
+            registry_digest="sha256:" + ("b" * 64),
+            digest_match=True,
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="passed",
+            policy_decision="approved",
+            decision_reason="registry digest, SBOM, and vulnerability evidence passed",
+            checked_at=now,
+            evidence={},
+            created_by=uuid4(),
+            updated_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+        ),
+    ]
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/admissions/governance"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_admissions"] == 2
+    assert body["policy_decisions"] == {"approved": 1, "would_reject": 1, "rejected": 0}
+    assert body["artifact_counts"] == {
+        "sbom": 1,
+        "scan_report": 1,
+        "expired": 1,
+    }
+    assert body["blocked_vulnerability_count"] == 1
+    assert body["top_block_reasons"] == [
+        {"reason": "vulnerability scan found blocked severities", "count": 1}
+    ]
+    assert audit_store.events[-1]["action"] == "tool_registry.shell_image_admission.governance"
+    metadata = cast(dict[str, object], audit_store.events[-1]["metadata"])
+    assert metadata["total_admissions"] == 2
+    assert metadata["expired_artifact_count"] == 1
+    rendered = response.text + repr(audit_store.events[-1])
+    assert "raw_report" not in rendered
+    assert "raw vulnerability" not in rendered
 
 
 def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:

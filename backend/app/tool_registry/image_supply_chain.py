@@ -185,9 +185,17 @@ def parse_image_ref(image_ref: str) -> tuple[str, str, str]:
 
 
 def sanitize_image_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:
+    artifact_keys = {
+        "artifact_ref",
+        "artifact_sha256",
+        "artifact_size_bytes",
+        "artifact_content_type",
+        "artifact_retention_days",
+        "artifact_retention_expires_at",
+    }
     allowed_nested_keys = {
         "signature": {"tool", "verifier", "identity", "issuer", "status"},
-        "sbom": {"tool", "format", "component_count", "status"},
+        "sbom": {"tool", "format", "component_count", "status"} | artifact_keys,
         "vulnerabilities": {
             "tool",
             "severity_counts",
@@ -195,7 +203,8 @@ def sanitize_image_evidence_summary(evidence: dict[str, object]) -> dict[str, ob
             "blocked_severities",
             "blocked_count",
             "status",
-        },
+        }
+        | artifact_keys,
     }
     allowed_top_level = {
         "content_type",

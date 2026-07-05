@@ -58,6 +58,14 @@ _SECRET_LIKE_KEYS = {
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[a-zA-Z]:")
 
 
+def _default_image_evidence_status_counts() -> dict[ImageEvidenceStatus, int]:
+    return {"not_checked": 0, "passed": 0, "failed": 0}
+
+
+def _default_image_admission_decision_counts() -> dict[ImageAdmissionDecision, int]:
+    return {"approved": 0, "would_reject": 0, "rejected": 0}
+
+
 class ToolRegistryCatalogResponse(BaseModel):
     tool_groups: list[str]
     mcp_servers: list[str]
@@ -392,6 +400,45 @@ class ShellImageAdmissionPolicyRead(BaseModel):
     updated_by: UUID | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class ShellImageAdmissionStatusCounts(BaseModel):
+    signature: dict[ImageEvidenceStatus, int] = Field(
+        default_factory=_default_image_evidence_status_counts
+    )
+    sbom: dict[ImageEvidenceStatus, int] = Field(
+        default_factory=_default_image_evidence_status_counts
+    )
+    vulnerabilities: dict[ImageEvidenceStatus, int] = Field(
+        default_factory=_default_image_evidence_status_counts
+    )
+
+
+class ShellImageAdmissionArtifactCounts(BaseModel):
+    sbom: int = 0
+    scan_report: int = 0
+    expired: int = 0
+
+
+class ShellImageBlockReasonCount(BaseModel):
+    reason: str
+    count: int
+
+
+class ShellImageAdmissionGovernanceRead(BaseModel):
+    total_admissions: int
+    policy_decisions: dict[ImageAdmissionDecision, int] = Field(
+        default_factory=_default_image_admission_decision_counts
+    )
+    evidence_statuses: ShellImageAdmissionStatusCounts = Field(
+        default_factory=ShellImageAdmissionStatusCounts
+    )
+    artifact_counts: ShellImageAdmissionArtifactCounts = Field(
+        default_factory=ShellImageAdmissionArtifactCounts
+    )
+    blocked_vulnerability_count: int = 0
+    top_block_reasons: list[ShellImageBlockReasonCount] = Field(default_factory=list)
+    generated_at: datetime
 
 
 class CredentialRefRead(BaseModel):

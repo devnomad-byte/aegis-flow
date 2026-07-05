@@ -69,6 +69,7 @@ markers = [
   "real_mcp: tests that require a real HTTP MCP server",
   "real_notation: tests that require a real Notation executable and trust policy inputs",
   "real_redis: tests that require the configured Redis instance",
+  "real_s3: tests that require the configured S3/MinIO object store",
   "real_trivy: tests that require a real Trivy executable or toolchain",
 ]
 

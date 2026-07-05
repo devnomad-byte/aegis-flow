@@ -74,6 +74,26 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 2,
+            policy_decisions: { approved: 1, would_reject: 1, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 0, passed: 2, failed: 0 },
+              sbom: { not_checked: 0, passed: 2, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 1, failed: 1 },
+            },
+            artifact_counts: { sbom: 1, scan_report: 1, expired: 1 },
+            blocked_vulnerability_count: 2,
+            top_block_reasons: [
+              { reason: "vulnerability scan found blocked severities", count: 1 },
+            ],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
       if (url.endsWith("/shell-images/admission-policy") && init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         expect(body.enforcement_mode).toBe("enforce");
@@ -135,11 +155,25 @@ describe("ProjectToolRegistry", () => {
               "registry digest, signature, SBOM, and vulnerability evidence checked",
             checked_at: "2026-07-05T00:00:00Z",
             evidence: {
-              sbom: { tool: "trivy", format: "CycloneDX", component_count: 42 },
+              sbom: {
+                tool: "trivy",
+                format: "CycloneDX",
+                component_count: 42,
+                artifact_ref: "s3://capievo/shell-image-admissions/sbom.json",
+                artifact_sha256: "a".repeat(64),
+                artifact_size_bytes: 120,
+                artifact_retention_days: 30,
+                artifact_retention_expires_at: "2026-08-04T00:00:00Z",
+              },
               vulnerabilities: {
                 tool: "trivy",
                 severity_counts: { HIGH: 2, CRITICAL: 0 },
                 blocked_count: 2,
+                artifact_ref: "s3://capievo/shell-image-admissions/scan.json",
+                artifact_sha256: "b".repeat(64),
+                artifact_size_bytes: 240,
+                artifact_retention_days: 30,
+                artifact_retention_expires_at: "2026-08-04T00:00:00Z",
               },
             },
           }),
@@ -217,6 +251,12 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("failed")).toBeInTheDocument();
     expect(screen.getByText("Components: 42")).toBeInTheDocument();
     expect(screen.getByText("Blocked vulnerabilities: 2")).toBeInTheDocument();
+    expect(screen.getByText("SBOM artifacts")).toBeInTheDocument();
+    expect(screen.getByText("Scan artifacts")).toBeInTheDocument();
+    expect(screen.getByText("Expired artifacts")).toBeInTheDocument();
+    expect(screen.getByText("vulnerability scan found blocked severities: 1")).toBeInTheDocument();
+    expect(screen.getByText(/SBOM artifact: s3:\/\/capievo\/shell-image-admissions\/sbom\.json/)).toBeInTheDocument();
+    expect(screen.getByText(/Scan artifact: s3:\/\/capievo\/shell-image-admissions\/scan\.json/)).toBeInTheDocument();
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute(
       "href",
@@ -236,6 +276,9 @@ describe("ProjectToolRegistry", () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/resolve",
       expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
     );
   });
 
@@ -262,6 +305,24 @@ describe("ProjectToolRegistry", () => {
             artifact_retention_days: 30,
             blocked_severities: ["HIGH", "CRITICAL"],
             updated_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 0,
+            policy_decisions: { approved: 0, would_reject: 0, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 0, passed: 0, failed: 0 },
+              sbom: { not_checked: 0, passed: 0, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 0, failed: 0 },
+            },
+            artifact_counts: { sbom: 0, scan_report: 0, expired: 0 },
+            blocked_vulnerability_count: 0,
+            top_block_reasons: [],
+            generated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
         );

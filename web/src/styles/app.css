@@ -1271,6 +1271,20 @@ select {
   padding-top: var(--space-md);
 }
 
+.shell-governance-panel {
+  border-top: 1px solid var(--color-border);
+  display: grid;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-md);
+}
+
+.shell-governance-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .policy-toggle-grid {
   display: grid;
   gap: var(--space-sm);
@@ -1998,6 +2012,7 @@ select {
   .global-metric-grid,
   .node-detail-grid,
   .tool-registry-form-grid,
+  .shell-governance-grid,
   .policy-toggle-grid,
   .shell-preview-grid,
   .model-trace-metrics,

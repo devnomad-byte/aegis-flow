@@ -8,6 +8,7 @@ REAL_DEPENDENCY_MARKERS = {
     "real_mcp",
     "real_notation",
     "real_redis",
+    "real_s3",
     "real_trivy",
 }
 
@@ -19,6 +20,7 @@ REAL_DEPENDENCY_ENV_FLAGS = {
     "real_mcp": "AEGIS_REAL_MCP",
     "real_notation": "AEGIS_REAL_NOTATION",
     "real_redis": "AEGIS_REAL_REDIS",
+    "real_s3": "AEGIS_REAL_S3",
     "real_trivy": "AEGIS_REAL_TRIVY",
 }
 

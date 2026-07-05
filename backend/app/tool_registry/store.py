@@ -18,6 +18,7 @@ from backend.app.tool_registry.schemas import (
     McpServerRead,
     SecretLeaseCreateRequest,
     SecretLeaseRead,
+    ShellImageAdmissionGovernanceRead,
     ShellImageAdmissionPolicyRead,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
@@ -160,6 +161,12 @@ class ToolRegistryStore(Protocol):
         self,
         project_id: UUID,
     ) -> ShellImageAdmissionPolicyRead:
+        raise NotImplementedError
+
+    async def summarize_shell_image_admission_governance(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionGovernanceRead:
         raise NotImplementedError
 
     async def upsert_shell_image_admission_policy(

@@ -5,13 +5,16 @@ import { useEffect, useMemo, useState } from "react";
 import type { ProjectContext } from "../../shell/projectContext";
 import {
   createShellTemplate,
+  getShellImageAdmissionGovernance,
   getShellImageAdmissionPolicy,
   listShellTemplates,
   previewShellTemplate,
   resolveShellImageAdmission,
   type ShellImageAdmission,
+  type ShellImageAdmissionGovernance,
   type ShellImageAdmissionPolicy,
   type ShellImageAdmissionPolicyUpdateRequest,
+  shellImageGovernanceQueryKey,
   shellImagePolicyQueryKey,
   shellTemplatesQueryKey,
   type ShellRiskLevel,
@@ -67,6 +70,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     () => shellImagePolicyQueryKey(project.projectId),
     [project.projectId],
   );
+  const governanceQueryKey = useMemo(
+    () => shellImageGovernanceQueryKey(project.projectId),
+    [project.projectId],
+  );
   const [form, setForm] = useState<ShellTemplateCreateRequest>(emptyShellTemplateForm);
   const [argvText, setArgvText] = useState("-lc\necho {{message}}");
   const [schemaText, setSchemaText] = useState(JSON.stringify(emptyShellTemplateForm.parameter_schema, null, 2));
@@ -85,6 +92,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const policyQuery = useQuery({
     queryFn: () => getShellImageAdmissionPolicy(project.projectId),
     queryKey: policyQueryKey,
+    retry: false,
+  });
+  const governanceQuery = useQuery({
+    queryFn: () => getShellImageAdmissionGovernance(project.projectId),
+    queryKey: governanceQueryKey,
     retry: false,
   });
   const createMutation = useMutation({
@@ -113,6 +125,9 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
         image_digest: request.image_digest,
         image_ref: request.image_ref,
       }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: governanceQueryKey });
+    },
     onSuccess: (result) => setAdmission(result),
   });
   const policyMutation = useMutation({
@@ -149,6 +164,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     admissionMutation.error ||
     policyMutation.error ||
     policyQuery.error ||
+    governanceQuery.error ||
     templatesQuery.error;
 
   return (
@@ -291,6 +307,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               <ShieldCheck aria-hidden="true" size={18} />
             </div>
             <SupplyChainPanel admission={admission} />
+            <GovernancePanel
+              governance={governanceQuery.data ?? null}
+              isLoading={governanceQuery.isLoading}
+            />
             <PolicyPanel
               isLoading={policyQuery.isLoading}
               isSaving={policyMutation.isPending}
@@ -470,6 +490,44 @@ function SupplyChainPanel({ admission }: { admission: ShellImageAdmission | null
       ))}
       {admission ? <EvidenceCode label="ADMISSION REASON" value={admission.decision_reason} /> : null}
     </div>
+  );
+}
+
+function GovernancePanel({
+  governance,
+  isLoading,
+}: {
+  governance: ShellImageAdmissionGovernance | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) {
+    return <div className="preview-alert">Loading supply chain governance</div>;
+  }
+
+  return (
+    <section className="shell-governance-panel" aria-label="Shell Image Governance">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">GOVERNANCE</div>
+          <h3>Admission Trends + Artifacts</h3>
+        </div>
+        <span className="status-pill status-ready">{governance?.total_admissions ?? 0}</span>
+      </div>
+      <div className="shell-governance-grid">
+        <Detail label="Approved" value={String(governance?.policy_decisions.approved ?? 0)} />
+        <Detail label="Would reject" value={String(governance?.policy_decisions.would_reject ?? 0)} />
+        <Detail label="Rejected" value={String(governance?.policy_decisions.rejected ?? 0)} />
+        <Detail label="Blocked vulns" value={String(governance?.blocked_vulnerability_count ?? 0)} />
+        <Detail label="SBOM artifacts" value={String(governance?.artifact_counts.sbom ?? 0)} />
+        <Detail label="Scan artifacts" value={String(governance?.artifact_counts.scan_report ?? 0)} />
+        <Detail label="Expired artifacts" value={String(governance?.artifact_counts.expired ?? 0)} />
+      </div>
+      {governance?.top_block_reasons.map((item) => (
+        <div className="preview-alert" key={item.reason}>
+          {item.reason}: {item.count}
+        </div>
+      ))}
+    </section>
   );
 }
 
@@ -736,6 +794,19 @@ function buildEvidenceSummaries(evidence?: Record<string, unknown>) {
   if (blockedCount !== null) {
     summaries.push(`Blocked vulnerabilities: ${blockedCount}`);
   }
+  for (const [label, artifact] of [
+    ["SBOM artifact", sbom],
+    ["Scan artifact", vulnerabilities],
+  ] as const) {
+    const artifactRef = stringValue(artifact?.artifact_ref);
+    const sizeBytes = numberValue(artifact?.artifact_size_bytes);
+    const expiresAt = stringValue(artifact?.artifact_retention_expires_at);
+    if (artifactRef) {
+      summaries.push(
+        `${label}: ${artifactRef} · ${sizeBytes ?? 0} bytes · retains until ${expiresAt ?? "unknown"}`,
+      );
+    }
+  }
 
   return summaries;
 }
@@ -749,4 +820,8 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }

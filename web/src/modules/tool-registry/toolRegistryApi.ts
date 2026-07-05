@@ -72,6 +72,28 @@ export type ShellImageAdmissionPolicy = {
   updated_at?: string | null;
 };
 
+export type ShellImageAdmissionGovernance = {
+  total_admissions: number;
+  policy_decisions: {
+    approved: number;
+    would_reject: number;
+    rejected: number;
+  };
+  evidence_statuses: {
+    signature: Record<string, number>;
+    sbom: Record<string, number>;
+    vulnerabilities: Record<string, number>;
+  };
+  artifact_counts: {
+    sbom: number;
+    scan_report: number;
+    expired: number;
+  };
+  blocked_vulnerability_count: number;
+  top_block_reasons: Array<{ reason: string; count: number }>;
+  generated_at: string;
+};
+
 export type ShellImageAdmissionPolicyUpdateRequest = Pick<
   ShellImageAdmissionPolicy,
   | "enforcement_mode"
@@ -132,6 +154,9 @@ export const shellTemplatesQueryKey = (projectId: string) =>
 export const shellImagePolicyQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-image-policy"] as const;
 
+export const shellImageGovernanceQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "shell-image-governance"] as const;
+
 export async function listShellTemplates(
   projectId: string,
   fetcher: typeof fetch = globalThis.fetch,
@@ -149,6 +174,17 @@ export async function getShellImageAdmissionPolicy(
 ): Promise<ShellImageAdmissionPolicy> {
   return requestJson<ShellImageAdmissionPolicy>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admission-policy`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function getShellImageAdmissionGovernance(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageAdmissionGovernance> {
+  return requestJson<ShellImageAdmissionGovernance>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admissions/governance`,
     undefined,
     fetcher,
   );

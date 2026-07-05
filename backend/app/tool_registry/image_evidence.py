@@ -7,6 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol
 
+from backend.app.tool_registry.image_artifacts import ShellImageArtifactWriter
+
 ImageEvidenceStatus = Literal["not_checked", "passed", "failed"]
 ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
 
@@ -239,6 +241,9 @@ class TrivyCliEvidenceProvider:
     blocked_severities: frozenset[str] = DEFAULT_BLOCKED_SEVERITIES
     cache_dir: str = ""
     runner: ShellImageCommandRunner = field(default_factory=AsyncSubprocessJsonRunner)
+    artifact_writer: ShellImageArtifactWriter | None = None
+    retain_sbom_report: bool = False
+    retain_vulnerability_report: bool = False
 
     async def collect(self, *, image_ref: str, image_digest: str) -> ShellImageEvidenceResult:
         if shutil.which(self.trivy_command) is None:
@@ -288,6 +293,48 @@ class TrivyCliEvidenceProvider:
             vulnerability_report,
             blocked_severities=self.blocked_severities,
         )
+        sbom_evidence = {"tool": "trivy", "status": sbom.status, **sbom.evidence}
+        vulnerability_evidence = {
+            "tool": "trivy",
+            "status": vulnerabilities.status,
+            **vulnerabilities.evidence,
+        }
+        try:
+            if self.artifact_writer is not None and self.retain_sbom_report:
+                sbom_evidence.update(
+                    await self.artifact_writer.write_json_artifact(
+                        kind="sbom",
+                        image_ref=image_ref,
+                        image_digest=image_digest,
+                        payload=sbom_report,
+                    )
+                )
+            if self.artifact_writer is not None and self.retain_vulnerability_report:
+                vulnerability_evidence.update(
+                    await self.artifact_writer.write_json_artifact(
+                        kind="scan_report",
+                        image_ref=image_ref,
+                        image_digest=image_digest,
+                        payload=vulnerability_report,
+                    )
+                )
+        except Exception:
+            return ShellImageEvidenceResult(
+                sbom_status="failed" if self.retain_sbom_report else sbom.status,
+                vulnerability_status=(
+                    "failed" if self.retain_vulnerability_report else vulnerabilities.status
+                ),
+                policy_decision="rejected",
+                decision_reason="Shell image artifact retention failed",
+                evidence={
+                    "sbom": {"tool": "trivy", "status": "failed"}
+                    if self.retain_sbom_report
+                    else sbom_evidence,
+                    "vulnerabilities": {"tool": "trivy", "status": "failed"}
+                    if self.retain_vulnerability_report
+                    else vulnerability_evidence,
+                },
+            )
         evidence_passed = sbom.status == "passed" and vulnerabilities.status == "passed"
         decision: ImageAdmissionDecision = "approved" if evidence_passed else "rejected"
         reason = (
@@ -300,7 +347,7 @@ class TrivyCliEvidenceProvider:
             vulnerability_status=vulnerabilities.status,
             policy_decision=decision,
             decision_reason=reason,
-            evidence={"sbom": sbom.evidence, "vulnerabilities": vulnerabilities.evidence},
+            evidence={"sbom": sbom_evidence, "vulnerabilities": vulnerability_evidence},
         )
 
     def _cache_args(self) -> tuple[str, ...]:

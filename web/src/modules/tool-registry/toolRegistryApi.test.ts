@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createShellTemplate,
+  getShellImageAdmissionGovernance,
   getShellImageAdmissionPolicy,
   listShellTemplates,
   previewShellTemplate,
   resolveShellImageAdmission,
+  shellImageGovernanceQueryKey,
   shellTemplatesQueryKey,
   shellImagePolicyQueryKey,
   updateShellImageAdmissionPolicy,
@@ -80,6 +82,26 @@ describe("toolRegistryApi", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 2,
+            policy_decisions: { approved: 1, would_reject: 1, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 0, passed: 2, failed: 0 },
+              sbom: { not_checked: 0, passed: 2, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 1, failed: 1 },
+            },
+            artifact_counts: { sbom: 1, scan_report: 1, expired: 1 },
+            blocked_vulnerability_count: 1,
+            top_block_reasons: [
+              { reason: "vulnerability scan found blocked severities", count: 1 },
+            ],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
       return new Response(
         JSON.stringify({
           template_ref: "diag",
@@ -146,6 +168,10 @@ describe("toolRegistryApi", () => {
       configured: false,
       enforcement_mode: "dry_run",
     });
+    await expect(getShellImageAdmissionGovernance("ops-command", fetcher)).resolves.toMatchObject({
+      artifact_counts: { sbom: 1, scan_report: 1, expired: 1 },
+      blocked_vulnerability_count: 1,
+    });
     await expect(
       updateShellImageAdmissionPolicy(
         "ops-command",
@@ -176,6 +202,12 @@ describe("toolRegistryApi", () => {
       "tool-registry",
       "shell-image-policy",
     ]);
+    expect(shellImageGovernanceQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-governance",
+    ]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-templates/preview",
       expect.objectContaining({ method: "POST" }),
@@ -187,6 +219,9 @@ describe("toolRegistryApi", () => {
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admission-policy",
       expect.objectContaining({ method: "PUT" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
     );
   });
 });

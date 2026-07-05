@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, MutableMapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -8,6 +9,10 @@ from uuid import uuid4
 import pytest
 from backend.app.db.base import Base
 from backend.app.iam.models import Account, Project
+from backend.app.tool_registry.image_artifacts import (
+    InMemoryShellImageArtifactObjectStore,
+    ShellImageArtifactWriter,
+)
 from backend.app.tool_registry.image_evidence import (
     CosignCliEvidenceProvider,
     NotationCliEvidenceProvider,
@@ -239,6 +244,60 @@ async def test_trivy_provider_uses_policy_blocked_severities(
     assert result.vulnerability_status == "failed"
     assert result.evidence["vulnerabilities"]["blocked_severities"] == ["LOW"]
     assert result.evidence["vulnerabilities"]["blocked_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_trivy_provider_retains_sbom_and_scan_report_as_artifact_descriptors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = uuid4()
+    object_store = InMemoryShellImageArtifactObjectStore(bucket="capievo")
+    artifact_writer = ShellImageArtifactWriter(
+        project_id=project_id,
+        object_store=object_store,
+        artifact_store_prefix="shell-image-admissions/prod",
+        retention_days=14,
+        clock=lambda: datetime(2026, 7, 5, 12, 0, tzinfo=UTC),
+    )
+    runner = RecordingRunner(
+        json_results=[
+            {"bomFormat": "CycloneDX", "components": [{"name": "openssl"}]},
+            {
+                "Results": [
+                    {
+                        "Vulnerabilities": [
+                            {
+                                "VulnerabilityID": "CVE-HIGH",
+                                "Severity": "HIGH",
+                                "Description": "raw vulnerability detail",
+                            }
+                        ]
+                    }
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr("backend.app.tool_registry.image_evidence.shutil.which", lambda _: "trivy")
+    provider = TrivyCliEvidenceProvider(
+        blocked_severities=frozenset({"HIGH"}),
+        runner=runner,
+        artifact_writer=artifact_writer,
+        retain_sbom_report=True,
+        retain_vulnerability_report=True,
+    )
+
+    result = await provider.collect(
+        image_ref="registry.example/aegis/runtime:7-alpine",
+        image_digest="sha256:" + ("a" * 64),
+    )
+
+    assert result.policy_decision == "rejected"
+    assert result.evidence["sbom"]["artifact_ref"].startswith("s3://capievo/")
+    assert result.evidence["sbom"]["artifact_size_bytes"] > 0
+    assert result.evidence["vulnerabilities"]["artifact_ref"].startswith("s3://capievo/")
+    assert result.evidence["vulnerabilities"]["artifact_retention_days"] == 14
+    assert len(object_store.objects) == 2
+    assert "raw vulnerability detail" not in json.dumps(result.evidence)
 
 
 @pytest.mark.asyncio
