@@ -14,7 +14,7 @@ export type WorkflowPendingApproval = {
   node_name: string;
   approval_policy_ref: string;
   message: string;
-  approval_kind?: "human" | "tool";
+  approval_kind?: "human" | "tool" | "shell" | "model";
   approval_task_id?: string | null;
   payload?: Record<string, unknown>;
 };

@@ -198,7 +198,7 @@ describe("workflowRuntimeApi", () => {
     expect(response.events[0].event_type).toBe("node.completed");
   });
 
-  it("resumes a pending workflow run", async () => {
+  it("resumes a pending workflow run with an approval task id", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify(workflowRunResult({ status: "success" })), { status: 200 }),
     );
@@ -207,14 +207,22 @@ describe("workflowRuntimeApi", () => {
       "ops-command",
       "version-1",
       "run-1",
-      { decision: "approved", payload: { reason: "ok" } },
+      {
+        approval_task_id: "33333333-3333-4333-8333-333333333333",
+        decision: "approved",
+        payload: { reason: "ok" },
+      },
       fetcher,
     );
 
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/workflows/versions/version-1/runs/run-1/resume",
       {
-        body: JSON.stringify({ decision: "approved", payload: { reason: "ok" } }),
+        body: JSON.stringify({
+          approval_task_id: "33333333-3333-4333-8333-333333333333",
+          decision: "approved",
+          payload: { reason: "ok" },
+        }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       },

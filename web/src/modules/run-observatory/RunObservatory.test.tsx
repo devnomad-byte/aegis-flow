@@ -243,7 +243,7 @@ describe("RunObservatory", () => {
     expect(screen.getByText("#2 node.completed")).toBeInTheDocument();
     expect(screen.getByText("safe event summary")).toBeInTheDocument();
     expect((await screen.findAllByText("pending_approval")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("human_approval_1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("shell_1").length).toBeGreaterThan(0);
     expect(await screen.findByText("Graph Replay")).toBeInTheDocument();
     expect(screen.getByText("Unified Timeline")).toBeInTheDocument();
     expect(screen.getByText("Sanitized Span Evidence")).toBeInTheDocument();
@@ -348,7 +348,7 @@ describe("RunObservatory", () => {
     );
   });
 
-  it("lists run history and operates on pending workflow runs from the selected scope", async () => {
+  it("lists run history and resumes approved runtime approval runs from the selected scope", async () => {
     const user = userEvent.setup();
     window.history.pushState(
       {},
@@ -431,15 +431,21 @@ describe("RunObservatory", () => {
     expect(screen.getAllByText("run-ui").length).toBeGreaterThan(0);
     expect(await screen.findByText("run-failed")).toBeInTheDocument();
     expect(screen.getByLabelText("Resume payload JSON")).toHaveValue("{\n}");
+    expect(screen.getAllByText("shell").length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole("button", { name: "Approve Resume" }));
+    await user.click(screen.getByRole("button", { name: "Resume approved run" }));
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/workflows/versions/44444444-4444-4444-8444-444444444444/runs/run-ui/resume",
       expect.objectContaining({
-        body: JSON.stringify({ decision: "approved", payload: {} }),
+        body: JSON.stringify({
+          approval_task_id: "33333333-3333-4333-8333-333333333333",
+          decision: "approved",
+          payload: {},
+        }),
         method: "POST",
       }),
     );
+    expect(await screen.findByText("Resume completed with status success")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel Run" }));
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -691,11 +697,12 @@ function workflowRunDetailFixture(overrides: Record<string, unknown> = {}) {
       inputs_summary: "change_id",
       outputs_summary: "awaiting approval",
       pending_approval: {
+        approval_kind: "shell",
         approval_policy_ref: "ops.approval",
-        approval_task_id: "approval-ui",
-        message: "Human approval required",
-        node_id: "human_approval_1",
-        node_name: "Approve rollout",
+        approval_task_id: "33333333-3333-4333-8333-333333333333",
+        message: "Shell execution is approved and ready to resume",
+        node_id: "shell_1",
+        node_name: "Restart service",
       },
       project_id: "ops-command",
       run_id: "run-ui",
@@ -715,8 +722,8 @@ function workflowRunDetailFixture(overrides: Record<string, unknown> = {}) {
         error_message: "",
         error_type: "",
         id: "checkpoint-1",
-        node_id: "human_approval_1",
-        node_type: "human_approval",
+        node_id: "shell_1",
+        node_type: "shell",
         output: { summary: "awaiting approval", token: "raw-secret-token" },
         project_id: "ops-command",
         run_id: "run-ui",

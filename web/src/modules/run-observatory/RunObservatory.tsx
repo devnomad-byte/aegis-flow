@@ -64,6 +64,11 @@ type RunScope = {
   versionId: string;
 };
 
+type WorkflowRunResumeMutationRequest = {
+  approvalTaskId?: string | null;
+  payload: Record<string, unknown>;
+};
+
 type RunHistoryStatusFilter = WorkflowRunStatus | "all";
 
 const EMPTY_RUNTIME_SPANS: RuntimeTraceSpan[] = [];
@@ -207,10 +212,11 @@ export function RunObservatory({ project }: RunObservatoryProps) {
       }),
   });
   const resumeMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
+    mutationFn: (request: WorkflowRunResumeMutationRequest) =>
       resumeWorkflowRun(project.projectId, runScope.versionId, runScope.runId, {
+        approval_task_id: request.approvalTaskId,
         decision: "approved",
-        payload,
+        payload: request.payload,
       }),
     onSuccess: (run) => {
       setRunScope((scope) => ({
@@ -219,7 +225,13 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         traceId: run.trace_id,
         versionId: run.workflow_version_id,
       }));
-      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+      void invalidateWorkflowRunQueries(
+        queryClient,
+        project.projectId,
+        run.workflow_version_id,
+        run.run_id,
+        run.trace_id,
+      );
     },
   });
   const cancelMutation = useMutation({
@@ -234,7 +246,13 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         traceId: run.trace_id,
         versionId: run.workflow_version_id,
       }));
-      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+      void invalidateWorkflowRunQueries(
+        queryClient,
+        project.projectId,
+        run.workflow_version_id,
+        run.run_id,
+        run.trace_id,
+      );
     },
   });
   const retryMutation = useMutation({
@@ -246,7 +264,13 @@ export function RunObservatory({ project }: RunObservatoryProps) {
         traceId: run.trace_id,
         versionId: run.workflow_version_id,
       }));
-      void invalidateWorkflowRunQueries(queryClient, project.projectId, run.workflow_version_id, run.run_id);
+      void invalidateWorkflowRunQueries(
+        queryClient,
+        project.projectId,
+        run.workflow_version_id,
+        run.run_id,
+        run.trace_id,
+      );
     },
   });
 
@@ -257,6 +281,9 @@ export function RunObservatory({ project }: RunObservatoryProps) {
   const traceEvents = useMemo(() => buildTraceEvents(runtimeSpans), [runtimeSpans]);
   const hasEvents = traceEvents.length > 0;
   const handleSelectHistoryRun = (run: WorkflowRunRead) => {
+    resumeMutation.reset();
+    cancelMutation.reset();
+    retryMutation.reset();
     setLedgerDrilldown(null);
     setRunScope({
       nodeId: "",
@@ -288,6 +315,7 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               isOperating={
                 resumeMutation.isPending || cancelMutation.isPending || retryMutation.isPending
               }
+              isResuming={resumeMutation.isPending}
               operationError={
                 resumeMutation.error ?? cancelMutation.error ?? retryMutation.error ?? null
               }
@@ -295,6 +323,9 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               onCancel={() => cancelMutation.mutate()}
               onResume={(payload) => resumeMutation.mutate(payload)}
               onRetry={() => retryMutation.mutate()}
+              resumeResultStatus={
+                resumeMutation.data?.run_id === runScope.runId ? resumeMutation.data.status : ""
+              }
             />
           ) : null}
           {runScope.versionId ? (
@@ -571,21 +602,25 @@ function WorkflowRunDetailPanel({
   error,
   isLoading,
   isOperating,
+  isResuming,
   onCancel,
   onResume,
   onRetry,
   operationError,
   projectId,
+  resumeResultStatus,
 }: {
   detail: WorkflowRunDetailResponse | undefined;
   error: unknown;
   isLoading: boolean;
   isOperating: boolean;
+  isResuming: boolean;
   onCancel: () => void;
-  onResume: (payload: Record<string, unknown>) => void;
+  onResume: (request: WorkflowRunResumeMutationRequest) => void;
   onRetry: () => void;
   operationError: unknown;
   projectId: string;
+  resumeResultStatus: WorkflowRunStatus | "";
 }) {
   const [resumePayloadText, setResumePayloadText] = useState("{\n}");
   const [resumePayloadError, setResumePayloadError] = useState("");
@@ -630,16 +665,30 @@ function WorkflowRunDetailPanel({
             }}
             onResume={() => {
               try {
-                onResume(parseJsonObject(resumePayloadText, "Resume payload JSON"));
+                const resumeRequest = buildResumeRequest(
+                  pendingApproval,
+                  parseJsonObject(resumePayloadText, "Resume payload JSON"),
+                );
+                onResume(resumeRequest);
               } catch (parseError) {
                 setResumePayloadError((parseError as Error).message);
               }
             }}
             onRetry={onRetry}
+            pendingApproval={pendingApproval}
             payloadError={resumePayloadError}
             payloadText={resumePayloadText}
+            isResuming={isResuming}
             status={status}
           />
+          {isResuming ? (
+            <div className="preview-alert">Resuming approved runtime action</div>
+          ) : null}
+          {resumeResultStatus ? (
+            <div className="preview-alert preview-alert-success">
+              Resume completed with status {resumeResultStatus}
+            </div>
+          ) : null}
           {operationError ? (
             <div className="preview-alert preview-alert-danger" role="alert">
               {(operationError as Error).message}
@@ -659,20 +708,24 @@ function WorkflowRunDetailPanel({
 function WorkflowRunActions({
   debugChatHref,
   isOperating,
+  isResuming,
   onCancel,
   onPayloadChange,
   onResume,
   onRetry,
+  pendingApproval,
   payloadError,
   payloadText,
   status,
 }: {
   debugChatHref: string;
   isOperating: boolean;
+  isResuming: boolean;
   onCancel: () => void;
   onPayloadChange: (value: string) => void;
   onResume: () => void;
   onRetry: () => void;
+  pendingApproval: WorkflowPendingApproval | null;
   payloadError: string;
   payloadText: string;
   status: WorkflowRunStatus;
@@ -709,7 +762,11 @@ function WorkflowRunActions({
           onClick={onResume}
           type="button"
         >
-          Approve Resume
+          {isResuming
+            ? "Resuming"
+            : isRuntimeApproval(pendingApproval)
+              ? "Resume approved run"
+              : "Approve Resume"}
         </button>
         <button
           className="toolbar-button toolbar-button-danger"
@@ -847,6 +904,7 @@ function PendingApprovalBanner({ approval }: { approval: WorkflowPendingApproval
     <div className="preview-alert workflow-pending-approval">
       <strong>{approval.message || "Human approval required"}</strong>
       <div className="node-detail-grid">
+        <Detail label="Kind" value={approval.approval_kind || "human"} />
         <Detail label="Node" value={approval.node_id || "unknown"} />
         <Detail label="Name" value={approval.node_name || "approval"} />
         <Detail label="Policy" value={approval.approval_policy_ref || "unscoped"} />
@@ -1164,14 +1222,41 @@ function readPendingApproval(value: Record<string, unknown> | undefined): Workfl
   }
 
   return {
-    approval_kind: value.approval_kind === "tool" ? "tool" : "human",
+    approval_kind: readApprovalKind(value.approval_kind),
     approval_policy_ref: readString(value.approval_policy_ref),
     approval_task_id: readString(value.approval_task_id) || null,
     message: readString(value.message),
     node_id: readString(value.node_id),
     node_name: readString(value.node_name),
-    payload: {},
+    payload: readRecord(value.payload),
   };
+}
+
+function readApprovalKind(value: unknown): WorkflowPendingApproval["approval_kind"] {
+  return value === "tool" || value === "shell" || value === "model" ? value : "human";
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+function buildResumeRequest(
+  pendingApproval: WorkflowPendingApproval | null,
+  payload: Record<string, unknown>,
+): WorkflowRunResumeMutationRequest {
+  const approvalTaskId = pendingApproval?.approval_task_id
+    || readString(pendingApproval?.payload?.approval_task_id);
+  if (isRuntimeApproval(pendingApproval) && !approvalTaskId) {
+    throw new Error("Runtime approval resume requires an approval task id.");
+  }
+  return { approvalTaskId: approvalTaskId || undefined, payload };
+}
+
+function isRuntimeApproval(approval: WorkflowPendingApproval | null): boolean {
+  return approval?.approval_kind === "shell" || approval?.approval_kind === "model";
 }
 
 function readString(value: unknown): string {
@@ -1234,6 +1319,7 @@ async function invalidateWorkflowRunQueries(
   projectId: string,
   versionId: string,
   runId: string,
+  traceId: string,
 ) {
   await Promise.all([
     queryClient.invalidateQueries({
@@ -1241,6 +1327,22 @@ async function invalidateWorkflowRunQueries(
     }),
     queryClient.invalidateQueries({
       queryKey: workflowRunListQueryKey(projectId, versionId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: workflowRunEventsQueryKey(projectId, versionId, runId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: runtimeTraceSpansQueryKey(projectId, {
+        limit: SPAN_LIMIT,
+        run_id: runId,
+        trace_id: traceId,
+      }),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: ["project", projectId, "model-gateway", "invocations"],
+    }),
+    queryClient.invalidateQueries({
+      queryKey: ["project", projectId, "tool-gateway", "invocations"],
     }),
   ]);
 }
