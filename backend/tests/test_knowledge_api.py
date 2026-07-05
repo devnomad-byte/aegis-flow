@@ -19,6 +19,7 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentVersionRead,
     RunLessonCreateRequest,
     RunLessonRead,
+    RunLessonStatusUpdateRequest,
 )
 from backend.app.main import create_app
 from fastapi.testclient import TestClient
@@ -206,7 +207,7 @@ class InMemoryKnowledgeIngestionStore:
             milvus_collection="",
             milvus_vector_id="",
             content_hash="sha256:test-lesson",
-            status="active",
+            status="pending_review",
             is_deleted=False,
             created_by=actor_id,
             updated_by=actor_id,
@@ -222,6 +223,7 @@ class InMemoryKnowledgeIngestionStore:
         project_id: UUID,
         run_id: str | None = None,
         trace_id: str | None = None,
+        status_filter: str | None = None,
         limit: int = 20,
     ) -> list[RunLessonRead]:
         lessons = [
@@ -230,8 +232,54 @@ class InMemoryKnowledgeIngestionStore:
             if lesson.project_id == project_id
             and (run_id is None or lesson.workflow_run_id == run_id)
             and (trace_id is None or lesson.trace_id == trace_id)
+            and (not status_filter or status_filter == "all" or lesson.status == status_filter)
         ]
         return lessons[:limit]
+
+    async def confirm_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
+        return self._set_run_lesson_status(
+            project_id=project_id,
+            lesson_id=lesson_id,
+            actor_id=actor_id,
+            status="active",
+        )
+
+    async def archive_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
+        return self._set_run_lesson_status(
+            project_id=project_id,
+            lesson_id=lesson_id,
+            actor_id=actor_id,
+            status="archived",
+        )
+
+    def _set_run_lesson_status(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        status: str,
+    ) -> RunLessonRead | None:
+        for index, lesson in enumerate(self.run_lessons):
+            if lesson.project_id == project_id and lesson.id == lesson_id:
+                updated = lesson.model_copy(update={"status": status, "updated_by": actor_id})
+                self.run_lessons[index] = updated
+                return updated
+        return None
 
 
 class InMemoryAuditEventStore:
@@ -442,6 +490,7 @@ def test_run_lesson_create_and_list_api_records_sanitized_audit() -> None:
     )
 
     assert create_response.status_code == 201
+    assert create_response.json()["status"] == "pending_review"
     assert create_response.json()["lesson_ref"] == "run-ui:trace-ui:shell_1"
     assert list_response.status_code == 200
     assert list_response.json()["count"] == 1
@@ -459,6 +508,76 @@ def test_run_lesson_create_and_list_api_records_sanitized_audit() -> None:
         "node_id": "shell_1",
         "severity": "high",
         "data_classification": "internal",
+        "status": "pending_review",
+    }
+
+
+def test_run_lesson_confirm_archive_api_records_sanitized_review_audit() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:write", "knowledge:view"])
+    store = InMemoryKnowledgeIngestionStore(uuid4())
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=store,
+        audit_store=audit_store,
+    )
+
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons",
+        json={
+            "lesson_ref": "run-review:trace-review:shell_1",
+            "title": "Review lesson",
+            "summary": "token=raw-review-token approved rollback",
+            "body": "password=raw-review-password",
+            "workflow_run_id": "run-review",
+            "trace_id": "trace-review",
+        },
+    )
+    lesson_id = create_response.json()["id"]
+    confirm_response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons/{lesson_id}/confirm",
+        json={"reason": "looks correct token=raw-reason-token"},
+    )
+    active_list_response = client.get(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons?status=active"
+    )
+    archive_response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons/{lesson_id}/archive",
+        json={"reason": "stale password=raw-archive-password"},
+    )
+    active_after_archive_response = client.get(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons?status=active"
+    )
+    archived_list_response = client.get(
+        f"/api/v1/projects/{project.id}/knowledge/run-lessons?status=archived"
+    )
+
+    assert confirm_response.status_code == 200
+    assert confirm_response.json()["status"] == "active"
+    assert active_list_response.json()["count"] == 1
+    assert archive_response.status_code == 200
+    assert archive_response.json()["status"] == "archived"
+    assert active_after_archive_response.json()["count"] == 0
+    assert archived_list_response.json()["count"] == 1
+    assert [event["action"] for event in audit_store.events] == [
+        "knowledge.run_lesson.create",
+        "knowledge.run_lesson.confirm",
+        "knowledge.run_lesson.list",
+        "knowledge.run_lesson.archive",
+        "knowledge.run_lesson.list",
+        "knowledge.run_lesson.list",
+    ]
+    rendered_audit = str(audit_store.events)
+    assert "raw-review-token" not in rendered_audit
+    assert "raw-review-password" not in rendered_audit
+    assert "raw-reason-token" not in rendered_audit
+    assert "raw-archive-password" not in rendered_audit
+    assert audit_store.events[1]["metadata"] == {
+        "lesson_ref": "run-review:trace-review:shell_1",
+        "status": "active",
+        "reason_length": len("looks correct token=raw-reason-token"),
     }
 
 

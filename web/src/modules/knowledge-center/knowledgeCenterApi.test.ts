@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  archiveRunLesson,
+  confirmRunLesson,
   createKnowledgeBase,
   createRunLesson,
   deleteKnowledgeDocument,
@@ -11,6 +13,7 @@ import {
   listKnowledgeBases,
   listKnowledgeDocuments,
   queryRetrieval,
+  queryRunLessonMemory,
   runLessonsQueryKey,
 } from "./knowledgeCenterApi";
 
@@ -77,7 +80,14 @@ describe("knowledgeCenterApi", () => {
     );
     await listRunLessons(
       "ops-command",
-      { limit: 10, run_id: "run-ui", trace_id: "trace-ui" },
+      { limit: 10, run_id: "run-ui", status: "active", trace_id: "trace-ui" },
+      fetcher,
+    );
+    await confirmRunLesson("ops-command", "lesson-1", { reason: "reviewed" }, fetcher);
+    await archiveRunLesson("ops-command", "lesson-1", { reason: "stale" }, fetcher);
+    await queryRunLessonMemory(
+      "ops-command",
+      { query: "502 ingress rollback", top_k: 3, trace_id: "trace-ui" },
       fetcher,
     );
 
@@ -113,7 +123,22 @@ describe("knowledgeCenterApi", () => {
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       8,
-      "/api/v1/projects/ops-command/knowledge/run-lessons?run_id=run-ui&trace_id=trace-ui&limit=10",
+      "/api/v1/projects/ops-command/knowledge/run-lessons?run_id=run-ui&trace_id=trace-ui&status=active&limit=10",
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      9,
+      "/api/v1/projects/ops-command/knowledge/run-lessons/lesson-1/confirm",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      10,
+      "/api/v1/projects/ops-command/knowledge/run-lessons/lesson-1/archive",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      11,
+      "/api/v1/projects/ops-command/retrieval/memory/run-lessons/query",
+      expect.objectContaining({ method: "POST" }),
     );
     const retrievalBody = JSON.parse(String(fetcher.mock.calls[5][1]?.body)) as Record<string, unknown>;
     expect(retrievalBody).toMatchObject({
@@ -146,6 +171,18 @@ describe("knowledgeCenterApi", () => {
       "run-lessons",
       "run-ui",
       "trace-ui",
+      "",
+    ]);
+    expect(
+      runLessonsQueryKey("ops-command", { run_id: "run-ui", status: "active", trace_id: "trace-ui" }),
+    ).toEqual([
+      "project",
+      "ops-command",
+      "knowledge-center",
+      "run-lessons",
+      "run-ui",
+      "trace-ui",
+      "active",
     ]);
   });
 });

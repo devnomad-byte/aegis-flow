@@ -9,6 +9,7 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentRead,
     RunLessonCreateRequest,
     RunLessonRead,
+    RunLessonStatusUpdateRequest,
 )
 
 
@@ -69,6 +70,27 @@ class RunLessonStore(Protocol):
         project_id: UUID,
         run_id: str | None = None,
         trace_id: str | None = None,
+        status_filter: str | None = None,
         limit: int = 20,
     ) -> list[RunLessonRead]:
+        raise NotImplementedError
+
+    async def confirm_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
+        raise NotImplementedError
+
+    async def archive_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
         raise NotImplementedError

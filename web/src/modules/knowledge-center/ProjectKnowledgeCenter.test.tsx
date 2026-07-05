@@ -192,6 +192,165 @@ describe("ProjectKnowledgeCenter", () => {
           { status: 200 },
         );
       }
+      if (
+        (url.endsWith("/knowledge/run-lessons") || url.endsWith("/knowledge/run-lessons?limit=50")) &&
+        !init
+      ) {
+        return new Response(
+          JSON.stringify({
+            lessons: [
+              {
+                id: "lesson-1",
+                project_id: "ops-command",
+                lesson_ref: "run-ui:trace-ui:shell_1",
+                title: "Ingress rollback memory",
+                summary: "502 recovered after approved shell rollback.",
+                body: "raw body password=hidden must not render",
+                workflow_id: "ops_incident_triage",
+                workflow_run_id: "run-ui",
+                node_id: "shell_1",
+                trace_id: "trace-ui",
+                severity: "high",
+                data_classification: "internal",
+                milvus_collection: "",
+                milvus_vector_id: "",
+                content_hash: "sha256:lesson",
+                status: "pending_review",
+                is_deleted: false,
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-06T08:00:00Z",
+                updated_at: "2026-07-06T08:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/knowledge/run-lessons?status=pending_review&limit=50") && !init) {
+        return new Response(
+          JSON.stringify({
+            lessons: [
+              {
+                id: "lesson-1",
+                project_id: "ops-command",
+                lesson_ref: "run-ui:trace-ui:shell_1",
+                title: "Ingress rollback memory",
+                summary: "502 recovered after approved shell rollback.",
+                body: "raw body password=hidden must not render",
+                workflow_id: "ops_incident_triage",
+                workflow_run_id: "run-ui",
+                node_id: "shell_1",
+                trace_id: "trace-ui",
+                severity: "high",
+                data_classification: "internal",
+                milvus_collection: "",
+                milvus_vector_id: "",
+                content_hash: "sha256:lesson",
+                status: "pending_review",
+                is_deleted: false,
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-06T08:00:00Z",
+                updated_at: "2026-07-06T08:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/knowledge/run-lessons/lesson-1/confirm")) {
+        return new Response(
+          JSON.stringify({
+            id: "lesson-1",
+            project_id: "ops-command",
+            lesson_ref: "run-ui:trace-ui:shell_1",
+            title: "Ingress rollback memory",
+            summary: "502 recovered after approved shell rollback.",
+            body: "",
+            workflow_id: "ops_incident_triage",
+            workflow_run_id: "run-ui",
+            node_id: "shell_1",
+            trace_id: "trace-ui",
+            severity: "high",
+            data_classification: "internal",
+            milvus_collection: "",
+            milvus_vector_id: "",
+            content_hash: "sha256:lesson",
+            status: "active",
+            is_deleted: false,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-06T08:00:00Z",
+            updated_at: "2026-07-06T08:01:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/knowledge/run-lessons/lesson-1/archive")) {
+        return new Response(
+          JSON.stringify({
+            id: "lesson-1",
+            project_id: "ops-command",
+            lesson_ref: "run-ui:trace-ui:shell_1",
+            title: "Ingress rollback memory",
+            summary: "502 recovered after approved shell rollback.",
+            body: "",
+            workflow_id: "ops_incident_triage",
+            workflow_run_id: "run-ui",
+            node_id: "shell_1",
+            trace_id: "trace-ui",
+            severity: "high",
+            data_classification: "internal",
+            milvus_collection: "",
+            milvus_vector_id: "",
+            content_hash: "sha256:lesson",
+            status: "archived",
+            is_deleted: false,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-06T08:00:00Z",
+            updated_at: "2026-07-06T08:02:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/retrieval/memory/run-lessons/query")) {
+        return new Response(
+          JSON.stringify({
+            query_hash: "memory-query-hash",
+            denied_count: 0,
+            trace_summary: {
+              prefilter_count: 1,
+              keyword_hit_count: 1,
+              returned_count: 1,
+              denied_count: 0,
+              trace_id: "trace-ui",
+            },
+            results: [
+              {
+                lesson_id: "lesson-1",
+                lesson_ref: "run-ui:trace-ui:shell_1",
+                title: "Ingress rollback memory",
+                summary: "502 recovered after approved shell rollback.",
+                workflow_id: "ops_incident_triage",
+                workflow_run_id: "run-ui",
+                node_id: "shell_1",
+                trace_id: "trace-ui",
+                severity: "high",
+                data_classification: "internal",
+                content_hash: "sha256:lesson",
+                status: "active",
+                score: 1,
+                source: "run_lesson_keyword",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
       return new Response(JSON.stringify({ detail: `unexpected request ${url}` }), { status: 500 });
     });
 
@@ -239,10 +398,37 @@ describe("ProjectKnowledgeCenter", () => {
     expect(within(result).getByText("child-0001-0001")).toBeInTheDocument();
     expect(within(result).getByText("parent-0001")).toBeInTheDocument();
     expect(await screen.findByText("denied 1")).toBeInTheDocument();
-    expect(screen.getByText("trace-ui")).toBeInTheDocument();
+    expect(screen.getAllByText("trace-ui").length).toBeGreaterThan(0);
     expect(screen.getByText("Check ingress controller and pod logs before rollback.")).toBeInTheDocument();
     expect(screen.queryByText(/s3:\/\/capievo/)).not.toBeInTheDocument();
-  });
+
+    expect(await screen.findByRole("heading", { name: "Memory Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Ingress rollback memory")).toBeInTheDocument();
+    expect(screen.getAllByText("pending_review").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/password=hidden/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Confirm memory Ingress rollback memory" }));
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/v1/projects/ops-command/knowledge/run-lessons/lesson-1/confirm",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Archive memory Ingress rollback memory" }));
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/v1/projects/ops-command/knowledge/run-lessons/lesson-1/archive",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    await user.clear(screen.getByLabelText("Memory query"));
+    await user.type(screen.getByLabelText("Memory query"), "502 ingress rollback");
+    await user.click(screen.getByRole("button", { name: "Search memory" }));
+    expect(await screen.findByText("memory-query-hash")).toBeInTheDocument();
+    expect(await screen.findByText("run_lesson_keyword")).toBeInTheDocument();
+  }, 15_000);
 
   it("shows an empty base state instead of using placeholder data", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

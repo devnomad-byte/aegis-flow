@@ -9,10 +9,15 @@ from backend.app.knowledge.models import (
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     RetrievalQueryLog,
+    RunLesson,
 )
 from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.retrieval.milvus_client import MilvusSearchHit
-from backend.app.retrieval.schemas import RetrievalQueryRequest, RetrievalSubject
+from backend.app.retrieval.schemas import (
+    MemoryRunLessonQueryRequest,
+    RetrievalQueryRequest,
+    RetrievalSubject,
+)
 from backend.app.retrieval.sqlalchemy_store import SqlAlchemyRetrievalGatewayStore
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -167,6 +172,109 @@ async def test_retrieval_store_rechecks_acl_and_never_returns_denied_or_deleted_
     assert denied_child_id not in returned_chunk_ids
     assert deleted_child_id not in returned_chunk_ids
     assert response.denied_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieval_store_queries_only_active_run_lessons_without_body() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        project_id = uuid4()
+        other_project_id = uuid4()
+        actor_id = uuid4()
+        active_id = uuid4()
+        pending_id = uuid4()
+        archived_id = uuid4()
+        session.add_all(
+            [
+                RunLesson(
+                    id=active_id,
+                    project_id=project_id,
+                    lesson_ref="run-active:trace-active:shell_1",
+                    title="Ingress rollback lesson",
+                    summary="502 ingress recovered after approved rollback",
+                    body="Raw operator note password=hidden must not be returned",
+                    workflow_run_id="run-active",
+                    trace_id="trace-active",
+                    node_id="shell_1",
+                    severity="high",
+                    status="active",
+                    content_hash="sha256:active",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                ),
+                RunLesson(
+                    id=pending_id,
+                    project_id=project_id,
+                    lesson_ref="run-pending:trace-pending:shell_1",
+                    title="Pending ingress lesson",
+                    summary="pending 502 ingress note",
+                    body="pending body",
+                    workflow_run_id="run-pending",
+                    trace_id="trace-pending",
+                    status="pending_review",
+                    content_hash="sha256:pending",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                ),
+                RunLesson(
+                    id=archived_id,
+                    project_id=project_id,
+                    lesson_ref="run-archived:trace-archived:shell_1",
+                    title="Archived ingress lesson",
+                    summary="archived 502 ingress note",
+                    body="archived body",
+                    workflow_run_id="run-archived",
+                    trace_id="trace-archived",
+                    status="archived",
+                    content_hash="sha256:archived",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                ),
+                RunLesson(
+                    project_id=other_project_id,
+                    lesson_ref="run-other:trace-other:shell_1",
+                    title="Other project ingress lesson",
+                    summary="other project 502 ingress note",
+                    body="other body",
+                    workflow_run_id="run-other",
+                    trace_id="trace-other",
+                    status="active",
+                    content_hash="sha256:other",
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                ),
+            ]
+        )
+        await session.commit()
+
+        store = SqlAlchemyRetrievalGatewayStore(session)
+        response = await store.query_run_lessons(
+            project_id=project_id,
+            actor_id=actor_id,
+            subjects=[RetrievalSubject(subject_type="project", subject_ref="project:members")],
+            request=MemoryRunLessonQueryRequest(
+                query="502 ingress rollback",
+                top_k=5,
+                trace_id="trace-memory-search",
+            ),
+        )
+
+    await engine.dispose()
+
+    assert [result.lesson_id for result in response.results] == [active_id]
+    assert response.results[0].lesson_ref == "run-active:trace-active:shell_1"
+    assert response.results[0].summary == "502 ingress recovered after approved rollback"
+    assert response.results[0].status == "active"
+    rendered = response.model_dump_json()
+    assert "password=hidden" not in rendered
+    assert str(pending_id) not in rendered
+    assert str(archived_id) not in rendered
+    assert response.trace_summary.returned_count == 1
+    assert response.trace_summary.trace_id == "trace-memory-search"
 
 
 async def seed_document_chunks(

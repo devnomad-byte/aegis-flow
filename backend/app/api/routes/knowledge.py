@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.app.api.dependencies import (
     get_audit_event_store,
@@ -22,6 +22,7 @@ from backend.app.knowledge.schemas import (
     RunLessonCreateRequest,
     RunLessonListResponse,
     RunLessonRead,
+    RunLessonStatusUpdateRequest,
 )
 from backend.app.knowledge.store import KnowledgeIngestionStore, RunLessonStore
 
@@ -277,6 +278,7 @@ async def create_run_lesson(
             "node_id": lesson.node_id,
             "severity": lesson.severity,
             "data_classification": lesson.data_classification,
+            "status": lesson.status,
         },
     )
     return lesson
@@ -287,6 +289,7 @@ async def list_run_lessons(
     project_id: UUID,
     run_id: str | None = None,
     trace_id: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
     limit: int = 20,
     current_account: AccountPrincipal = CurrentAccount,
     project_access: ProjectAccessProvider = ProjectAccess,
@@ -304,6 +307,7 @@ async def list_run_lessons(
         project_id=project_id,
         run_id=run_id,
         trace_id=trace_id,
+        status_filter=status_filter,
         limit=safe_limit,
     )
     await audit_store.record_project_event(
@@ -316,9 +320,80 @@ async def list_run_lessons(
             "lesson_count": len(lessons),
             "run_id": run_id or "",
             "trace_id": trace_id or "",
+            "status": status_filter or "all",
         },
     )
     return RunLessonListResponse(lessons=lessons, count=len(lessons))
+
+
+@router.post("/run-lessons/{lesson_id}/confirm", response_model=RunLessonRead)
+async def confirm_run_lesson(
+    project_id: UUID,
+    lesson_id: UUID,
+    request: RunLessonStatusUpdateRequest | None = None,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: RunLessonStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> RunLessonRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:write",
+    )
+    lesson = await knowledge_store.confirm_run_lesson(
+        project_id=project_id,
+        lesson_id=lesson_id,
+        actor_id=current_account.account_id,
+        request=request,
+    )
+    if lesson is None:
+        raise _run_lesson_not_found()
+    await _record_run_lesson_status_audit(
+        audit_store=audit_store,
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.run_lesson.confirm",
+        lesson=lesson,
+        reason=request.reason if request else "",
+    )
+    return lesson
+
+
+@router.post("/run-lessons/{lesson_id}/archive", response_model=RunLessonRead)
+async def archive_run_lesson(
+    project_id: UUID,
+    lesson_id: UUID,
+    request: RunLessonStatusUpdateRequest | None = None,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: RunLessonStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> RunLessonRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:write",
+    )
+    lesson = await knowledge_store.archive_run_lesson(
+        project_id=project_id,
+        lesson_id=lesson_id,
+        actor_id=current_account.account_id,
+        request=request,
+    )
+    if lesson is None:
+        raise _run_lesson_not_found()
+    await _record_run_lesson_status_audit(
+        audit_store=audit_store,
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.run_lesson.archive",
+        lesson=lesson,
+        reason=request.reason if request else "",
+    )
+    return lesson
 
 
 def _require_project_permission(
@@ -357,6 +432,36 @@ def _document_not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Knowledge document not found",
+    )
+
+
+def _run_lesson_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Run lesson not found",
+    )
+
+
+async def _record_run_lesson_status_audit(
+    *,
+    audit_store: AuditEventStore,
+    project_id: UUID,
+    actor_id: UUID,
+    action: str,
+    lesson: RunLessonRead,
+    reason: str,
+) -> None:
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=actor_id,
+        action=action,
+        target_type="run_lesson",
+        target_id=str(lesson.id),
+        metadata={
+            "lesson_ref": lesson.lesson_ref,
+            "status": lesson.status,
+            "reason_length": len(reason),
+        },
     )
 
 

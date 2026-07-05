@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Database, FileText, Play, Plus, Search, Trash2 } from "lucide-react";
+import { Archive, BookOpen, CheckCircle2, Database, FileText, Play, Plus, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
+  archiveRunLesson,
+  confirmRunLesson,
   createKnowledgeBase,
   deleteKnowledgeDocument,
   importKnowledgeDocument,
@@ -11,14 +13,20 @@ import {
   knowledgeBasesQueryKey,
   listKnowledgeBases,
   listKnowledgeDocuments,
+  listRunLessons,
   queryRetrieval,
+  queryRunLessonMemory,
   type ContentFormat,
   type DataClassification,
   type KnowledgeBase,
   type KnowledgeDocument,
   type KnowledgeDocumentImportResult,
+  type MemoryRunLessonQueryResponse,
   type RetrievalMode,
   type RetrievalQueryResponse,
+  type RunLesson,
+  type RunLessonStatus,
+  runLessonsQueryKey,
 } from "./knowledgeCenterApi";
 
 type ProjectKnowledgeCenterProps = {
@@ -54,6 +62,14 @@ type RetrievalFormState = {
   traceId: string;
 };
 
+type MemoryStatusFilter = "all" | RunLessonStatus;
+
+type MemorySearchFormState = {
+  query: string;
+  topK: number;
+  traceId: string;
+};
+
 const DATA_CLASSIFICATIONS: DataClassification[] = [
   "public",
   "internal",
@@ -62,6 +78,7 @@ const DATA_CLASSIFICATIONS: DataClassification[] = [
   "secret",
 ];
 const RETRIEVAL_MODES: RetrievalMode[] = ["hybrid", "keyword", "vector"];
+const MEMORY_STATUSES: MemoryStatusFilter[] = ["all", "pending_review", "active", "archived"];
 
 export function ProjectKnowledgeCenter({ project }: ProjectKnowledgeCenterProps) {
   const queryClient = useQueryClient();
@@ -94,6 +111,14 @@ export function ProjectKnowledgeCenter({ project }: ProjectKnowledgeCenterProps)
   });
   const [importResult, setImportResult] = useState<KnowledgeDocumentImportResult | null>(null);
   const [retrievalResult, setRetrievalResult] = useState<RetrievalQueryResponse | null>(null);
+  const [memoryStatusFilter, setMemoryStatusFilter] = useState<MemoryStatusFilter>("all");
+  const [memorySearchForm, setMemorySearchForm] = useState<MemorySearchFormState>({
+    query: "",
+    topK: 5,
+    traceId: "trace-ui",
+  });
+  const [memorySearchResult, setMemorySearchResult] =
+    useState<MemoryRunLessonQueryResponse | null>(null);
 
   const basesQuery = useQuery({
     queryFn: () => listKnowledgeBases(project.projectId),
@@ -120,6 +145,7 @@ export function ProjectKnowledgeCenter({ project }: ProjectKnowledgeCenterProps)
   useEffect(() => {
     setImportResult(null);
     setRetrievalResult(null);
+    setMemorySearchResult(null);
   }, [project.projectId, selectedBase?.id]);
 
   const documentsQuery = useQuery({
@@ -208,6 +234,56 @@ export function ProjectKnowledgeCenter({ project }: ProjectKnowledgeCenterProps)
     },
     onSuccess: (result) => {
       setRetrievalResult(result);
+    },
+  });
+
+  const runLessonsQuery = useQuery({
+    queryFn: () =>
+      listRunLessons(project.projectId, {
+        limit: 50,
+        status: memoryStatusFilter === "all" ? undefined : memoryStatusFilter,
+      }),
+    queryKey: runLessonsQueryKey(project.projectId, {
+      status: memoryStatusFilter === "all" ? "" : memoryStatusFilter,
+    }),
+    retry: false,
+  });
+  const runLessons = useMemo(
+    () => runLessonsQuery.data?.lessons ?? [],
+    [runLessonsQuery.data?.lessons],
+  );
+
+  const confirmMemoryMutation = useMutation({
+    mutationFn: (lesson: RunLesson) =>
+      confirmRunLesson(project.projectId, lesson.id, { reason: "confirmed in Memory Review" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project.projectId, "knowledge-center", "run-lessons"],
+      });
+      setMemorySearchResult(null);
+    },
+  });
+
+  const archiveMemoryMutation = useMutation({
+    mutationFn: (lesson: RunLesson) =>
+      archiveRunLesson(project.projectId, lesson.id, { reason: "archived in Memory Review" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project.projectId, "knowledge-center", "run-lessons"],
+      });
+      setMemorySearchResult(null);
+    },
+  });
+
+  const memorySearchMutation = useMutation({
+    mutationFn: () =>
+      queryRunLessonMemory(project.projectId, {
+        query: memorySearchForm.query,
+        top_k: memorySearchForm.topK,
+        trace_id: memorySearchForm.traceId,
+      }),
+    onSuccess: (result) => {
+      setMemorySearchResult(result);
     },
   });
 
@@ -331,6 +407,47 @@ export function ProjectKnowledgeCenter({ project }: ProjectKnowledgeCenterProps)
             {retrievalResult ? <RetrievalTraceSummary result={retrievalResult} /> : null}
             {vectorError ? <Alert tone="danger">{vectorError}</Alert> : null}
             <RetrievalResults result={retrievalResult} />
+          </section>
+
+          <section className="settings-card knowledge-retrieval-panel" aria-label="Memory Review">
+            <SectionHeader
+              count={runLessonsQuery.data?.count ?? runLessons.length}
+              icon={<CheckCircle2 aria-hidden="true" size={18} />}
+              label="MEMORY REVIEW"
+              title="Memory Review"
+            />
+            <MemoryReviewControls
+              filter={memoryStatusFilter}
+              onFilterChange={setMemoryStatusFilter}
+            />
+            {runLessonsQuery.error ? (
+              <Alert tone="danger">{getErrorMessage(runLessonsQuery.error)}</Alert>
+            ) : null}
+            {runLessonsQuery.isLoading ? <Alert>Loading run lessons</Alert> : null}
+            <RunLessonList
+              isArchiving={archiveMemoryMutation.isPending}
+              isConfirming={confirmMemoryMutation.isPending}
+              lessons={runLessons}
+              onArchive={(lesson) => archiveMemoryMutation.mutate(lesson)}
+              onConfirm={(lesson) => confirmMemoryMutation.mutate(lesson)}
+            />
+            {confirmMemoryMutation.error ? (
+              <Alert tone="danger">{getErrorMessage(confirmMemoryMutation.error)}</Alert>
+            ) : null}
+            {archiveMemoryMutation.error ? (
+              <Alert tone="danger">{getErrorMessage(archiveMemoryMutation.error)}</Alert>
+            ) : null}
+            <MemorySearchForm
+              form={memorySearchForm}
+              isDisabled={!memorySearchForm.query.trim()}
+              isPending={memorySearchMutation.isPending}
+              onChange={setMemorySearchForm}
+              onSubmit={() => memorySearchMutation.mutate()}
+            />
+            {memorySearchMutation.error ? (
+              <Alert tone="danger">{getErrorMessage(memorySearchMutation.error)}</Alert>
+            ) : null}
+            <MemorySearchResults result={memorySearchResult} />
           </section>
         </div>
       </section>
@@ -679,6 +796,186 @@ function RetrievalResults({ result }: { result: RetrievalQueryResponse | null })
             <Detail label="parent" value={item.parent_chunk_ref || "none"} />
             <Detail label="source" value={item.source} />
             <Detail label="class" value={item.data_classification} />
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function MemoryReviewControls({
+  filter,
+  onFilterChange,
+}: {
+  filter: MemoryStatusFilter;
+  onFilterChange: (filter: MemoryStatusFilter) => void;
+}) {
+  return (
+    <label className="field-label" htmlFor="memory-status-filter">
+      Memory status
+      <select
+        className="text-field"
+        id="memory-status-filter"
+        onChange={(event) => onFilterChange(event.target.value as MemoryStatusFilter)}
+        value={filter}
+      >
+        {MEMORY_STATUSES.map((status) => (
+          <option key={status} value={status}>
+            {status}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function RunLessonList({
+  isArchiving,
+  isConfirming,
+  lessons,
+  onArchive,
+  onConfirm,
+}: {
+  isArchiving: boolean;
+  isConfirming: boolean;
+  lessons: RunLesson[];
+  onArchive: (lesson: RunLesson) => void;
+  onConfirm: (lesson: RunLesson) => void;
+}) {
+  if (!lessons.length) {
+    return <Alert>No run lessons for this filter</Alert>;
+  }
+
+  return (
+    <div className="knowledge-retrieval-results">
+      {lessons.map((lesson) => (
+        <article className="knowledge-retrieval-result" key={lesson.id}>
+          <div className="knowledge-retrieval-result-head">
+            <div>
+              <strong>{lesson.title}</strong>
+              <span className="telemetry">{lesson.lesson_ref}</span>
+            </div>
+            <span className="status-pill status-ready">{lesson.status}</span>
+          </div>
+          <p>{lesson.summary}</p>
+          <div className="knowledge-citation-grid">
+            <Detail label="run" value={lesson.workflow_run_id} />
+            <Detail label="trace" value={lesson.trace_id} />
+            <Detail label="node" value={lesson.node_id || "none"} />
+            <Detail label="severity" value={lesson.severity} />
+          </div>
+          <div className="toolbar-row">
+            {lesson.status === "pending_review" ? (
+              <button
+                aria-label={`Confirm memory ${lesson.title}`}
+                className="toolbar-button"
+                disabled={isConfirming}
+                onClick={() => onConfirm(lesson)}
+                type="button"
+              >
+                <CheckCircle2 aria-hidden="true" size={16} />
+                Confirm
+              </button>
+            ) : null}
+            {lesson.status !== "archived" ? (
+              <button
+                aria-label={`Archive memory ${lesson.title}`}
+                className="toolbar-button toolbar-button-danger"
+                disabled={isArchiving}
+                onClick={() => onArchive(lesson)}
+                type="button"
+              >
+                <Archive aria-hidden="true" size={16} />
+                Archive
+              </button>
+            ) : null}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function MemorySearchForm({
+  form,
+  isDisabled,
+  isPending,
+  onChange,
+  onSubmit,
+}: {
+  form: MemorySearchFormState;
+  isDisabled: boolean;
+  isPending: boolean;
+  onChange: (form: MemorySearchFormState) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <form
+      className="knowledge-form knowledge-retrieval-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <label className="field-label knowledge-content-field" htmlFor="memory-query">
+        Memory query
+        <textarea
+          className="text-field knowledge-textarea knowledge-textarea-compact"
+          id="memory-query"
+          onChange={(event) => onChange({ ...form, query: event.target.value })}
+          value={form.query}
+        />
+      </label>
+      <NumberInput
+        label="Memory top K"
+        max={20}
+        min={1}
+        onChange={(topK) => onChange({ ...form, topK })}
+        value={form.topK}
+      />
+      <TextInput
+        label="Memory trace ID"
+        onChange={(traceId) => onChange({ ...form, traceId })}
+        value={form.traceId}
+      />
+      <button className="toolbar-button" disabled={isDisabled || isPending} type="submit">
+        <Search aria-hidden="true" size={16} />
+        Search memory
+      </button>
+    </form>
+  );
+}
+
+function MemorySearchResults({ result }: { result: MemoryRunLessonQueryResponse | null }) {
+  if (!result) {
+    return <Alert>Search confirmed run lessons through Retrieval Gateway.</Alert>;
+  }
+  if (!result.results.length) {
+    return <Alert>No memory results</Alert>;
+  }
+  return (
+    <div className="knowledge-retrieval-results">
+      <div className="knowledge-summary-grid knowledge-retrieval-summary">
+        <Detail label="query hash" value={result.query_hash} />
+        <Detail label="returned" value={String(result.trace_summary.returned_count)} />
+        <Detail label="denied" value={`denied ${result.denied_count}`} />
+        <Detail label="trace" value={result.trace_summary.trace_id || "not set"} />
+      </div>
+      {result.results.map((item) => (
+        <article className="knowledge-retrieval-result" key={item.lesson_id}>
+          <div className="knowledge-retrieval-result-head">
+            <div>
+              <strong>{item.title}</strong>
+              <span className="telemetry">{item.lesson_ref}</span>
+            </div>
+            <span className="status-pill status-ready">{formatScore(item.score)}</span>
+          </div>
+          <p>{item.summary}</p>
+          <div className="knowledge-citation-grid">
+            <Detail label="source" value={item.source} />
+            <Detail label="run" value={item.workflow_run_id} />
+            <Detail label="trace" value={item.trace_id} />
+            <Detail label="status" value={item.status} />
           </div>
         </article>
       ))}

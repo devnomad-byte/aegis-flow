@@ -11,6 +11,10 @@ from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
 from backend.app.retrieval.schemas import (
+    MemoryRunLessonQueryRequest,
+    MemoryRunLessonQueryResponse,
+    MemoryRunLessonResultRead,
+    MemoryRunLessonTraceSummary,
     RetrievalCitation,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
@@ -45,6 +49,7 @@ class PermissionAwareProjectProvider(ProjectAccessProvider):
 class InMemoryRetrievalGatewayStore:
     def __init__(self) -> None:
         self.subjects: list[RetrievalSubject] = []
+        self.memory_subjects: list[RetrievalSubject] = []
 
     async def query(
         self,
@@ -97,6 +102,46 @@ class InMemoryRetrievalGatewayStore:
                 rerank_strategy="none",
                 trace_id=request.trace_id,
             ),
+        )
+
+    async def query_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        subjects: list[RetrievalSubject],
+        request: MemoryRunLessonQueryRequest,
+    ) -> MemoryRunLessonQueryResponse:
+        self.memory_subjects = subjects
+        lesson_id = uuid4()
+        return MemoryRunLessonQueryResponse(
+            query_hash="memory-query-hash-no-raw",
+            denied_count=0,
+            trace_summary=MemoryRunLessonTraceSummary(
+                prefilter_count=1,
+                keyword_hit_count=1,
+                returned_count=1,
+                denied_count=0,
+                trace_id=request.trace_id,
+            ),
+            results=[
+                MemoryRunLessonResultRead(
+                    lesson_id=lesson_id,
+                    lesson_ref="run-502:trace-502:shell_1",
+                    title="Ingress rollback lesson",
+                    summary="502 recovered with approved rollback",
+                    workflow_id="ops_incident_triage",
+                    workflow_run_id="run-502",
+                    node_id="shell_1",
+                    trace_id="trace-502",
+                    severity="high",
+                    data_classification="internal",
+                    content_hash="sha256:lesson",
+                    status="active",
+                    score=1.0,
+                    source="run_lesson_keyword",
+                )
+            ],
         )
 
 
@@ -182,6 +227,60 @@ def test_retrieval_query_api_requires_permission() -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_memory_run_lesson_query_requires_retrieval_and_knowledge_permissions() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["retrieval:query"], roles=["ops"])
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        retrieval_store=InMemoryRetrievalGatewayStore(),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/retrieval/memory/run-lessons/query",
+        json={"query": "502 ingress rollback"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_memory_run_lesson_query_api_returns_safe_summary_and_sanitized_audit() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["retrieval:query", "knowledge:view"], roles=["ops"])
+    retrieval_store = InMemoryRetrievalGatewayStore()
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        retrieval_store=retrieval_store,
+        audit_store=audit_store,
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/retrieval/memory/run-lessons/query",
+        json={"query": "secret-looking 502 ingress rollback", "top_k": 3, "trace_id": "trace-ui"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["query_hash"] == "memory-query-hash-no-raw"
+    assert body["results"][0]["lesson_ref"] == "run-502:trace-502:shell_1"
+    assert "body" not in body["results"][0]
+    assert retrieval_store.memory_subjects
+    assert [event["action"] for event in audit_store.events] == [
+        "retrieval.memory.run_lesson.query"
+    ]
+    rendered_audit = str(audit_store.events)
+    assert "secret-looking 502 ingress rollback" not in rendered_audit
+    assert audit_store.events[0]["metadata"] == {
+        "query_hash": "memory-query-hash-no-raw",
+        "result_count": 1,
+        "denied_count": 0,
+        "trace_id": "trace-ui",
+    }
 
 
 def build_client(

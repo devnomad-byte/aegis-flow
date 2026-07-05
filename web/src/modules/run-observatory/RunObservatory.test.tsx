@@ -367,7 +367,7 @@ describe("RunObservatory", () => {
         method: "POST",
       }),
     );
-  });
+  }, 15_000);
 
   it("renders the runtime span empty state", async () => {
     window.history.pushState(

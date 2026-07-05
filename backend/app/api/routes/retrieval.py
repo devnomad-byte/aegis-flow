@@ -24,6 +24,8 @@ from backend.app.retrieval.eval_store import (
     RetrievalEvalStore,
 )
 from backend.app.retrieval.schemas import (
+    MemoryRunLessonQueryRequest,
+    MemoryRunLessonQueryResponse,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
     RetrievalSubject,
@@ -69,6 +71,49 @@ async def query_retrieval_gateway(
         metadata={
             "query_hash": response.query_hash,
             "retrieval_mode": request.retrieval_mode,
+            "result_count": len(response.results),
+            "denied_count": response.denied_count,
+            "trace_id": request.trace_id,
+        },
+    )
+    return response
+
+
+@router.post("/memory/run-lessons/query", response_model=MemoryRunLessonQueryResponse)
+async def query_run_lesson_memory(
+    project_id: UUID,
+    request: MemoryRunLessonQueryRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    retrieval_store: RetrievalGatewayStore = RetrievalStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> MemoryRunLessonQueryResponse:
+    project = _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "retrieval:query",
+    )
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:view",
+    )
+    response = await retrieval_store.query_run_lessons(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        subjects=_subjects_for_account(current_account, project),
+        request=request,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="retrieval.memory.run_lesson.query",
+        target_type="run_lesson_memory",
+        target_id=response.query_hash,
+        metadata={
+            "query_hash": response.query_hash,
             "result_count": len(response.results),
             "denied_count": response.denied_count,
             "trace_id": request.trace_id,

@@ -10,6 +10,9 @@ from backend.app.retrieval.eval_store import (
     RetrievalEvalRunRequest,
 )
 from backend.app.retrieval.schemas import (
+    MemoryRunLessonQueryRequest,
+    MemoryRunLessonQueryResponse,
+    MemoryRunLessonTraceSummary,
     RetrievalCitation,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
@@ -53,6 +56,21 @@ class FixedRetrievalStore:
                 returned_count=len(results),
                 trace_id=request.trace_id,
             ),
+        )
+
+    async def query_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        subjects: list[RetrievalSubject],
+        request: MemoryRunLessonQueryRequest,
+    ) -> MemoryRunLessonQueryResponse:
+        return MemoryRunLessonQueryResponse(
+            query_hash="unused-memory-query",
+            results=[],
+            denied_count=0,
+            trace_summary=MemoryRunLessonTraceSummary(trace_id=request.trace_id),
         )
 
 

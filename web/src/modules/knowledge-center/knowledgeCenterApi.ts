@@ -2,6 +2,7 @@ export type DataClassification = "public" | "internal" | "confidential" | "restr
 export type ContentFormat = "text" | "markdown";
 export type RetrievalMode = "hybrid" | "keyword" | "vector";
 export type RunLessonSeverity = "info" | "low" | "medium" | "high" | "critical";
+export type RunLessonStatus = "pending_review" | "active" | "archived";
 
 export type KnowledgeBase = {
   id: string;
@@ -144,6 +145,42 @@ export type RetrievalQueryResponse = {
   }>;
 };
 
+export type MemoryRunLessonQueryRequest = {
+  query: string;
+  top_k: number;
+  trace_id?: string;
+  run_id?: string;
+  node_id?: string;
+};
+
+export type MemoryRunLessonQueryResponse = {
+  query_hash: string;
+  denied_count: number;
+  trace_summary: {
+    prefilter_count: number;
+    keyword_hit_count: number;
+    returned_count: number;
+    denied_count: number;
+    trace_id: string;
+  };
+  results: Array<{
+    lesson_id: string;
+    lesson_ref: string;
+    title: string;
+    summary: string;
+    workflow_id: string;
+    workflow_run_id: string;
+    node_id: string;
+    trace_id: string;
+    severity: RunLessonSeverity;
+    data_classification: DataClassification;
+    content_hash: string;
+    status: RunLessonStatus | string;
+    score: number;
+    source: string;
+  }>;
+};
+
 export type RunLesson = {
   id: string;
   project_id: string;
@@ -160,7 +197,7 @@ export type RunLesson = {
   milvus_collection: string;
   milvus_vector_id: string;
   content_hash: string;
-  status: string;
+  status: RunLessonStatus | string;
   is_deleted: boolean;
   created_by: string;
   updated_by: string;
@@ -186,6 +223,10 @@ export type RunLessonListResponse = {
   count: number;
 };
 
+export type RunLessonStatusUpdateRequest = {
+  reason?: string;
+};
+
 export const knowledgeBasesQueryKey = (projectId: string) =>
   ["project", projectId, "knowledge-center", "bases"] as const;
 
@@ -194,7 +235,7 @@ export const knowledgeBaseDocumentsQueryKey = (projectId: string, baseId: string
 
 export const runLessonsQueryKey = (
   projectId: string,
-  filters: { run_id?: string; trace_id?: string } = {},
+  filters: { run_id?: string; status?: string; trace_id?: string } = {},
 ) =>
   [
     "project",
@@ -203,6 +244,7 @@ export const runLessonsQueryKey = (
     "run-lessons",
     filters.run_id ?? "",
     filters.trace_id ?? "",
+    filters.status ?? "",
   ] as const;
 
 export async function listKnowledgeBases(
@@ -316,7 +358,7 @@ export async function createRunLesson(
 
 export async function listRunLessons(
   projectId: string,
-  filters: { run_id?: string; trace_id?: string; limit?: number } = {},
+  filters: { run_id?: string; trace_id?: string; status?: string; limit?: number } = {},
   fetcher: typeof fetch = globalThis.fetch,
 ): Promise<RunLessonListResponse> {
   const params = new URLSearchParams();
@@ -325,6 +367,9 @@ export async function listRunLessons(
   }
   if (filters.trace_id) {
     params.set("trace_id", filters.trace_id);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
   }
   if (typeof filters.limit === "number") {
     params.set("limit", String(filters.limit));
@@ -335,6 +380,60 @@ export async function listRunLessons(
       query ? `?${query}` : ""
     }`,
     undefined,
+    fetcher,
+  );
+}
+
+export async function confirmRunLesson(
+  projectId: string,
+  lessonId: string,
+  request: RunLessonStatusUpdateRequest = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RunLesson> {
+  return requestJson<RunLesson>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/knowledge/run-lessons/${encodeURIComponent(
+      lessonId,
+    )}/confirm`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function archiveRunLesson(
+  projectId: string,
+  lessonId: string,
+  request: RunLessonStatusUpdateRequest = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RunLesson> {
+  return requestJson<RunLesson>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/knowledge/run-lessons/${encodeURIComponent(
+      lessonId,
+    )}/archive`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function queryRunLessonMemory(
+  projectId: string,
+  request: MemoryRunLessonQueryRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<MemoryRunLessonQueryResponse> {
+  return requestJson<MemoryRunLessonQueryResponse>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/retrieval/memory/run-lessons/query`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
     fetcher,
   );
 }

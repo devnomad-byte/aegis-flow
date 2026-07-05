@@ -13,6 +13,7 @@ from backend.app.knowledge.models import (
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     RetrievalQueryLog,
+    RunLesson,
 )
 from backend.app.observability.models import RuntimeTraceSpan
 from backend.app.observability.projection import retrieval_query_log_to_span
@@ -24,6 +25,10 @@ from backend.app.retrieval.ranking import (
     reciprocal_rank_fusion,
 )
 from backend.app.retrieval.schemas import (
+    MemoryRunLessonQueryRequest,
+    MemoryRunLessonQueryResponse,
+    MemoryRunLessonResultRead,
+    MemoryRunLessonTraceSummary,
     RetrievalCitation,
     RetrievalQueryRequest,
     RetrievalQueryResponse,
@@ -154,6 +159,63 @@ class SqlAlchemyRetrievalGatewayStore:
             results=results,
             denied_count=denied_count,
             trace_summary=trace_summary,
+        )
+
+    async def query_run_lessons(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        subjects: list[RetrievalSubject],
+        request: MemoryRunLessonQueryRequest,
+    ) -> MemoryRunLessonQueryResponse:
+        statement = select(RunLesson).where(
+            RunLesson.project_id == project_id,
+            RunLesson.status == "active",
+            RunLesson.is_deleted.is_(False),
+        )
+        if request.run_id:
+            statement = statement.where(RunLesson.workflow_run_id == request.run_id)
+        if request.node_id:
+            statement = statement.where(RunLesson.node_id == request.node_id)
+        lessons = (
+            await self._session.scalars(
+                statement.order_by(RunLesson.updated_at.desc(), RunLesson.created_at.desc()).limit(
+                    100
+                )
+            )
+        ).all()
+        ranked = _rank_run_lessons(request.query, list(lessons))
+        selected = ranked[: request.top_k]
+        return MemoryRunLessonQueryResponse(
+            query_hash=_hash_query(request.query),
+            results=[
+                MemoryRunLessonResultRead(
+                    lesson_id=lesson.id,
+                    lesson_ref=lesson.lesson_ref,
+                    title=lesson.title,
+                    summary=lesson.summary,
+                    workflow_id=lesson.workflow_id,
+                    workflow_run_id=lesson.workflow_run_id,
+                    node_id=lesson.node_id,
+                    trace_id=lesson.trace_id,
+                    severity=lesson.severity,
+                    data_classification=lesson.data_classification,
+                    content_hash=lesson.content_hash,
+                    status=lesson.status,
+                    score=score,
+                    source="run_lesson_keyword",
+                )
+                for lesson, score in selected
+            ],
+            denied_count=0,
+            trace_summary=MemoryRunLessonTraceSummary(
+                prefilter_count=len(lessons),
+                keyword_hit_count=len(ranked),
+                returned_count=len(selected),
+                denied_count=0,
+                trace_id=request.trace_id,
+            ),
         )
 
     async def _load_active_chunk_records(
@@ -296,6 +358,36 @@ def _rank_keyword_candidates(
         RetrievalCandidate(chunk_id=chunk_id, source="keyword", rank=index, score=score)
         for index, (chunk_id, score) in enumerate(ranked, start=1)
     ]
+
+
+def _rank_run_lessons(query: str, lessons: list[RunLesson]) -> list[tuple[RunLesson, float]]:
+    terms = set(_extract_terms(query))
+    if not terms:
+        return []
+    scored: list[tuple[RunLesson, float]] = []
+    for lesson in lessons:
+        text_terms = _extract_terms(
+            " ".join(
+                [
+                    lesson.lesson_ref,
+                    lesson.title,
+                    lesson.summary,
+                    lesson.body,
+                    lesson.workflow_id,
+                    lesson.workflow_run_id,
+                    lesson.node_id,
+                    lesson.trace_id,
+                    lesson.severity,
+                ]
+            )
+        )
+        score = sum(1.0 for term in terms if term in text_terms)
+        if score:
+            scored.append((lesson, score))
+    return sorted(
+        scored,
+        key=lambda item: (-item[1], item[0].updated_at, str(item[0].id)),
+    )
 
 
 def _candidate_to_result(

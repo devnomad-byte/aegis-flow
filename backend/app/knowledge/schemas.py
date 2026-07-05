@@ -9,6 +9,7 @@ KnowledgeImportStatus = Literal["created", "unchanged", "versioned"]
 DataClassification = Literal["public", "internal", "confidential", "restricted", "secret"]
 KnowledgeBaseVisibility = Literal["project"]
 RunLessonSeverity = Literal["info", "low", "medium", "high", "critical"]
+RunLessonReviewStatus = Literal["pending_review", "active", "archived"]
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -135,6 +136,12 @@ class RunLessonCreateRequest(BaseModel):
     trace_id: str = Field(min_length=1, max_length=160)
     severity: RunLessonSeverity = "info"
     data_classification: DataClassification = "internal"
+
+
+class RunLessonStatusUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=1000)
 
 
 class RunLessonRead(BaseModel):

@@ -24,6 +24,7 @@ from backend.app.knowledge.schemas import (
     KnowledgeDocumentVersionRead,
     RunLessonCreateRequest,
     RunLessonRead,
+    RunLessonStatusUpdateRequest,
 )
 from backend.app.security.redaction import redact_sensitive_text
 
@@ -339,6 +340,7 @@ class SqlAlchemyKnowledgeIngestionStore:
             severity=request.severity,
             data_classification=request.data_classification,
             content_hash=content_hash,
+            status="pending_review",
             created_by=actor_id,
             updated_by=actor_id,
         )
@@ -357,13 +359,15 @@ class SqlAlchemyKnowledgeIngestionStore:
         project_id: UUID,
         run_id: str | None = None,
         trace_id: str | None = None,
+        status_filter: str | None = None,
         limit: int = 20,
     ) -> list[RunLessonRead]:
         statement = select(RunLesson).where(
             RunLesson.project_id == project_id,
             RunLesson.is_deleted.is_(False),
-            RunLesson.status == "active",
         )
+        if status_filter and status_filter != "all":
+            statement = statement.where(RunLesson.status == status_filter)
         if run_id:
             statement = statement.where(RunLesson.workflow_run_id == run_id)
         if trace_id:
@@ -374,6 +378,59 @@ class SqlAlchemyKnowledgeIngestionStore:
             )
         )
         return [_run_lesson_to_read(lesson) for lesson in result.all()]
+
+    async def confirm_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
+        return await self._set_run_lesson_status(
+            project_id=project_id,
+            lesson_id=lesson_id,
+            actor_id=actor_id,
+            status="active",
+        )
+
+    async def archive_run_lesson(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        request: RunLessonStatusUpdateRequest | None = None,
+    ) -> RunLessonRead | None:
+        return await self._set_run_lesson_status(
+            project_id=project_id,
+            lesson_id=lesson_id,
+            actor_id=actor_id,
+            status="archived",
+        )
+
+    async def _set_run_lesson_status(
+        self,
+        *,
+        project_id: UUID,
+        lesson_id: UUID,
+        actor_id: UUID,
+        status: str,
+    ) -> RunLessonRead | None:
+        lesson = await self._session.scalar(
+            select(RunLesson).where(
+                RunLesson.project_id == project_id,
+                RunLesson.id == lesson_id,
+                RunLesson.is_deleted.is_(False),
+            )
+        )
+        if lesson is None:
+            return None
+        lesson.status = status
+        lesson.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(lesson)
+        return _run_lesson_to_read(lesson)
 
     async def _create_chunk(
         self,

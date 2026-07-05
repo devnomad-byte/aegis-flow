@@ -90,6 +90,48 @@ class RetrievalQueryResponse(BaseModel):
     trace_summary: RetrievalTraceSummary
 
 
+class MemoryRunLessonQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=20)
+    trace_id: str = Field(default="", max_length=160)
+    run_id: str = Field(default="", max_length=160)
+    node_id: str = Field(default="", max_length=160)
+
+
+class MemoryRunLessonResultRead(BaseModel):
+    lesson_id: UUID
+    lesson_ref: str
+    title: str
+    summary: str
+    workflow_id: str
+    workflow_run_id: str
+    node_id: str
+    trace_id: str
+    severity: str
+    data_classification: str
+    content_hash: str
+    status: str
+    score: float
+    source: str
+
+
+class MemoryRunLessonTraceSummary(BaseModel):
+    prefilter_count: int = 0
+    keyword_hit_count: int = 0
+    returned_count: int = 0
+    denied_count: int = 0
+    trace_id: str = ""
+
+
+class MemoryRunLessonQueryResponse(BaseModel):
+    query_hash: str
+    results: list[MemoryRunLessonResultRead]
+    denied_count: int
+    trace_summary: MemoryRunLessonTraceSummary
+
+
 class RetrievalQueryLogRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

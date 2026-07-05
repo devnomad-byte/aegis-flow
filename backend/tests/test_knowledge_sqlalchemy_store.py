@@ -270,6 +270,10 @@ async def test_sqlalchemy_run_lesson_store_creates_lists_and_redacts_project_sco
             run_id="run-ui",
             trace_id="trace-ui",
         )
+        active_only = await store.list_run_lessons(
+            project_id=project_id,
+            status_filter="active",
+        )
         persisted = await session.get(RunLesson, created.id)
 
     await engine.dispose()
@@ -277,13 +281,79 @@ async def test_sqlalchemy_run_lesson_store_creates_lists_and_redacts_project_sco
     assert created.lesson_ref == "run-ui:trace-ui:shell_1"
     assert created.project_id == project_id
     assert created.severity == "high"
+    assert created.status == "pending_review"
     assert "raw-token" not in created.summary
     assert "raw-password" not in created.body
     assert created.content_hash.startswith("sha256:")
     assert [lesson.id for lesson in listed] == [created.id]
+    assert active_only == []
     assert persisted is not None
+    assert persisted.status == "pending_review"
     assert "raw-token" not in persisted.summary
     assert "raw-password" not in persisted.body
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_run_lesson_review_status_flow_filters_active_and_archived() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        project_id = uuid4()
+        actor_id = uuid4()
+        store = SqlAlchemyKnowledgeIngestionStore(session)
+        created = await store.create_run_lesson(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=RunLessonCreateRequest(
+                lesson_ref="run-review:trace-review:shell_1",
+                title="Reviewable lesson",
+                summary="Ingress rollback succeeded",
+                workflow_run_id="run-review",
+                trace_id="trace-review",
+            ),
+        )
+
+        confirmed = await store.confirm_run_lesson(
+            project_id=project_id,
+            lesson_id=created.id,
+            actor_id=actor_id,
+        )
+        active_lessons = await store.list_run_lessons(
+            project_id=project_id,
+            status_filter="active",
+        )
+        archived = await store.archive_run_lesson(
+            project_id=project_id,
+            lesson_id=created.id,
+            actor_id=actor_id,
+        )
+        active_after_archive = await store.list_run_lessons(
+            project_id=project_id,
+            status_filter="active",
+        )
+        archived_lessons = await store.list_run_lessons(
+            project_id=project_id,
+            status_filter="archived",
+        )
+        missing = await store.confirm_run_lesson(
+            project_id=uuid4(),
+            lesson_id=created.id,
+            actor_id=actor_id,
+        )
+
+    await engine.dispose()
+
+    assert confirmed is not None
+    assert confirmed.status == "active"
+    assert [lesson.id for lesson in active_lessons] == [created.id]
+    assert archived is not None
+    assert archived.status == "archived"
+    assert active_after_archive == []
+    assert [lesson.id for lesson in archived_lessons] == [created.id]
+    assert missing is None
 
 
 @pytest.mark.asyncio
