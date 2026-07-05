@@ -4,6 +4,7 @@ import type { ProjectContext } from "./projectContext";
 
 export type ProjectFeatureView =
   | "command"
+  | "debug-chat"
   | "workflows"
   | "tool-registry"
   | "model-gateway-settings"
@@ -19,6 +20,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   command: () =>
     import("../modules/project-command-center/ProjectCommandCenter").then((module) => ({
       default: module.ProjectCommandCenter,
+    })),
+  "debug-chat": () =>
+    import("../modules/debug-chat/ProjectDebugChat").then((module) => ({
+      default: module.ProjectDebugChat,
     })),
   workflows: () =>
     import("../modules/workflow-studio/WorkflowStudio").then((module) => ({

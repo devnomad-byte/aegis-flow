@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from backend.app.api.routes.audit import router as audit_router
+from backend.app.api.routes.debug_chat import router as debug_chat_router
 from backend.app.api.routes.global_command import router as global_command_router
 from backend.app.api.routes.health import router as health_router
 from backend.app.api.routes.knowledge import router as knowledge_router
@@ -18,6 +19,7 @@ from backend.app.api.routes.workflows import router as workflows_router
 api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(audit_router, prefix="/api/v1")
+api_router.include_router(debug_chat_router, prefix="/api/v1")
 api_router.include_router(global_command_router, prefix="/api/v1")
 api_router.include_router(knowledge_router, prefix="/api/v1")
 api_router.include_router(model_gateway_router, prefix="/api/v1")

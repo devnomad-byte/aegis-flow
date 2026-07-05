@@ -77,3 +77,14 @@ test("renders run observatory on desktop and mobile", async ({ page }) => {
   await expect(page.getByText("Runtime Trace Span + Ledger Drilldown")).toBeVisible();
   await expect(page.getByRole("button", { name: "Request OTLP export" })).toBeVisible();
 });
+
+test("renders debug chat run diagnosis workspace", async ({ page }) => {
+  await page.goto("/projects/ops-command/debug-chat?run_id=run-demo&trace_id=trace-demo");
+
+  await expect(page.getByRole("heading", { name: "Run Diagnosis" })).toBeVisible();
+  await expect(page.getByText("DEBUG CHAT", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Run ID")).toHaveValue("run-demo");
+  await expect(page.getByLabel("Trace ID")).toHaveValue("trace-demo");
+  await expect(page.getByText("Waiting for scope")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Diagnose run" })).toBeDisabled();
+});

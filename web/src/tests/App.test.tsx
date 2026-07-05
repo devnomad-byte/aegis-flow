@@ -156,6 +156,14 @@ describe("App", () => {
     expect(await screen.findByText("Select a run scope to load trace data")).toBeInTheDocument();
   });
 
+  it("renders debug chat for project debug routes", async () => {
+    render(<App initialPath="/projects/ops-command/debug-chat" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Run Diagnosis" })).toBeInTheDocument();
+    expect(screen.getByText("Waiting for scope")).toBeInTheDocument();
+  });
+
   it("shows forbidden instead of global data for regular project members", async () => {
     render(<App account={DEMO_ACCOUNTS.projectMember} initialPath="/global" />);
 

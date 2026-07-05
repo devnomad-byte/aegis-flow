@@ -78,6 +78,12 @@ const projectRunsRoute = createRoute({
   component: ProjectRunsRoute,
 });
 
+const projectDebugChatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/debug-chat",
+  component: ProjectDebugChatRoute,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   forbiddenRoute,
@@ -88,6 +94,7 @@ const routeTree = rootRoute.addChildren([
   projectModelGatewaySettingsRoute,
   projectPromptLibraryRoute,
   projectRunsRoute,
+  projectDebugChatRoute,
 ]);
 
 export function createAegisRouter({ runtime, initialPath }: CreateAegisRouterInput) {
@@ -185,4 +192,16 @@ function ProjectRunsRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="runs" />;
+}
+
+function ProjectDebugChatRoute() {
+  const context = projectDebugChatRoute.useRouteContext();
+  const params = projectDebugChatRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="debug-chat" />;
 }
