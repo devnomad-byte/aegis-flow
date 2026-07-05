@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -25,6 +26,9 @@ from backend.app.tool_registry.schemas import (
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
+    ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -182,6 +186,57 @@ class ToolRegistryStore(Protocol):
         actor_id: UUID,
         evidence: dict[str, object],
     ) -> ShellImageAdmissionRead:
+        raise NotImplementedError
+
+    async def record_shell_image_artifact_cleanup_run(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        run: ShellImageArtifactCleanupRunRead,
+    ) -> ShellImageArtifactCleanupRunRead:
+        raise NotImplementedError
+
+    async def list_shell_image_artifact_cleanup_runs(
+        self,
+        project_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[ShellImageArtifactCleanupRunRead]:
+        raise NotImplementedError
+
+    async def get_shell_image_artifact_cleanup_schedule(
+        self,
+        project_id: UUID,
+    ) -> ShellImageArtifactCleanupScheduleRead | None:
+        raise NotImplementedError
+
+    async def upsert_shell_image_artifact_cleanup_schedule(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageArtifactCleanupScheduleUpdateRequest,
+    ) -> ShellImageArtifactCleanupScheduleRead:
+        raise NotImplementedError
+
+    async def list_due_shell_image_artifact_cleanup_schedules(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[ShellImageArtifactCleanupScheduleRead]:
+        raise NotImplementedError
+
+    async def mark_shell_image_artifact_cleanup_schedule_run(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        actor_id: UUID,
+        run_id: UUID,
+        completed_at: datetime,
+    ) -> ShellImageArtifactCleanupScheduleRead:
         raise NotImplementedError
 
     async def upsert_shell_image_admission_policy(

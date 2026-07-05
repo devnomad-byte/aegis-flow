@@ -43,6 +43,14 @@ ImageAdmissionDecision = Literal["approved", "would_reject", "rejected"]
 ShellImageAdmissionEnforcementMode = Literal["dry_run", "enforce"]
 NotationTrustStoreType = Literal["ca", "signingAuthority", "tsa"]
 ShellImageArtifactCleanupStatus = Literal["pending", "deleted", "delete_failed"]
+ShellImageArtifactCleanupTriggerType = Literal["manual", "scheduled"]
+ShellImageArtifactCleanupRunStatus = Literal["succeeded", "partial", "failed"]
+ShellImageArtifactLifecycleDriftStatus = Literal["ready", "drift", "unknown"]
+ShellImageArtifactVersionReconciliationStatus = Literal[
+    "ready",
+    "needs_reconciliation",
+    "unknown",
+]
 
 DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}
 DEFAULT_BLOCKED_SEVERITIES = ["HIGH", "CRITICAL"]
@@ -505,12 +513,31 @@ class ShellImageArtifactRetentionControlsRead(BaseModel):
     error: str = ""
 
 
+class ShellImageArtifactLifecycleDriftRead(BaseModel):
+    status: ShellImageArtifactLifecycleDriftStatus = "unknown"
+    issues: list[str] = Field(default_factory=list)
+    matched_rule_ids: list[str] = Field(default_factory=list)
+    checked_prefixes: list[str] = Field(default_factory=list)
+    error: str = ""
+
+
+class ShellImageArtifactVersionReconciliationRead(BaseModel):
+    status: ShellImageArtifactVersionReconciliationStatus = "unknown"
+    current_version_count: int = 0
+    noncurrent_version_count: int = 0
+    delete_marker_count: int = 0
+    checked_prefixes: list[str] = Field(default_factory=list)
+    error: str = ""
+
+
 class ShellImageArtifactCleanupCandidateRead(BaseModel):
     admission_id: UUID
     evidence_key: str
     artifact_kind: str
-    artifact_ref: str
-    artifact_sha256: str
+    artifact_ref: str = Field(default="", exclude=True)
+    artifact_sha256: str = Field(default="", exclude=True)
+    artifact_ref_hash: str
+    artifact_sha256_prefix: str
     artifact_size_bytes: int
     artifact_retention_days: int | None = None
     artifact_retention_expires_at: datetime
@@ -520,6 +547,12 @@ class ShellImageArtifactCleanupCandidateRead(BaseModel):
 
 class ShellImageArtifactCleanupGovernanceRead(BaseModel):
     retention_controls: ShellImageArtifactRetentionControlsRead
+    lifecycle_drift: ShellImageArtifactLifecycleDriftRead = Field(
+        default_factory=ShellImageArtifactLifecycleDriftRead
+    )
+    version_reconciliation: ShellImageArtifactVersionReconciliationRead = Field(
+        default_factory=ShellImageArtifactVersionReconciliationRead
+    )
     expired_artifact_count: int = 0
     retained_artifact_count: int = 0
     deleted_artifact_count: int = 0
@@ -534,14 +567,59 @@ class ShellImageArtifactCleanupRequest(BaseModel):
 
 
 class ShellImageArtifactCleanupRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    trigger_type: ShellImageArtifactCleanupTriggerType = "manual"
+    status: ShellImageArtifactCleanupRunStatus = "succeeded"
     dry_run: bool
     candidate_count: int
     deleted_count: int
     failed_count: int
     retained_count: int
     retention_controls: ShellImageArtifactRetentionControlsRead
+    lifecycle_drift: ShellImageArtifactLifecycleDriftRead = Field(
+        default_factory=ShellImageArtifactLifecycleDriftRead
+    )
+    version_reconciliation: ShellImageArtifactVersionReconciliationRead = Field(
+        default_factory=ShellImageArtifactVersionReconciliationRead
+    )
     candidates: list[ShellImageArtifactCleanupCandidateRead] = Field(default_factory=list)
     generated_at: datetime
+    started_at: datetime
+    completed_at: datetime
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShellImageArtifactCleanupScheduleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval_hours: int = Field(default=24, ge=1, le=8760)
+    limit: int = Field(default=100, ge=1, le=500)
+    next_run_at: datetime | None = None
+
+
+class ShellImageArtifactCleanupScheduleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID | None = None
+    configured: bool = False
+    project_id: UUID
+    enabled: bool = False
+    interval_hours: int = 24
+    limit: int = 100
+    next_run_at: datetime | None = None
+    last_run_id: UUID | None = None
+    last_run_at: datetime | None = None
+    created_by: UUID | None = None
+    updated_by: UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class CredentialRefRead(BaseModel):

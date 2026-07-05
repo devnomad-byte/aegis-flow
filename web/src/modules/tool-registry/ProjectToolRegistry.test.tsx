@@ -7,6 +7,7 @@ import { AppProviders } from "../../app/providers/AppProviders";
 import { createAegisRuntime } from "../../app/runtime";
 import { defaultProjectContext } from "../../shell/projectContext";
 import { ProjectToolRegistry } from "./ProjectToolRegistry";
+import type { ShellImageArtifactCleanupGovernance } from "./toolRegistryApi";
 
 describe("ProjectToolRegistry", () => {
   it("loads shell templates, creates a version, and renders sanitized preview output", async () => {
@@ -108,6 +109,21 @@ describe("ProjectToolRegistry", () => {
               default_retention_years: null,
               error: "",
             },
+            lifecycle_drift: {
+              status: "drift",
+              issues: ["missing_lifecycle_rule"],
+              matched_rule_ids: [],
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
+            version_reconciliation: {
+              status: "needs_reconciliation",
+              current_version_count: 1,
+              noncurrent_version_count: 2,
+              delete_marker_count: 1,
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
             expired_artifact_count: 1,
             retained_artifact_count: 1,
             deleted_artifact_count: 0,
@@ -122,6 +138,10 @@ describe("ProjectToolRegistry", () => {
         const body = JSON.parse(String(init.body)) as { dry_run: boolean };
         return new Response(
           JSON.stringify({
+            id: body.dry_run ? "run-dry" : "run-execute",
+            project_id: "ops-command",
+            trigger_type: "manual",
+            status: "succeeded",
             dry_run: body.dry_run,
             candidate_count: 1,
             deleted_count: body.dry_run ? 0 : 1,
@@ -138,13 +158,28 @@ describe("ProjectToolRegistry", () => {
               default_retention_years: null,
               error: "",
             },
+            lifecycle_drift: {
+              status: "drift",
+              issues: ["missing_lifecycle_rule"],
+              matched_rule_ids: [],
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
+            version_reconciliation: {
+              status: "needs_reconciliation",
+              current_version_count: 1,
+              noncurrent_version_count: 2,
+              delete_marker_count: 1,
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
             candidates: [
               {
                 admission_id: "admission-1",
                 evidence_key: "sbom",
                 artifact_kind: "sbom",
-                artifact_ref: "s3://capievo/shell-image-admissions/expired-sbom.json",
-                artifact_sha256: "a".repeat(64),
+                artifact_ref_hash: "1".repeat(64),
+                artifact_sha256_prefix: "a".repeat(12),
                 artifact_size_bytes: 128,
                 artifact_retention_days: 1,
                 artifact_retention_expires_at: "2026-07-04T00:00:00Z",
@@ -153,6 +188,104 @@ describe("ProjectToolRegistry", () => {
               },
             ],
             generated_at: "2026-07-05T00:00:00Z",
+            started_at: "2026-07-05T00:00:00Z",
+            completed_at: "2026-07-05T00:00:01Z",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:01Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && !init) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "run-1",
+              project_id: "ops-command",
+              trigger_type: "scheduled",
+              status: "succeeded",
+              dry_run: true,
+              candidate_count: 1,
+              deleted_count: 0,
+              failed_count: 0,
+              retained_count: 1,
+              retention_controls: {
+                bucket: "capievo",
+                versioning_status: "Enabled",
+                object_lock_enabled: true,
+                worm_capable: true,
+                default_retention_configured: true,
+                default_retention_mode: "GOVERNANCE",
+                default_retention_days: 30,
+                default_retention_years: null,
+                error: "",
+              },
+              lifecycle_drift: {
+                status: "drift",
+                issues: ["missing_lifecycle_rule"],
+                matched_rule_ids: [],
+                checked_prefixes: ["shell-image-admissions/"],
+                error: "",
+              },
+              version_reconciliation: {
+                status: "needs_reconciliation",
+                current_version_count: 1,
+                noncurrent_version_count: 2,
+                delete_marker_count: 1,
+                checked_prefixes: ["shell-image-admissions/"],
+                error: "",
+              },
+              candidates: [],
+              generated_at: "2026-07-05T00:00:00Z",
+              started_at: "2026-07-05T00:00:00Z",
+              completed_at: "2026-07-05T00:00:01Z",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-05T00:00:00Z",
+              updated_at: "2026-07-05T00:00:01Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && !init) {
+        return new Response(
+          JSON.stringify({
+            id: "schedule-1",
+            project_id: "project-old",
+            enabled: true,
+            interval_hours: 24,
+            limit: 100,
+            next_run_at: "2026-07-06T00:00:00Z",
+            last_run_id: "run-1",
+            last_run_at: "2026-07-05T00:00:00Z",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        expect(body.enabled).toBe(true);
+        return new Response(
+          JSON.stringify({
+            id: "schedule-1",
+            project_id: "ops-command",
+            enabled: true,
+            interval_hours: body.interval_hours,
+            limit: body.limit,
+            next_run_at: "2026-07-05T12:00:00Z",
+            last_run_id: "run-1",
+            last_run_at: "2026-07-05T00:00:00Z",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
         );
@@ -390,12 +523,17 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("Expired artifacts")).toBeInTheDocument();
     expect(screen.getByText("S3 / MinIO Retention Controls")).toBeInTheDocument();
     expect(screen.getByText("object-lock-default")).toBeInTheDocument();
+    expect(screen.getAllByText("drift").length).toBeGreaterThan(0);
+    expect(screen.getByText("needs_reconciliation")).toBeInTheDocument();
+    expect(screen.getByText("Schedule dry-run")).toBeInTheDocument();
+    expect(screen.getByText("scheduled · succeeded · 1 candidates")).toBeInTheDocument();
     expect(screen.getByText("capievo")).toBeInTheDocument();
     expect(screen.getByText("vulnerability scan found blocked severities: 1")).toBeInTheDocument();
     expect(screen.getByText(/SBOM artifact: s3:\/\/capievo\/shell-image-admissions\/sbom\.json/)).toBeInTheDocument();
     expect(screen.getByText(/Scan artifact: s3:\/\/capievo\/shell-image-admissions\/scan\.json/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Dry run cleanup" }));
     expect(await screen.findByText(/Dry run: 1 candidates, 0 deleted, 0 failed/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save cleanup schedule" }));
     await user.click(screen.getByRole("button", { name: "Execute cleanup" }));
     expect(await screen.findByText(/Executed: 1 candidates, 1 deleted, 0 failed/)).toBeInTheDocument();
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
@@ -428,6 +566,13 @@ describe("ProjectToolRegistry", () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
       expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-schedule",
+      expect.objectContaining({ method: "PUT" }),
     );
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",
@@ -589,22 +734,34 @@ describe("ProjectToolRegistry", () => {
       if (url.endsWith("/shell-images/artifacts/governance")) {
         return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
       }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && !init) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && !init) {
+        return new Response(JSON.stringify(null), { status: 200 });
+      }
       if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
         return new Response(
           JSON.stringify({
+            id: "run-old",
+            project_id: "project-old",
+            trigger_type: "manual",
+            status: "succeeded",
             dry_run: true,
             candidate_count: 1,
             deleted_count: 0,
             failed_count: 0,
             retained_count: 0,
             retention_controls: emptyArtifactGovernance().retention_controls,
+            lifecycle_drift: emptyArtifactGovernance().lifecycle_drift,
+            version_reconciliation: emptyArtifactGovernance().version_reconciliation,
             candidates: [
               {
                 admission_id: "admission-old",
                 evidence_key: "sbom",
                 artifact_kind: "sbom",
-                artifact_ref: "s3://capievo/old-project/expired-sbom.json",
-                artifact_sha256: "f".repeat(64),
+                artifact_ref_hash: "f".repeat(64),
+                artifact_sha256_prefix: "f".repeat(12),
                 artifact_size_bytes: 128,
                 artifact_retention_days: 1,
                 artifact_retention_expires_at: "2026-07-04T00:00:00Z",
@@ -613,6 +770,12 @@ describe("ProjectToolRegistry", () => {
               },
             ],
             generated_at: "2026-07-05T00:00:00Z",
+            started_at: "2026-07-05T00:00:00Z",
+            completed_at: "2026-07-05T00:00:01Z",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:01Z",
           }),
           { status: 200 },
         );
@@ -631,7 +794,10 @@ describe("ProjectToolRegistry", () => {
 
     await screen.findByText("S3 / MinIO Retention Controls");
     await user.click(screen.getByRole("button", { name: "Dry run cleanup" }));
-    expect(await screen.findByText("s3://capievo/old-project/expired-sbom.json")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("ref:ffffffffffff")).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("s3://capievo/old-project/expired-sbom.json")).not.toBeInTheDocument();
 
     rerender(
       <AppProviders runtime={runtime}>
@@ -640,6 +806,7 @@ describe("ProjectToolRegistry", () => {
     );
 
     await waitFor(() => {
+      expect(screen.queryByText("ref:ffffffffffff")).not.toBeInTheDocument();
       expect(screen.queryByText("s3://capievo/old-project/expired-sbom.json")).not.toBeInTheDocument();
     });
   });
@@ -722,7 +889,7 @@ describe("ProjectToolRegistry", () => {
   });
 });
 
-function emptyArtifactGovernance() {
+function emptyArtifactGovernance(): ShellImageArtifactCleanupGovernance {
   return {
     retention_controls: {
       bucket: "capievo",
@@ -733,6 +900,21 @@ function emptyArtifactGovernance() {
       default_retention_mode: null,
       default_retention_days: null,
       default_retention_years: null,
+      error: "",
+    },
+    lifecycle_drift: {
+      status: "unknown",
+      issues: [],
+      matched_rule_ids: [],
+      checked_prefixes: [],
+      error: "",
+    },
+    version_reconciliation: {
+      status: "unknown",
+      current_version_count: 0,
+      noncurrent_version_count: 0,
+      delete_marker_count: 0,
+      checked_prefixes: [],
       error: "",
     },
     expired_artifact_count: 0,

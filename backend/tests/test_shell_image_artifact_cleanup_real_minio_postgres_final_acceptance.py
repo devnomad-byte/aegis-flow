@@ -7,18 +7,26 @@ import pytest
 from backend.app.audit.models import AuditLog
 from backend.app.core.settings import AppSettings
 from backend.app.iam.models import Account, Project
-from backend.app.tool_registry.image_artifact_cleanup import ShellImageArtifactCleanupService
+from backend.app.tool_registry.image_artifact_cleanup import (
+    ShellImageArtifactCleanupScheduler,
+    ShellImageArtifactCleanupService,
+)
 from backend.app.tool_registry.image_artifacts import (
     ShellImageArtifactObjectStore,
     ShellImageArtifactWriter,
     build_shell_image_artifact_object_store,
 )
 from backend.app.tool_registry.image_supply_chain import OciManifestDigestResult
-from backend.app.tool_registry.models import ToolRegistryImageAdmission
+from backend.app.tool_registry.models import (
+    ToolRegistryImageAdmission,
+    ToolRegistryImageArtifactCleanupRun,
+    ToolRegistryImageArtifactCleanupSchedule,
+)
 from backend.app.tool_registry.schemas import (
     ShellImageAdmissionResolveRequest,
     ShellImageArtifactCleanupRequest,
     ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
 )
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
@@ -97,10 +105,89 @@ def test_real_minio_postgres_shell_image_artifact_cleanup_final_acceptance() -> 
                 artifact_ref=artifact_ref,
             )
         )
+        asyncio.run(
+            _assert_history_and_schedule_final_acceptance(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+            )
+        )
     finally:
         if artifact_ref:
             asyncio.run(_delete_if_exists(object_store, artifact_ref))
         asyncio.run(_cleanup(session_factory, project_id=project_id, actor_id=actor_id))
+        asyncio.run(engine.dispose())
+
+
+def test_real_minio_postgres_shell_image_artifact_cleanup_lifecycle_history_v2() -> None:
+    require_real_database_and_s3_cleanup_final_acceptance()
+    settings = AppSettings()
+    project_id = uuid4()
+    other_project_id = uuid4()
+    actor_id = uuid4()
+    digest = "sha256:" + ("f" * 64)
+    artifact_ref = ""
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    object_store = build_shell_image_artifact_object_store(settings.s3)
+
+    asyncio.run(_seed(session_factory, project_id=project_id, actor_id=actor_id))
+    asyncio.run(_seed(session_factory, project_id=other_project_id, actor_id=actor_id))
+    try:
+        artifact_ref = asyncio.run(
+            _write_expired_artifact_and_record_admission(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                digest=digest,
+            )
+        )
+        scheduled = asyncio.run(
+            _run_scheduled_dry_run(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+            )
+        )
+        assert scheduled.trigger_type == "scheduled"
+        assert scheduled.dry_run is True
+        assert scheduled.candidate_count == 1
+        asyncio.run(object_store.head_artifact(artifact_ref))
+        failing_run = asyncio.run(
+            _run_cleanup(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                dry_run=False,
+            )
+        )
+        assert failing_run.deleted_count == 1
+        retry_run = asyncio.run(
+            _run_cleanup(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                dry_run=False,
+            )
+        )
+        assert retry_run.candidate_count == 0
+        asyncio.run(
+            _assert_project_scoped_history(
+                session_factory,
+                project_id=project_id,
+                other_project_id=other_project_id,
+            )
+        )
+    finally:
+        if artifact_ref:
+            asyncio.run(_delete_if_exists(object_store, artifact_ref))
+        asyncio.run(_cleanup(session_factory, project_id=project_id, actor_id=actor_id))
+        asyncio.run(_cleanup(session_factory, project_id=other_project_id, actor_id=actor_id))
         asyncio.run(engine.dispose())
 
 
@@ -185,6 +272,38 @@ async def _run_cleanup(
     return run
 
 
+async def _run_scheduled_dry_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    object_store: ShellImageArtifactObjectStore,
+    project_id: UUID,
+    actor_id: UUID,
+) -> ShellImageArtifactCleanupRunRead:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        await store.upsert_shell_image_artifact_cleanup_schedule(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactCleanupScheduleUpdateRequest(
+                enabled=True,
+                interval_hours=24,
+                limit=100,
+                next_run_at=now - timedelta(minutes=1),
+            ),
+        )
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        scheduler = ShellImageArtifactCleanupScheduler(
+            store=store,
+            object_store_factory=lambda _project_id: object_store,
+            clock=lambda: now,
+        )
+        runs = await scheduler.run_due(actor_id=actor_id, limit=10)
+    assert len(runs) == 1
+    return runs[0]
+
+
 async def _assert_deleted_descriptor(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -205,6 +324,52 @@ async def _assert_deleted_descriptor(
     assert "components" not in str(admission.evidence)
 
 
+async def _assert_history_and_schedule_final_acceptance(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    object_store: ShellImageArtifactObjectStore,
+    project_id: UUID,
+    actor_id: UUID,
+) -> None:
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        history = await store.list_shell_image_artifact_cleanup_runs(project_id, limit=10)
+        schedule = await store.upsert_shell_image_artifact_cleanup_schedule(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactCleanupScheduleUpdateRequest(enabled=True),
+        )
+    assert len(history) >= 2
+    assert history[0].project_id == project_id
+    assert history[0].retention_controls.bucket
+    assert history[0].lifecycle_drift.status in {"ready", "drift", "unknown"}
+    assert history[0].version_reconciliation.status in {
+        "ready",
+        "needs_reconciliation",
+        "unknown",
+    }
+    assert schedule.enabled is True
+    assert schedule.next_run_at is not None
+    assert object_store is not None
+
+
+async def _assert_project_scoped_history(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: UUID,
+    other_project_id: UUID,
+) -> None:
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        history = await store.list_shell_image_artifact_cleanup_runs(project_id, limit=20)
+        other_history = await store.list_shell_image_artifact_cleanup_runs(
+            other_project_id,
+            limit=20,
+        )
+    assert len(history) >= 3
+    assert other_history == []
+
+
 async def _seed(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -212,20 +377,22 @@ async def _seed(
     actor_id: UUID,
 ) -> None:
     async with session_factory() as session:
-        session.add(
-            Account(
-                id=actor_id,
-                email=f"shell-image-artifact-cleanup-{actor_id.hex[:12]}@example.com",
-                display_name="Shell Image Artifact Cleanup Final Acceptance",
+        if await session.get(Account, actor_id) is None:
+            session.add(
+                Account(
+                    id=actor_id,
+                    email=f"shell-image-artifact-cleanup-{actor_id.hex[:12]}@example.com",
+                    display_name="Shell Image Artifact Cleanup Final Acceptance",
+                )
             )
-        )
-        session.add(
-            Project(
-                id=project_id,
-                slug=f"shell-image-cleanup-{project_id.hex[:12]}",
-                name="Shell Image Artifact Cleanup",
+        if await session.get(Project, project_id) is None:
+            session.add(
+                Project(
+                    id=project_id,
+                    slug=f"shell-image-cleanup-{project_id.hex[:12]}",
+                    name="Shell Image Artifact Cleanup",
+                )
             )
-        )
         await session.commit()
 
 
@@ -247,6 +414,16 @@ async def _cleanup(
 ) -> None:
     async with session_factory() as session:
         await session.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
+        await session.execute(
+            delete(ToolRegistryImageArtifactCleanupSchedule).where(
+                ToolRegistryImageArtifactCleanupSchedule.project_id == project_id,
+            )
+        )
+        await session.execute(
+            delete(ToolRegistryImageArtifactCleanupRun).where(
+                ToolRegistryImageArtifactCleanupRun.project_id == project_id,
+            )
+        )
         await session.execute(
             delete(ToolRegistryImageAdmission).where(
                 ToolRegistryImageAdmission.project_id == project_id,

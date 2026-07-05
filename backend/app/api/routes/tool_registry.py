@@ -64,7 +64,11 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupGovernanceRead,
     ShellImageArtifactCleanupRequest,
     ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleDriftRead,
     ShellImageArtifactRetentionControlsRead,
+    ShellImageArtifactVersionReconciliationRead,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -1038,6 +1042,10 @@ async def get_shell_image_artifact_cleanup_governance(
             "retention_controls": _artifact_retention_controls_metadata(
                 governance.retention_controls
             ),
+            "lifecycle_drift": _artifact_lifecycle_drift_metadata(governance.lifecycle_drift),
+            "version_reconciliation": _artifact_version_reconciliation_metadata(
+                governance.version_reconciliation
+            ),
         },
     )
     return governance
@@ -1076,19 +1084,135 @@ async def run_shell_image_artifact_cleanup(
         actor_id=current_account.account_id,
         action="tool_registry.shell_image_artifact.cleanup_run",
         target_type="tool_registry_image_admission_artifact",
-        target_id=str(project_id),
+        target_id=str(run.id),
         risk_level="high" if not run.dry_run else "medium",
         metadata={
+            "run_id": str(run.id),
             "dry_run": run.dry_run,
+            "trigger_type": run.trigger_type,
+            "status": run.status,
             "candidate_count": run.candidate_count,
             "deleted_count": run.deleted_count,
             "failed_count": run.failed_count,
             "retained_count": run.retained_count,
             "retention_controls": _artifact_retention_controls_metadata(run.retention_controls),
+            "lifecycle_drift": _artifact_lifecycle_drift_metadata(run.lifecycle_drift),
+            "version_reconciliation": _artifact_version_reconciliation_metadata(
+                run.version_reconciliation
+            ),
             "artifacts": _artifact_cleanup_candidate_metadata(run.candidates),
         },
     )
     return run
+
+
+@router.get(
+    "/shell-images/artifacts/cleanup-runs",
+    response_model=list[ShellImageArtifactCleanupRunRead],
+)
+async def list_shell_image_artifact_cleanup_runs(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> list[ShellImageArtifactCleanupRunRead]:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    runs = await registry_store.list_shell_image_artifact_cleanup_runs(project_id, limit=20)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.cleanup_run.list",
+        target_type="tool_registry_image_admission_artifact_cleanup_run",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={
+            "run_count": len(runs),
+            "latest_run_id": str(runs[0].id) if runs else "",
+        },
+    )
+    return runs
+
+
+@router.get(
+    "/shell-images/artifacts/cleanup-schedule",
+    response_model=ShellImageArtifactCleanupScheduleRead,
+)
+async def get_shell_image_artifact_cleanup_schedule(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellImageArtifactCleanupScheduleRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    schedule = await registry_store.get_shell_image_artifact_cleanup_schedule(project_id)
+    result = schedule or ShellImageArtifactCleanupScheduleRead(project_id=project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.cleanup_schedule.get",
+        target_type="tool_registry_image_admission_artifact_cleanup_schedule",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={
+            "configured": result.configured,
+            "enabled": result.enabled,
+            "interval_hours": result.interval_hours,
+            "limit": result.limit,
+        },
+    )
+    return result
+
+
+@router.put(
+    "/shell-images/artifacts/cleanup-schedule",
+    response_model=ShellImageArtifactCleanupScheduleRead,
+)
+async def update_shell_image_artifact_cleanup_schedule(
+    project_id: UUID,
+    request: ShellImageArtifactCleanupScheduleUpdateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> ShellImageArtifactCleanupScheduleRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    schedule = await registry_store.upsert_shell_image_artifact_cleanup_schedule(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        request=request,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.cleanup_schedule.update",
+        target_type="tool_registry_image_admission_artifact_cleanup_schedule",
+        target_id=str(schedule.id or project_id),
+        risk_level="medium",
+        metadata={
+            "enabled": schedule.enabled,
+            "interval_hours": schedule.interval_hours,
+            "limit": schedule.limit,
+            "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else "",
+        },
+    )
+    return schedule
 
 
 @router.get(
@@ -1451,6 +1575,31 @@ def _artifact_retention_controls_metadata(
     }
 
 
+def _artifact_lifecycle_drift_metadata(
+    drift: ShellImageArtifactLifecycleDriftRead,
+) -> dict[str, object]:
+    return {
+        "status": drift.status,
+        "issues": drift.issues,
+        "matched_rule_ids": drift.matched_rule_ids,
+        "checked_prefixes": drift.checked_prefixes,
+        "error": drift.error,
+    }
+
+
+def _artifact_version_reconciliation_metadata(
+    reconciliation: ShellImageArtifactVersionReconciliationRead,
+) -> dict[str, object]:
+    return {
+        "status": reconciliation.status,
+        "current_version_count": reconciliation.current_version_count,
+        "noncurrent_version_count": reconciliation.noncurrent_version_count,
+        "delete_marker_count": reconciliation.delete_marker_count,
+        "checked_prefixes": reconciliation.checked_prefixes,
+        "error": reconciliation.error,
+    }
+
+
 def _artifact_cleanup_candidate_metadata(
     candidates: list[ShellImageArtifactCleanupCandidateRead],
 ) -> list[dict[str, object]]:
@@ -1458,8 +1607,8 @@ def _artifact_cleanup_candidate_metadata(
         {
             "admission_id": str(candidate.admission_id),
             "artifact_kind": candidate.artifact_kind,
-            "artifact_ref": candidate.artifact_ref,
-            "artifact_sha256": candidate.artifact_sha256,
+            "artifact_ref_hash": candidate.artifact_ref_hash,
+            "artifact_sha256_prefix": candidate.artifact_sha256_prefix,
             "artifact_retention_expires_at": candidate.artifact_retention_expires_at.isoformat(),
             "cleanup_status": candidate.cleanup_status,
         }

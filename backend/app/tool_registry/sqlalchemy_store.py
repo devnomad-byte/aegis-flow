@@ -43,6 +43,8 @@ from backend.app.tool_registry.models import (
     ToolRegistryCredentialRef,
     ToolRegistryEnvironment,
     ToolRegistryImageAdmission,
+    ToolRegistryImageArtifactCleanupRun,
+    ToolRegistryImageArtifactCleanupSchedule,
     ToolRegistryMcpServer,
     ToolRegistryNotationTrustCertificate,
     ToolRegistrySecretLease,
@@ -79,6 +81,13 @@ from backend.app.tool_registry.schemas import (
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
+    ShellImageArtifactCleanupCandidateRead,
+    ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleDriftRead,
+    ShellImageArtifactRetentionControlsRead,
+    ShellImageArtifactVersionReconciliationRead,
     ShellTemplateCreateRequest,
     ShellTemplatePolicySummary,
     ShellTemplatePreviewRequest,
@@ -439,6 +448,150 @@ class SqlAlchemyToolRegistryStore:
         await self._session.commit()
         await self._session.refresh(admission)
         return ShellImageAdmissionRead.model_validate(admission)
+
+    async def record_shell_image_artifact_cleanup_run(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        run: ShellImageArtifactCleanupRunRead,
+    ) -> ShellImageArtifactCleanupRunRead:
+        resource = ToolRegistryImageArtifactCleanupRun(
+            id=run.id,
+            project_id=project_id,
+            trigger_type=run.trigger_type,
+            status=run.status,
+            dry_run=run.dry_run,
+            candidate_count=run.candidate_count,
+            deleted_count=run.deleted_count,
+            failed_count=run.failed_count,
+            retained_count=run.retained_count,
+            retention_controls=run.retention_controls.model_dump(mode="json"),
+            lifecycle_drift=run.lifecycle_drift.model_dump(mode="json"),
+            version_reconciliation=run.version_reconciliation.model_dump(mode="json"),
+            candidates=[candidate.model_dump(mode="json") for candidate in run.candidates],
+            generated_at=run.generated_at,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(resource)
+        await self._session.commit()
+        await self._session.refresh(resource)
+        return _cleanup_run_read(resource)
+
+    async def list_shell_image_artifact_cleanup_runs(
+        self,
+        project_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[ShellImageArtifactCleanupRunRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryImageArtifactCleanupRun)
+            .where(ToolRegistryImageArtifactCleanupRun.project_id == project_id)
+            .order_by(
+                ToolRegistryImageArtifactCleanupRun.created_at.desc(),
+                ToolRegistryImageArtifactCleanupRun.id.desc(),
+            )
+            .limit(limit)
+        )
+        return [_cleanup_run_read(resource) for resource in result.all()]
+
+    async def get_shell_image_artifact_cleanup_schedule(
+        self,
+        project_id: UUID,
+    ) -> ShellImageArtifactCleanupScheduleRead | None:
+        schedule = await self._session.scalar(
+            select(ToolRegistryImageArtifactCleanupSchedule).where(
+                ToolRegistryImageArtifactCleanupSchedule.project_id == project_id,
+            )
+        )
+        if schedule is None:
+            return None
+        return _cleanup_schedule_read(schedule)
+
+    async def upsert_shell_image_artifact_cleanup_schedule(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageArtifactCleanupScheduleUpdateRequest,
+    ) -> ShellImageArtifactCleanupScheduleRead:
+        schedule = await self._session.scalar(
+            select(ToolRegistryImageArtifactCleanupSchedule).where(
+                ToolRegistryImageArtifactCleanupSchedule.project_id == project_id,
+            )
+        )
+        now = datetime.now(UTC)
+        if schedule is None:
+            schedule = ToolRegistryImageArtifactCleanupSchedule(
+                project_id=project_id,
+                created_by=actor_id,
+                updated_by=actor_id,
+            )
+            self._session.add(schedule)
+        schedule.enabled = request.enabled
+        schedule.interval_hours = request.interval_hours
+        schedule.limit = request.limit
+        schedule.next_run_at = request.next_run_at or now + timedelta(hours=request.interval_hours)
+        schedule.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(schedule)
+        return _cleanup_schedule_read(schedule)
+
+    async def list_due_shell_image_artifact_cleanup_schedules(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[ShellImageArtifactCleanupScheduleRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryImageArtifactCleanupSchedule)
+            .where(
+                ToolRegistryImageArtifactCleanupSchedule.enabled.is_(True),
+                ToolRegistryImageArtifactCleanupSchedule.next_run_at.is_not(None),
+                ToolRegistryImageArtifactCleanupSchedule.next_run_at <= now,
+            )
+            .order_by(
+                ToolRegistryImageArtifactCleanupSchedule.next_run_at,
+                ToolRegistryImageArtifactCleanupSchedule.id,
+            )
+            .limit(limit)
+        )
+        return [_cleanup_schedule_read(resource) for resource in result.all()]
+
+    async def mark_shell_image_artifact_cleanup_schedule_run(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        actor_id: UUID,
+        run_id: UUID,
+        completed_at: datetime,
+    ) -> ShellImageArtifactCleanupScheduleRead:
+        schedule = await self._session.scalar(
+            select(ToolRegistryImageArtifactCleanupSchedule).where(
+                ToolRegistryImageArtifactCleanupSchedule.project_id == project_id,
+                ToolRegistryImageArtifactCleanupSchedule.id == schedule_id,
+            )
+        )
+        if schedule is None:
+            raise ToolRegistryResourceNotFoundError("artifact cleanup schedule not found")
+        run_project_id = await self._session.scalar(
+            select(ToolRegistryImageArtifactCleanupRun.project_id).where(
+                ToolRegistryImageArtifactCleanupRun.id == run_id,
+            )
+        )
+        if run_project_id != project_id:
+            raise ToolRegistryResourceNotFoundError("artifact cleanup run not found")
+        schedule.last_run_id = run_id
+        schedule.last_run_at = completed_at
+        schedule.next_run_at = completed_at + timedelta(hours=schedule.interval_hours)
+        schedule.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(schedule)
+        return _cleanup_schedule_read(schedule)
 
     async def upsert_shell_image_admission_policy(
         self,
@@ -1573,6 +1726,77 @@ def _notation_trust_certificate_object_key(
         "notation-trust/"
         f"{project_id}/{store_type}/{store_name}/{certificate_ref}/"
         f"v{version}-{artifact_sha256[:12]}-{digest_prefix}.pem"
+    )
+
+
+def _cleanup_run_read(
+    resource: ToolRegistryImageArtifactCleanupRun,
+) -> ShellImageArtifactCleanupRunRead:
+    return ShellImageArtifactCleanupRunRead(
+        id=resource.id,
+        project_id=resource.project_id,
+        trigger_type=resource.trigger_type,
+        status=resource.status,
+        dry_run=resource.dry_run,
+        candidate_count=resource.candidate_count,
+        deleted_count=resource.deleted_count,
+        failed_count=resource.failed_count,
+        retained_count=resource.retained_count,
+        retention_controls=ShellImageArtifactRetentionControlsRead.model_validate(
+            resource.retention_controls
+        ),
+        lifecycle_drift=ShellImageArtifactLifecycleDriftRead.model_validate(
+            resource.lifecycle_drift
+        ),
+        version_reconciliation=ShellImageArtifactVersionReconciliationRead.model_validate(
+            resource.version_reconciliation
+        ),
+        candidates=[
+            ShellImageArtifactCleanupCandidateRead.model_validate(
+                _cleanup_candidate_record(candidate)
+            )
+            for candidate in resource.candidates
+        ],
+        generated_at=resource.generated_at,
+        started_at=resource.started_at,
+        completed_at=resource.completed_at,
+        created_by=resource.created_by,
+        updated_by=resource.updated_by,
+        created_at=resource.created_at,
+        updated_at=resource.updated_at,
+    )
+
+
+def _cleanup_candidate_record(candidate: object) -> object:
+    if not isinstance(candidate, dict):
+        return candidate
+    record = dict(candidate)
+    artifact_ref = record.get("artifact_ref")
+    artifact_sha256 = record.get("artifact_sha256")
+    if "artifact_ref_hash" not in record and isinstance(artifact_ref, str):
+        record["artifact_ref_hash"] = hashlib.sha256(artifact_ref.encode("utf-8")).hexdigest()
+    if "artifact_sha256_prefix" not in record and isinstance(artifact_sha256, str):
+        record["artifact_sha256_prefix"] = artifact_sha256[:12]
+    return record
+
+
+def _cleanup_schedule_read(
+    resource: ToolRegistryImageArtifactCleanupSchedule,
+) -> ShellImageArtifactCleanupScheduleRead:
+    return ShellImageArtifactCleanupScheduleRead(
+        id=resource.id,
+        configured=True,
+        project_id=resource.project_id,
+        enabled=resource.enabled,
+        interval_hours=resource.interval_hours,
+        limit=resource.limit,
+        next_run_at=resource.next_run_at,
+        last_run_id=resource.last_run_id,
+        last_run_at=resource.last_run_at,
+        created_by=resource.created_by,
+        updated_by=resource.updated_by,
+        created_at=resource.created_at,
+        updated_at=resource.updated_at,
     )
 
 

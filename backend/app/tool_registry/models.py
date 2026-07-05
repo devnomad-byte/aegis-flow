@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -251,6 +251,69 @@ class ToolRegistryNotationTrustCertificate(Base, TimestampMixin):
     certificate_count: Mapped[int] = mapped_column(nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryImageArtifactCleanupRun(Base, TimestampMixin):
+    __tablename__ = "tool_registry_image_artifact_cleanup_runs"
+    __table_args__ = (
+        Index(
+            "ix_tool_image_artifact_cleanup_runs_project_created_at",
+            "project_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="succeeded")
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    candidate_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    deleted_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    retained_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    retention_controls: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    lifecycle_drift: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    version_reconciliation: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
+class ToolRegistryImageArtifactCleanupSchedule(Base, TimestampMixin):
+    __tablename__ = "tool_registry_image_artifact_cleanup_schedules"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            name="uq_tool_image_artifact_cleanup_schedule_project",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interval_hours: Mapped[int] = mapped_column(nullable=False, default=24)
+    limit: Mapped[int] = mapped_column(nullable=False, default=100)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("tool_registry_image_artifact_cleanup_runs.id"),
+        nullable=True,
+        index=True,
+    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

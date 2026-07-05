@@ -6,16 +6,21 @@ import {
   getShellImageAdmissionGovernance,
   getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
+  getShellImageArtifactCleanupSchedule,
+  listShellImageArtifactCleanupRuns,
   listNotationTrustCertificates,
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
   runShellImageArtifactCleanup,
+  shellImageArtifactCleanupRunsQueryKey,
+  shellImageArtifactCleanupScheduleQueryKey,
   shellImageArtifactGovernanceQueryKey,
   shellImageGovernanceQueryKey,
   shellTemplatesQueryKey,
   shellImagePolicyQueryKey,
+  updateShellImageArtifactCleanupSchedule,
   updateShellImageAdmissionPolicy,
 } from "./toolRegistryApi";
 
@@ -122,6 +127,21 @@ describe("toolRegistryApi", () => {
               default_retention_years: null,
               error: "",
             },
+            lifecycle_drift: {
+              status: "ready",
+              issues: [],
+              matched_rule_ids: ["shell-image-admission-expiration"],
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
+            version_reconciliation: {
+              status: "ready",
+              current_version_count: 1,
+              noncurrent_version_count: 0,
+              delete_marker_count: 0,
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
             expired_artifact_count: 1,
             retained_artifact_count: 2,
             deleted_artifact_count: 0,
@@ -151,8 +171,107 @@ describe("toolRegistryApi", () => {
               default_retention_years: null,
               error: "",
             },
+            lifecycle_drift: {
+              status: "ready",
+              issues: [],
+              matched_rule_ids: ["shell-image-admission-expiration"],
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
+            version_reconciliation: {
+              status: "ready",
+              current_version_count: 1,
+              noncurrent_version_count: 0,
+              delete_marker_count: 0,
+              checked_prefixes: ["shell-image-admissions/"],
+              error: "",
+            },
             candidates: [],
             generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && !init) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "run-1",
+              project_id: "ops-command",
+              trigger_type: "scheduled",
+              status: "succeeded",
+              dry_run: true,
+              candidate_count: 1,
+              deleted_count: 0,
+              failed_count: 0,
+              retained_count: 2,
+              retention_controls: {
+                bucket: "capievo",
+                versioning_status: "Enabled",
+                object_lock_enabled: true,
+                worm_capable: true,
+                default_retention_configured: true,
+                default_retention_mode: "GOVERNANCE",
+                default_retention_days: 30,
+                default_retention_years: null,
+                error: "",
+              },
+              lifecycle_drift: { status: "ready", issues: [], matched_rule_ids: [], checked_prefixes: [], error: "" },
+              version_reconciliation: {
+                status: "ready",
+                current_version_count: 1,
+                noncurrent_version_count: 0,
+                delete_marker_count: 0,
+                checked_prefixes: ["shell-image-admissions/"],
+                error: "",
+              },
+              candidates: [],
+              generated_at: "2026-07-05T00:00:00Z",
+              started_at: "2026-07-05T00:00:00Z",
+              completed_at: "2026-07-05T00:00:01Z",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-05T00:00:00Z",
+              updated_at: "2026-07-05T00:00:01Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && !init) {
+        return new Response(
+          JSON.stringify({
+            id: "schedule-1",
+            project_id: "ops-command",
+            enabled: true,
+            interval_hours: 24,
+            limit: 100,
+            next_run_at: "2026-07-06T00:00:00Z",
+            last_run_id: "run-1",
+            last_run_at: "2026-07-05T00:00:00Z",
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && init?.method === "PUT") {
+        return new Response(
+          JSON.stringify({
+            id: "schedule-1",
+            project_id: "ops-command",
+            enabled: true,
+            interval_hours: 12,
+            limit: 25,
+            next_run_at: "2026-07-05T12:00:00Z",
+            last_run_id: null,
+            last_run_at: null,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
         );
@@ -290,6 +409,21 @@ describe("toolRegistryApi", () => {
     await expect(
       runShellImageArtifactCleanup("ops-command", { dry_run: false, limit: 10 }, fetcher),
     ).resolves.toMatchObject({ deleted_count: 1, dry_run: false });
+    await expect(listShellImageArtifactCleanupRuns("ops-command", fetcher)).resolves.toMatchObject([
+      { id: "run-1", trigger_type: "scheduled", candidate_count: 1 },
+    ]);
+    await expect(getShellImageArtifactCleanupSchedule("ops-command", fetcher)).resolves.toMatchObject({
+      enabled: true,
+      interval_hours: 24,
+      last_run_id: "run-1",
+    });
+    await expect(
+      updateShellImageArtifactCleanupSchedule(
+        "ops-command",
+        { enabled: true, interval_hours: 12, limit: 25 },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ enabled: true, interval_hours: 12, limit: 25 });
     await expect(listNotationTrustCertificates("ops-command", fetcher)).resolves.toMatchObject([
       { store_type: "ca", store_name: "aegis-flow", certificate_ref: "root" },
     ]);
@@ -348,6 +482,18 @@ describe("toolRegistryApi", () => {
       "tool-registry",
       "shell-image-artifact-governance",
     ]);
+    expect(shellImageArtifactCleanupRunsQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-artifact-cleanup-runs",
+    ]);
+    expect(shellImageArtifactCleanupScheduleQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-artifact-cleanup-schedule",
+    ]);
     expect(notationTrustCertificatesQueryKey("ops-command")).toEqual([
       "project",
       "ops-command",
@@ -375,6 +521,13 @@ describe("toolRegistryApi", () => {
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
       expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-schedule",
+      expect.objectContaining({ method: "PUT" }),
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",

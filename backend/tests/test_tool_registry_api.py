@@ -62,6 +62,9 @@ from backend.app.tool_registry.schemas import (
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
+    ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
     ShellTemplateCreateRequest,
     ShellTemplatePolicySummary,
     ShellTemplatePreviewRequest,
@@ -123,6 +126,10 @@ class InMemoryToolRegistryStore:
         self.shell_templates: dict[UUID, list[ShellTemplateRead]] = {}
         self.image_admissions: dict[UUID, list[ShellImageAdmissionRead]] = {}
         self.image_policies: dict[UUID, ShellImageAdmissionPolicyRead] = {}
+        self.image_artifact_cleanup_runs: dict[UUID, list[ShellImageArtifactCleanupRunRead]] = {}
+        self.image_artifact_cleanup_schedules: dict[
+            UUID, ShellImageArtifactCleanupScheduleRead
+        ] = {}
         self.notation_trust_certificates: dict[UUID, list[NotationTrustCertificateRead]] = {}
         self.fail_next_sync = False
 
@@ -781,6 +788,91 @@ class InMemoryToolRegistryStore:
         if updated is None:
             raise ToolRegistryResourceNotFoundError("image admission not found")
         self.image_admissions[project_id] = next_admissions
+        return updated
+
+    async def record_shell_image_artifact_cleanup_run(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        run: ShellImageArtifactCleanupRunRead,
+    ) -> ShellImageArtifactCleanupRunRead:
+        self.image_artifact_cleanup_runs.setdefault(project_id, []).insert(0, run)
+        return run
+
+    async def list_shell_image_artifact_cleanup_runs(
+        self,
+        project_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[ShellImageArtifactCleanupRunRead]:
+        return self.image_artifact_cleanup_runs.get(project_id, [])[:limit]
+
+    async def get_shell_image_artifact_cleanup_schedule(
+        self,
+        project_id: UUID,
+    ) -> ShellImageArtifactCleanupScheduleRead | None:
+        return self.image_artifact_cleanup_schedules.get(project_id)
+
+    async def upsert_shell_image_artifact_cleanup_schedule(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: ShellImageArtifactCleanupScheduleUpdateRequest,
+    ) -> ShellImageArtifactCleanupScheduleRead:
+        now = datetime.now(UTC)
+        existing = self.image_artifact_cleanup_schedules.get(project_id)
+        schedule = ShellImageArtifactCleanupScheduleRead(
+            id=existing.id if existing else uuid4(),
+            project_id=project_id,
+            enabled=request.enabled,
+            interval_hours=request.interval_hours,
+            limit=request.limit,
+            next_run_at=request.next_run_at or now + timedelta(hours=request.interval_hours),
+            last_run_id=existing.last_run_id if existing else None,
+            last_run_at=existing.last_run_at if existing else None,
+            created_by=existing.created_by if existing else actor_id,
+            updated_by=actor_id,
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        self.image_artifact_cleanup_schedules[project_id] = schedule
+        return schedule
+
+    async def list_due_shell_image_artifact_cleanup_schedules(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[ShellImageArtifactCleanupScheduleRead]:
+        schedules = [
+            schedule
+            for schedule in self.image_artifact_cleanup_schedules.values()
+            if schedule.enabled and schedule.next_run_at is not None and schedule.next_run_at <= now
+        ]
+        return schedules[:limit]
+
+    async def mark_shell_image_artifact_cleanup_schedule_run(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        actor_id: UUID,
+        run_id: UUID,
+        completed_at: datetime,
+    ) -> ShellImageArtifactCleanupScheduleRead:
+        schedule = self.image_artifact_cleanup_schedules[project_id]
+        updated = schedule.model_copy(
+            update={
+                "last_run_id": run_id,
+                "last_run_at": completed_at,
+                "next_run_at": completed_at + timedelta(hours=schedule.interval_hours),
+                "updated_by": actor_id,
+                "updated_at": completed_at,
+            }
+        )
+        self.image_artifact_cleanup_schedules[project_id] = updated
         return updated
 
     async def upsert_shell_image_admission_policy(
@@ -2379,6 +2471,22 @@ def test_tool_registry_shell_image_artifact_cleanup_dry_run_and_execute() -> Non
         object_lock_enabled=True,
         default_retention_mode="GOVERNANCE",
         default_retention_days=30,
+        lifecycle_rules=[
+            {
+                "ID": "shell-image-admission-expiration",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "shell-image-admissions/"},
+                "Expiration": {"Days": 30},
+                "NoncurrentVersionExpiration": {"NoncurrentDays": 30},
+            }
+        ],
+        version_reconciliation={
+            "shell-image-admissions/": {
+                "current_version_count": 1,
+                "noncurrent_version_count": 0,
+                "delete_marker_count": 0,
+            }
+        },
     )
     object_store.objects[expired_ref] = StoredShellImageArtifact(
         body=b'{"components":[{"name":"secret-package"}]}',
@@ -2452,12 +2560,44 @@ def test_tool_registry_shell_image_artifact_cleanup_dry_run_and_execute() -> Non
         "default_retention_years": None,
         "error": "",
     }
+    assert governance.json()["lifecycle_drift"]["status"] == "ready"
+    assert governance.json()["version_reconciliation"]["status"] == "ready"
     assert governance.json()["expired_artifact_count"] == 1
     assert governance.json()["candidates"] == []
     assert dry_run.status_code == 200
+    assert dry_run.json()["id"]
+    assert dry_run.json()["project_id"] == str(project.id)
+    assert dry_run.json()["trigger_type"] == "manual"
+    assert dry_run.json()["status"] == "succeeded"
     assert dry_run.json()["dry_run"] is True
     assert dry_run.json()["candidate_count"] == 1
+    assert dry_run.json()["candidates"][0]["artifact_ref_hash"]
+    assert dry_run.json()["candidates"][0]["artifact_sha256_prefix"] == "a" * 12
+    assert "artifact_ref" not in dry_run.json()["candidates"][0]
+    assert "artifact_sha256" not in dry_run.json()["candidates"][0]
     assert expired_ref in object_store.objects
+    history = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs"
+    )
+    assert history.status_code == 200
+    assert history.json()[0]["id"] == dry_run.json()["id"]
+    assert history.json()[0]["lifecycle_drift"]["status"] == "ready"
+    assert "artifact_ref" not in history.json()[0]["candidates"][0]
+    assert "artifact_sha256" not in history.json()[0]["candidates"][0]
+    schedule = client.put(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-schedule",
+        json={"enabled": True, "interval_hours": 12, "limit": 25},
+    )
+    assert schedule.status_code == 200
+    assert schedule.json()["enabled"] is True
+    assert schedule.json()["interval_hours"] == 12
+    assert schedule.json()["limit"] == 25
+    assert schedule.json()["next_run_at"]
+    fetched_schedule = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-schedule"
+    )
+    assert fetched_schedule.status_code == 200
+    assert fetched_schedule.json()["enabled"] is True
     execute = client.post(
         f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs",
         json={"dry_run": False, "limit": 10},
@@ -2465,18 +2605,48 @@ def test_tool_registry_shell_image_artifact_cleanup_dry_run_and_execute() -> Non
     assert execute.status_code == 200
     assert execute.json()["deleted_count"] == 1
     assert execute.json()["candidates"][0]["cleanup_status"] == "deleted"
+    assert "artifact_ref" not in execute.json()["candidates"][0]
+    assert "artifact_sha256" not in execute.json()["candidates"][0]
     assert expired_ref not in object_store.objects
     updated = registry_store.image_admissions[project.id][0].evidence["sbom"]
     assert updated["artifact_cleanup_status"] == "deleted"
-    assert [event["action"] for event in audit_store.events][-3:] == [
-        "tool_registry.shell_image_artifact.governance",
-        "tool_registry.shell_image_artifact.cleanup_run",
-        "tool_registry.shell_image_artifact.cleanup_run",
-    ]
+    actions = [event["action"] for event in audit_store.events]
+    assert "tool_registry.shell_image_artifact.governance" in actions
+    assert actions.count("tool_registry.shell_image_artifact.cleanup_run") == 2
+    assert "tool_registry.shell_image_artifact.cleanup_run.list" in actions
+    assert "tool_registry.shell_image_artifact.cleanup_schedule.update" in actions
+    assert "tool_registry.shell_image_artifact.cleanup_schedule.get" in actions
     rendered = governance.text + dry_run.text + execute.text + repr(audit_store.events)
     assert "raw_sbom" not in rendered
     assert "secret-package" not in rendered
+    assert expired_ref not in rendered
+    assert "a" * 64 not in rendered
     assert expired_ref not in governance.text
+
+
+def test_tool_registry_shell_image_artifact_cleanup_history_is_project_scoped() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    other_project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project, other_project]),
+        registry_store=registry_store,
+        audit_store=InMemoryAuditEventStore(),
+        artifact_object_store=InMemoryShellImageArtifactObjectStore(bucket="capievo"),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs",
+        json={"dry_run": True, "limit": 10},
+    )
+    other_history = client.get(
+        f"/api/v1/projects/{other_project.id}/tool-registry/shell-images/artifacts/cleanup-runs"
+    )
+
+    assert response.status_code == 200
+    assert other_history.status_code == 200
+    assert other_history.json() == []
 
 
 def test_tool_registry_shell_image_artifact_cleanup_requires_write_permission() -> None:

@@ -38,6 +38,27 @@ class ShellImageArtifactRetentionControls:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ShellImageArtifactLifecycleControls:
+    bucket: str
+    checked_prefixes: list[str]
+    lifecycle_configured: bool = False
+    matched_rule_ids: list[str] | None = None
+    noncurrent_version_expiration_configured: bool = False
+    delete_marker_expiration_configured: bool = False
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ShellImageArtifactVersionReconciliation:
+    bucket: str
+    checked_prefixes: list[str]
+    current_version_count: int = 0
+    noncurrent_version_count: int = 0
+    delete_marker_count: int = 0
+    error: str = ""
+
+
 class ShellImageArtifactObjectStore(Protocol):
     async def put_artifact(
         self,
@@ -61,6 +82,18 @@ class ShellImageArtifactObjectStore(Protocol):
     async def inspect_retention_controls(self) -> ShellImageArtifactRetentionControls:
         raise NotImplementedError
 
+    async def inspect_lifecycle_controls(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactLifecycleControls:
+        raise NotImplementedError
+
+    async def inspect_version_reconciliation(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactVersionReconciliation:
+        raise NotImplementedError
+
 
 class InMemoryShellImageArtifactObjectStore:
     def __init__(
@@ -73,6 +106,10 @@ class InMemoryShellImageArtifactObjectStore:
         default_retention_days: int | None = None,
         default_retention_years: int | None = None,
         retention_error: str = "",
+        lifecycle_rules: list[dict[str, Any]] | None = None,
+        lifecycle_error: str = "",
+        version_reconciliation: dict[str, dict[str, int]] | None = None,
+        version_reconciliation_error: str = "",
     ) -> None:
         self.bucket = bucket
         self.versioning_status = versioning_status
@@ -81,6 +118,10 @@ class InMemoryShellImageArtifactObjectStore:
         self.default_retention_days = default_retention_days
         self.default_retention_years = default_retention_years
         self.retention_error = retention_error
+        self.lifecycle_rules = lifecycle_rules or []
+        self.lifecycle_error = lifecycle_error
+        self.version_reconciliation = version_reconciliation or {}
+        self.version_reconciliation_error = version_reconciliation_error
         self.objects: dict[str, StoredShellImageArtifact] = {}
 
     async def put_artifact(
@@ -132,6 +173,80 @@ class InMemoryShellImageArtifactObjectStore:
             default_retention_days=self.default_retention_days,
             default_retention_years=self.default_retention_years,
             error=self.retention_error,
+        )
+
+    async def inspect_lifecycle_controls(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactLifecycleControls:
+        if self.lifecycle_error:
+            return ShellImageArtifactLifecycleControls(
+                bucket=self.bucket,
+                checked_prefixes=prefixes,
+                error=self.lifecycle_error,
+            )
+        matched_rule_ids: list[str] = []
+        noncurrent_configured = False
+        delete_marker_configured = False
+        for rule in self.lifecycle_rules:
+            rule_prefix = _lifecycle_rule_prefix(rule)
+            if str(rule.get("Status") or "") != "Enabled":
+                continue
+            if not _lifecycle_rule_matches_prefixes(rule_prefix, prefixes):
+                continue
+            matched_rule_ids.append(str(rule.get("ID") or "unnamed"))
+            noncurrent_configured = noncurrent_configured or isinstance(
+                rule.get("NoncurrentVersionExpiration"),
+                dict,
+            )
+            expiration = rule.get("Expiration")
+            if isinstance(expiration, dict):
+                delete_marker_configured = (
+                    delete_marker_configured
+                    or bool(expiration.get("ExpiredObjectDeleteMarker"))
+                    or isinstance(expiration.get("Days"), int)
+                )
+        return ShellImageArtifactLifecycleControls(
+            bucket=self.bucket,
+            checked_prefixes=prefixes,
+            lifecycle_configured=bool(matched_rule_ids),
+            matched_rule_ids=matched_rule_ids,
+            noncurrent_version_expiration_configured=noncurrent_configured,
+            delete_marker_expiration_configured=delete_marker_configured,
+        )
+
+    async def inspect_version_reconciliation(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactVersionReconciliation:
+        if self.version_reconciliation_error:
+            return ShellImageArtifactVersionReconciliation(
+                bucket=self.bucket,
+                checked_prefixes=prefixes,
+                error=self.version_reconciliation_error,
+            )
+        current = 0
+        noncurrent = 0
+        delete_markers = 0
+        for prefix in prefixes:
+            configured = self.version_reconciliation.get(prefix)
+            if configured is None:
+                matching_refs = [
+                    artifact_ref
+                    for artifact_ref in self.objects
+                    if artifact_ref.startswith(f"s3://{self.bucket}/{prefix}")
+                ]
+                current += len(matching_refs)
+                continue
+            current += int(configured.get("current_version_count", 0))
+            noncurrent += int(configured.get("noncurrent_version_count", 0))
+            delete_markers += int(configured.get("delete_marker_count", 0))
+        return ShellImageArtifactVersionReconciliation(
+            bucket=self.bucket,
+            checked_prefixes=prefixes,
+            current_version_count=current,
+            noncurrent_version_count=noncurrent,
+            delete_marker_count=delete_markers,
         )
 
 
@@ -250,6 +365,11 @@ class S3ShellImageArtifactObjectStore:
                     Bucket=self._settings.bucket
                 )
             except ClientError as exc:
+                if _s3_error_code(exc) == "ObjectLockConfigurationNotFoundError":
+                    return ShellImageArtifactRetentionControls(
+                        bucket=self._settings.bucket,
+                        versioning_status=versioning_status,
+                    )
                 return ShellImageArtifactRetentionControls(
                     bucket=self._settings.bucket,
                     versioning_status=versioning_status,
@@ -276,6 +396,136 @@ class S3ShellImageArtifactObjectStore:
             default_retention_mode=default_retention.get("Mode"),
             default_retention_days=default_retention.get("Days"),
             default_retention_years=default_retention.get("Years"),
+        )
+
+    async def inspect_lifecycle_controls(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactLifecycleControls:
+        import aioboto3
+        from botocore.exceptions import ClientError
+
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            try:
+                response = await client.get_bucket_lifecycle_configuration(
+                    Bucket=self._settings.bucket
+                )
+            except ClientError as exc:
+                if _s3_error_code(exc) == "NoSuchLifecycleConfiguration":
+                    return ShellImageArtifactLifecycleControls(
+                        bucket=self._settings.bucket,
+                        checked_prefixes=prefixes,
+                    )
+                return ShellImageArtifactLifecycleControls(
+                    bucket=self._settings.bucket,
+                    checked_prefixes=prefixes,
+                    error=_public_s3_error(exc),
+                )
+        matched_rule_ids: list[str] = []
+        noncurrent_configured = False
+        delete_marker_configured = False
+        for rule in response.get("Rules", []):
+            if not isinstance(rule, dict) or rule.get("Status") != "Enabled":
+                continue
+            rule_prefix = _lifecycle_rule_prefix(rule)
+            if not _lifecycle_rule_matches_prefixes(rule_prefix, prefixes):
+                continue
+            matched_rule_ids.append(str(rule.get("ID") or "unnamed"))
+            noncurrent_configured = noncurrent_configured or isinstance(
+                rule.get("NoncurrentVersionExpiration"),
+                dict,
+            )
+            expiration = rule.get("Expiration")
+            if isinstance(expiration, dict):
+                delete_marker_configured = (
+                    delete_marker_configured
+                    or bool(expiration.get("ExpiredObjectDeleteMarker"))
+                    or isinstance(expiration.get("Days"), int)
+                )
+        return ShellImageArtifactLifecycleControls(
+            bucket=self._settings.bucket,
+            checked_prefixes=prefixes,
+            lifecycle_configured=bool(matched_rule_ids),
+            matched_rule_ids=matched_rule_ids,
+            noncurrent_version_expiration_configured=noncurrent_configured,
+            delete_marker_expiration_configured=delete_marker_configured,
+        )
+
+    async def inspect_version_reconciliation(
+        self,
+        prefixes: list[str],
+    ) -> ShellImageArtifactVersionReconciliation:
+        import aioboto3
+        from botocore.exceptions import ClientError
+
+        current_count = 0
+        noncurrent_count = 0
+        delete_marker_count = 0
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            try:
+                for prefix in prefixes:
+                    key_marker: str | None = None
+                    version_id_marker: str | None = None
+                    while True:
+                        kwargs: dict[str, object] = {
+                            "Bucket": self._settings.bucket,
+                            "Prefix": prefix,
+                            "MaxKeys": 1000,
+                        }
+                        if key_marker:
+                            kwargs["KeyMarker"] = key_marker
+                        if version_id_marker:
+                            kwargs["VersionIdMarker"] = version_id_marker
+                        response = await client.list_object_versions(**kwargs)
+                        for version in response.get("Versions", []):
+                            if not isinstance(version, dict):
+                                continue
+                            if version.get("IsLatest") is True:
+                                current_count += 1
+                            else:
+                                noncurrent_count += 1
+                        delete_marker_count += sum(
+                            1
+                            for marker in response.get("DeleteMarkers", [])
+                            if isinstance(marker, dict)
+                        )
+                        if not response.get("IsTruncated"):
+                            break
+                        key_marker = response.get("NextKeyMarker")
+                        version_id_marker = response.get("NextVersionIdMarker")
+                        if not isinstance(key_marker, str):
+                            break
+                        if version_id_marker is not None and not isinstance(
+                            version_id_marker,
+                            str,
+                        ):
+                            version_id_marker = None
+            except ClientError as exc:
+                return ShellImageArtifactVersionReconciliation(
+                    bucket=self._settings.bucket,
+                    checked_prefixes=prefixes,
+                    error=_public_s3_error(exc),
+                )
+        return ShellImageArtifactVersionReconciliation(
+            bucket=self._settings.bucket,
+            checked_prefixes=prefixes,
+            current_version_count=current_count,
+            noncurrent_version_count=noncurrent_count,
+            delete_marker_count=delete_marker_count,
         )
 
 
@@ -392,8 +642,33 @@ def _default_retention_configured(
     )
 
 
+def _lifecycle_rule_prefix(rule: dict[str, Any]) -> str:
+    filter_value = rule.get("Filter")
+    if isinstance(filter_value, dict):
+        prefix = filter_value.get("Prefix")
+        if isinstance(prefix, str):
+            return prefix
+        and_value = filter_value.get("And")
+        if isinstance(and_value, dict) and isinstance(and_value.get("Prefix"), str):
+            return str(and_value["Prefix"])
+    prefix = rule.get("Prefix")
+    if isinstance(prefix, str):
+        return prefix
+    return ""
+
+
+def _lifecycle_rule_matches_prefixes(rule_prefix: str, prefixes: list[str]) -> bool:
+    return any(
+        prefix.startswith(rule_prefix) or rule_prefix.startswith(prefix) for prefix in prefixes
+    )
+
+
 def _public_s3_error(exc: Exception) -> str:
+    code = _s3_error_code(exc)
+    return code[:120]
+
+
+def _s3_error_code(exc: Exception) -> str:
     response = getattr(exc, "response", {})
     error = response.get("Error", {}) if isinstance(response, dict) else {}
-    code = str(error.get("Code") or exc.__class__.__name__)
-    return code[:120]
+    return str(error.get("Code") or exc.__class__.__name__)

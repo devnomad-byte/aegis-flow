@@ -106,12 +106,29 @@ export type ShellImageArtifactRetentionControls = {
   error: string;
 };
 
+export type ShellImageArtifactLifecycleDrift = {
+  status: "ready" | "drift" | "unknown";
+  issues: string[];
+  matched_rule_ids: string[];
+  checked_prefixes: string[];
+  error: string;
+};
+
+export type ShellImageArtifactVersionReconciliation = {
+  status: "ready" | "needs_reconciliation" | "unknown";
+  current_version_count: number;
+  noncurrent_version_count: number;
+  delete_marker_count: number;
+  checked_prefixes: string[];
+  error: string;
+};
+
 export type ShellImageArtifactCleanupCandidate = {
   admission_id: string;
   evidence_key: string;
   artifact_kind: string;
-  artifact_ref: string;
-  artifact_sha256: string;
+  artifact_ref_hash: string;
+  artifact_sha256_prefix: string;
   artifact_size_bytes: number;
   artifact_retention_days?: number | null;
   artifact_retention_expires_at: string;
@@ -121,6 +138,8 @@ export type ShellImageArtifactCleanupCandidate = {
 
 export type ShellImageArtifactCleanupGovernance = {
   retention_controls: ShellImageArtifactRetentionControls;
+  lifecycle_drift: ShellImageArtifactLifecycleDrift;
+  version_reconciliation: ShellImageArtifactVersionReconciliation;
   expired_artifact_count: number;
   retained_artifact_count: number;
   deleted_artifact_count: number;
@@ -135,14 +154,49 @@ export type ShellImageArtifactCleanupRequest = {
 };
 
 export type ShellImageArtifactCleanupRun = {
+  id: string;
+  project_id: string;
+  trigger_type: "manual" | "scheduled";
+  status: "succeeded" | "partial" | "failed";
   dry_run: boolean;
   candidate_count: number;
   deleted_count: number;
   failed_count: number;
   retained_count: number;
   retention_controls: ShellImageArtifactRetentionControls;
+  lifecycle_drift: ShellImageArtifactLifecycleDrift;
+  version_reconciliation: ShellImageArtifactVersionReconciliation;
   candidates: ShellImageArtifactCleanupCandidate[];
   generated_at: string;
+  started_at: string;
+  completed_at: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ShellImageArtifactCleanupSchedule = {
+  id: string | null;
+  configured: boolean;
+  project_id: string;
+  enabled: boolean;
+  interval_hours: number;
+  limit: number;
+  next_run_at?: string | null;
+  last_run_id?: string | null;
+  last_run_at?: string | null;
+  created_by?: string | null;
+  updated_by?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ShellImageArtifactCleanupScheduleUpdateRequest = Pick<
+  ShellImageArtifactCleanupSchedule,
+  "enabled" | "interval_hours" | "limit"
+> & {
+  next_run_at?: string | null;
 };
 
 export type NotationTrustCertificate = {
@@ -246,6 +300,12 @@ export const shellImageGovernanceQueryKey = (projectId: string) =>
 export const shellImageArtifactGovernanceQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-image-artifact-governance"] as const;
 
+export const shellImageArtifactCleanupRunsQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "shell-image-artifact-cleanup-runs"] as const;
+
+export const shellImageArtifactCleanupScheduleQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "shell-image-artifact-cleanup-schedule"] as const;
+
 export const notationTrustCertificatesQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "notation-trust-certificates"] as const;
 
@@ -304,6 +364,44 @@ export async function runShellImageArtifactCleanup(
       body: JSON.stringify(request),
       headers: { "Content-Type": "application/json" },
       method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function listShellImageArtifactCleanupRuns(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactCleanupRun[]> {
+  return requestJson<ShellImageArtifactCleanupRun[]>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/cleanup-runs`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function getShellImageArtifactCleanupSchedule(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactCleanupSchedule> {
+  return requestJson<ShellImageArtifactCleanupSchedule>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/cleanup-schedule`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function updateShellImageArtifactCleanupSchedule(
+  projectId: string,
+  request: ShellImageArtifactCleanupScheduleUpdateRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactCleanupSchedule> {
+  return requestJson<ShellImageArtifactCleanupSchedule>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/cleanup-schedule`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
     },
     fetcher,
   );

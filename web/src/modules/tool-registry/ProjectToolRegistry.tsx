@@ -9,18 +9,24 @@ import {
   getShellImageAdmissionGovernance,
   getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
+  getShellImageArtifactCleanupSchedule,
+  listShellImageArtifactCleanupRuns,
   listNotationTrustCertificates,
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
   runShellImageArtifactCleanup,
+  shellImageArtifactCleanupRunsQueryKey,
+  shellImageArtifactCleanupScheduleQueryKey,
   type NotationTrustCertificate,
   type NotationTrustCertificateCreateRequest,
   type ShellImageAdmission,
   type ShellImageAdmissionGovernance,
   type ShellImageArtifactCleanupGovernance,
   type ShellImageArtifactCleanupRun,
+  type ShellImageArtifactCleanupSchedule,
+  type ShellImageArtifactCleanupScheduleUpdateRequest,
   type ShellImageAdmissionPolicy,
   type ShellImageAdmissionPolicyUpdateRequest,
   shellImageArtifactGovernanceQueryKey,
@@ -31,6 +37,7 @@ import {
   type ShellTemplate,
   type ShellTemplateCreateRequest,
   type ShellTemplatePreviewResponse,
+  updateShellImageArtifactCleanupSchedule,
   updateShellImageAdmissionPolicy,
 } from "./toolRegistryApi";
 
@@ -81,6 +88,12 @@ const emptyNotationTrustCertificateForm: NotationTrustCertificateCreateRequest =
   description: "",
 };
 
+const defaultCleanupScheduleForm: ShellImageArtifactCleanupScheduleUpdateRequest = {
+  enabled: false,
+  interval_hours: 24,
+  limit: 100,
+};
+
 export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const queryClient = useQueryClient();
   const queryKey = useMemo(() => shellTemplatesQueryKey(project.projectId), [project.projectId]);
@@ -96,6 +109,14 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     () => shellImageArtifactGovernanceQueryKey(project.projectId),
     [project.projectId],
   );
+  const artifactCleanupRunsQueryKey = useMemo(
+    () => shellImageArtifactCleanupRunsQueryKey(project.projectId),
+    [project.projectId],
+  );
+  const artifactCleanupScheduleQueryKey = useMemo(
+    () => shellImageArtifactCleanupScheduleQueryKey(project.projectId),
+    [project.projectId],
+  );
   const notationTrustQueryKey = useMemo(
     () => notationTrustCertificatesQueryKey(project.projectId),
     [project.projectId],
@@ -108,6 +129,8 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const [notationTrustForm, setNotationTrustForm] = useState<NotationTrustCertificateCreateRequest>(
     emptyNotationTrustCertificateForm,
   );
+  const [cleanupScheduleForm, setCleanupScheduleForm] =
+    useState<ShellImageArtifactCleanupScheduleUpdateRequest>(defaultCleanupScheduleForm);
   const [trustPolicyText, setTrustPolicyText] = useState(JSON.stringify(defaultPolicyForm.notation_trust_policy, null, 2));
   const [localError, setLocalError] = useState("");
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
@@ -132,6 +155,16 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const artifactGovernanceQuery = useQuery({
     queryFn: () => getShellImageArtifactCleanupGovernance(project.projectId),
     queryKey: artifactGovernanceQueryKey,
+    retry: false,
+  });
+  const artifactCleanupRunsQuery = useQuery({
+    queryFn: () => listShellImageArtifactCleanupRuns(project.projectId),
+    queryKey: artifactCleanupRunsQueryKey,
+    retry: false,
+  });
+  const artifactCleanupScheduleQuery = useQuery({
+    queryFn: () => getShellImageArtifactCleanupSchedule(project.projectId),
+    queryKey: artifactCleanupScheduleQueryKey,
     retry: false,
   });
   const notationTrustQuery = useQuery({
@@ -188,12 +221,28 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     },
   });
   const artifactCleanupMutation = useMutation({
-    mutationFn: (dryRun: boolean) =>
-      runShellImageArtifactCleanup(project.projectId, { dry_run: dryRun, limit: 100 }),
-    onSuccess: (run) => {
+    mutationFn: (variables: { dryRun: boolean; projectId: string }) =>
+      runShellImageArtifactCleanup(variables.projectId, {
+        dry_run: variables.dryRun,
+        limit: 100,
+      }),
+    onSuccess: (run, variables) => {
+      if (variables.projectId !== project.projectId || run.project_id !== project.projectId) {
+        return;
+      }
       setArtifactCleanupRun(run);
       void queryClient.invalidateQueries({ queryKey: artifactGovernanceQueryKey });
+      void queryClient.invalidateQueries({ queryKey: artifactCleanupRunsQueryKey });
       void queryClient.invalidateQueries({ queryKey: governanceQueryKey });
+    },
+  });
+  const artifactCleanupScheduleMutation = useMutation({
+    mutationFn: (request: ShellImageArtifactCleanupScheduleUpdateRequest) =>
+      updateShellImageArtifactCleanupSchedule(project.projectId, request),
+    onSuccess: (schedule) => {
+      applyCleanupSchedule(schedule, setCleanupScheduleForm);
+      queryClient.setQueryData(artifactCleanupScheduleQueryKey, schedule);
+      void queryClient.invalidateQueries({ queryKey: artifactCleanupScheduleQueryKey });
     },
   });
 
@@ -211,6 +260,12 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   useEffect(() => {
     setArtifactCleanupRun(null);
   }, [project.projectId]);
+
+  useEffect(() => {
+    if (artifactCleanupScheduleQuery.data) {
+      applyCleanupSchedule(artifactCleanupScheduleQuery.data, setCleanupScheduleForm);
+    }
+  }, [artifactCleanupScheduleQuery.data]);
 
   useEffect(() => {
     if (policyQuery.data) {
@@ -236,7 +291,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     policyMutation.error ||
     notationTrustMutation.error ||
     artifactCleanupMutation.error ||
+    artifactCleanupScheduleMutation.error ||
     notationTrustQuery.error ||
+    artifactCleanupRunsQuery.error ||
+    artifactCleanupScheduleQuery.error ||
     artifactGovernanceQuery.error ||
     policyQuery.error ||
     governanceQuery.error ||
@@ -401,10 +459,16 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
             />
             <ArtifactCleanupPanel
               governance={artifactGovernanceQuery.data ?? null}
+              history={artifactCleanupRunsQuery.data ?? []}
               isLoading={artifactGovernanceQuery.isLoading}
               isRunning={artifactCleanupMutation.isPending}
-              onRun={(dryRun) => artifactCleanupMutation.mutate(dryRun)}
+              isSavingSchedule={artifactCleanupScheduleMutation.isPending}
+          onRun={(dryRun) => artifactCleanupMutation.mutate({ dryRun, projectId: project.projectId })}
+              onSaveSchedule={() => artifactCleanupScheduleMutation.mutate(cleanupScheduleForm)}
               run={artifactCleanupRun}
+              schedule={artifactCleanupScheduleQuery.data ?? null}
+              scheduleForm={cleanupScheduleForm}
+              setScheduleForm={setCleanupScheduleForm}
             />
             <PolicyPanel
               isLoading={policyQuery.isLoading}
@@ -758,16 +822,34 @@ function GovernancePanel({
 
 function ArtifactCleanupPanel({
   governance,
+  history,
   isLoading,
   isRunning,
+  isSavingSchedule,
   onRun,
+  onSaveSchedule,
   run,
+  schedule,
+  scheduleForm,
+  setScheduleForm,
 }: {
   governance: ShellImageArtifactCleanupGovernance | null;
+  history: ShellImageArtifactCleanupRun[];
   isLoading: boolean;
   isRunning: boolean;
+  isSavingSchedule: boolean;
   onRun: (dryRun: boolean) => void;
+  onSaveSchedule: () => void;
   run: ShellImageArtifactCleanupRun | null;
+  schedule: ShellImageArtifactCleanupSchedule | null;
+  scheduleForm: ShellImageArtifactCleanupScheduleUpdateRequest;
+  setScheduleForm: (
+    value:
+      | ShellImageArtifactCleanupScheduleUpdateRequest
+      | ((
+          current: ShellImageArtifactCleanupScheduleUpdateRequest,
+        ) => ShellImageArtifactCleanupScheduleUpdateRequest),
+  ) => void;
 }) {
   if (isLoading) {
     return <div className="preview-alert">Loading artifact cleanup governance</div>;
@@ -781,6 +863,8 @@ function ArtifactCleanupPanel({
       ? "object-lock-capable"
       : "worm-check";
   const latestCandidates = run?.candidates ?? governance?.candidates ?? [];
+  const lifecycleDrift = governance?.lifecycle_drift;
+  const versionReconciliation = governance?.version_reconciliation;
 
   return (
     <section className="shell-governance-panel" aria-label="Shell Artifact Cleanup">
@@ -799,6 +883,9 @@ function ArtifactCleanupPanel({
         <Detail label="Object Lock" value={controls?.object_lock_enabled ? "enabled" : "not enabled"} />
         <Detail label="Default retention" value={defaultRetentionConfigured ? "default rule" : "not configured"} />
         <Detail label="Retention mode" value={controls?.default_retention_mode ?? "none"} />
+        <Detail label="Lifecycle drift" value={lifecycleDrift?.status ?? "unknown"} />
+        <Detail label="Version reconcile" value={versionReconciliation?.status ?? "unknown"} />
+        <Detail label="Delete markers" value={String(versionReconciliation?.delete_marker_count ?? 0)} />
         <Detail label="Expired" value={String(governance?.expired_artifact_count ?? 0)} />
         <Detail label="Retained" value={String(governance?.retained_artifact_count ?? 0)} />
         <Detail label="Deleted" value={String(governance?.deleted_artifact_count ?? 0)} />
@@ -807,6 +894,66 @@ function ArtifactCleanupPanel({
       {controls?.error ? (
         <div className="preview-alert preview-alert-danger">{controls.error}</div>
       ) : null}
+      {lifecycleDrift?.issues.length ? (
+        <div className="preview-alert">
+          Drift issues: {lifecycleDrift.issues.join(", ")}
+        </div>
+      ) : null}
+      <div className="preview-alert artifact-cleanup-row">
+        <strong>Schedule dry-run</strong>
+        <label className="inline-check">
+          <input
+            checked={scheduleForm.enabled}
+            onChange={(event) =>
+              setScheduleForm((current) => ({ ...current, enabled: event.target.checked }))
+            }
+            type="checkbox"
+          />
+          enabled
+        </label>
+        <label className="field-label">
+          Interval hours
+          <input
+            className="text-field"
+            min={1}
+            onChange={(event) =>
+              setScheduleForm((current) => ({
+                ...current,
+                interval_hours: Number(event.target.value) || 1,
+              }))
+            }
+            type="number"
+            value={scheduleForm.interval_hours}
+          />
+        </label>
+        <label className="field-label">
+          Limit
+          <input
+            className="text-field"
+            min={1}
+            onChange={(event) =>
+              setScheduleForm((current) => ({
+                ...current,
+                limit: Number(event.target.value) || 1,
+              }))
+            }
+            type="number"
+            value={scheduleForm.limit}
+          />
+        </label>
+        <button
+          className="toolbar-button"
+          disabled={isSavingSchedule}
+          onClick={onSaveSchedule}
+          type="button"
+        >
+          <Save aria-hidden="true" size={16} />
+          Save cleanup schedule
+        </button>
+        <small>
+          next {schedule?.next_run_at ?? "not scheduled"}
+        </small>
+      </div>
       <div className="release-action-row">
         <button
           className="toolbar-button"
@@ -833,14 +980,25 @@ function ArtifactCleanupPanel({
         </div>
       ) : null}
       <div className="artifact-cleanup-list">
+        {history.slice(0, 3).map((item) => (
+          <div className="preview-alert artifact-cleanup-row" key={item.id}>
+            <strong>{item.trigger_type} · {item.status} · {item.candidate_count} candidates</strong>
+            <small>{item.completed_at}</small>
+            <span className={`status-pill ${item.lifecycle_drift.status === "drift" ? "status-warning" : "status-ready"}`}>
+              {item.lifecycle_drift.status}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="artifact-cleanup-list">
         {latestCandidates.length === 0 ? (
           <div className="preview-alert">No expired SBOM or scan report artifacts</div>
         ) : null}
         {latestCandidates.map((candidate) => (
           <div className="preview-alert artifact-cleanup-row" key={`${candidate.admission_id}-${candidate.evidence_key}`}>
             <strong>{candidate.artifact_kind}</strong>
-            <code>{candidate.artifact_ref}</code>
-            <small>{candidate.artifact_sha256.slice(0, 12)}</small>
+            <code>ref:{candidate.artifact_ref_hash.slice(0, 12)}</code>
+            <small>sha:{candidate.artifact_sha256_prefix}</small>
             <small>expires {candidate.artifact_retention_expires_at}</small>
             <span className={`status-pill ${candidate.cleanup_status === "delete_failed" ? "status-blocked" : "status-ready"}`}>
               {candidate.cleanup_status}
@@ -1134,6 +1292,18 @@ function policyToForm(policy: ShellImageAdmissionPolicy): ShellImageAdmissionPol
     artifact_retention_days: policy.artifact_retention_days,
     blocked_severities: policy.blocked_severities,
   };
+}
+
+function applyCleanupSchedule(
+  schedule: ShellImageArtifactCleanupSchedule,
+  setScheduleForm: (value: ShellImageArtifactCleanupScheduleUpdateRequest) => void,
+) {
+  setScheduleForm({
+    enabled: schedule.enabled,
+    interval_hours: schedule.interval_hours,
+    limit: schedule.limit,
+    next_run_at: schedule.next_run_at,
+  });
 }
 
 function parseJsonObject(text: string, label: string): Record<string, unknown> {
