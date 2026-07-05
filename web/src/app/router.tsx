@@ -66,6 +66,12 @@ const projectKnowledgeRoute = createRoute({
   component: ProjectKnowledgeRoute,
 });
 
+const projectTemplatesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/templates",
+  component: ProjectTemplatesRoute,
+});
+
 const projectToolRegistryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId/tools",
@@ -104,6 +110,7 @@ const routeTree = rootRoute.addChildren([
   projectWorkflowsRoute,
   projectAgentsRoute,
   projectKnowledgeRoute,
+  projectTemplatesRoute,
   projectToolRegistryRoute,
   projectModelGatewaySettingsRoute,
   projectPromptLibraryRoute,
@@ -182,6 +189,18 @@ function ProjectKnowledgeRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="knowledge-center" />;
+}
+
+function ProjectTemplatesRoute() {
+  const context = projectTemplatesRoute.useRouteContext();
+  const params = projectTemplatesRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="template-gallery" />;
 }
 
 function ProjectToolRegistryRoute() {

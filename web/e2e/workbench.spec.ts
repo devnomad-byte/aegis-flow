@@ -111,3 +111,18 @@ test("renders the knowledge center workspace", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Knowledge Center" })).toBeVisible();
   await expect(page.getByText("No knowledge bases")).toBeVisible();
 });
+
+test("renders the template gallery workspace", async ({ page }) => {
+  await page.route("**/api/v1/projects/ops-command/workflow-templates", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({ templates: [], count: 0 }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
+  await page.goto("/projects/ops-command/templates");
+
+  await expect(page.getByRole("heading", { name: "Template Gallery" })).toBeVisible();
+  await expect(page.getByText("No workflow templates")).toBeVisible();
+});

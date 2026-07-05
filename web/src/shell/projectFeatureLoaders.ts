@@ -7,6 +7,7 @@ export type ProjectFeatureView =
   | "command"
   | "debug-chat"
   | "knowledge-center"
+  | "template-gallery"
   | "workflows"
   | "tool-registry"
   | "model-gateway-settings"
@@ -34,6 +35,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   "knowledge-center": () =>
     import("../modules/knowledge-center/ProjectKnowledgeCenter").then((module) => ({
       default: module.ProjectKnowledgeCenter,
+    })),
+  "template-gallery": () =>
+    import("../modules/template-gallery/ProjectTemplateGallery").then((module) => ({
+      default: module.ProjectTemplateGallery,
     })),
   workflows: () =>
     import("../modules/workflow-studio/WorkflowStudio").then((module) => ({

@@ -189,6 +189,18 @@ describe("App", () => {
     expect(await screen.findByText("No knowledge bases")).toBeInTheDocument();
   });
 
+  it("renders template gallery for project template routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ templates: [], count: 0 }), { status: 200 }),
+    );
+
+    render(<App initialPath="/projects/ops-command/templates" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Template Gallery" })).toBeInTheDocument();
+    expect(await screen.findByText("No workflow templates")).toBeInTheDocument();
+  });
+
   it("shows forbidden instead of global data for regular project members", async () => {
     render(<App account={DEMO_ACCOUNTS.projectMember} initialPath="/global" />);
 
