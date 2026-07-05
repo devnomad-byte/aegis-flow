@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.knowledge.ingestion import KnowledgeIngestionPipeline
@@ -13,6 +14,8 @@ from backend.app.knowledge.models import (
 )
 from backend.app.knowledge.object_store import InMemoryKnowledgeObjectStore, KnowledgeObjectStore
 from backend.app.knowledge.schemas import (
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseRead,
     KnowledgeDocumentImportRequest,
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
@@ -31,6 +34,46 @@ class SqlAlchemyKnowledgeIngestionStore:
         self._session = session
         self._object_store = object_store or InMemoryKnowledgeObjectStore()
         self._pipeline = pipeline or KnowledgeIngestionPipeline()
+
+    async def create_knowledge_base(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: KnowledgeBaseCreateRequest,
+    ) -> KnowledgeBaseRead:
+        knowledge_base = KnowledgeBase(
+            project_id=project_id,
+            key=request.key,
+            name=request.name,
+            description=request.description,
+            purpose=request.purpose,
+            data_classification=request.data_classification,
+            environment=request.environment,
+            visibility=request.visibility,
+            retention_policy_ref=request.retention_policy_ref,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(knowledge_base)
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise ValueError("Knowledge base key already exists for project") from exc
+        await self._session.refresh(knowledge_base)
+        return _knowledge_base_to_read(knowledge_base)
+
+    async def list_knowledge_bases(self, project_id: UUID) -> list[KnowledgeBaseRead]:
+        result = await self._session.scalars(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.project_id == project_id,
+                KnowledgeBase.status == "active",
+            )
+            .order_by(KnowledgeBase.updated_at.desc())
+        )
+        return [_knowledge_base_to_read(knowledge_base) for knowledge_base in result.all()]
 
     async def import_text_document(
         self,
@@ -385,6 +428,10 @@ class SqlAlchemyKnowledgeIngestionStore:
 
 def _document_to_read(document: KnowledgeDocument) -> KnowledgeDocumentRead:
     return KnowledgeDocumentRead.model_validate(document)
+
+
+def _knowledge_base_to_read(knowledge_base: KnowledgeBase) -> KnowledgeBaseRead:
+    return KnowledgeBaseRead.model_validate(knowledge_base)
 
 
 def _version_to_read(version: KnowledgeDocumentVersion) -> KnowledgeDocumentVersionRead:

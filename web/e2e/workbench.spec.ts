@@ -96,3 +96,18 @@ test("renders the agent console workspace", async ({ page }) => {
   await expect(page.getByText("RUN COMPOSER")).toBeVisible();
   await expect(page.getByText("No published agents")).toBeVisible();
 });
+
+test("renders the knowledge center workspace", async ({ page }) => {
+  await page.route("**/api/v1/projects/ops-command/knowledge/bases", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({ knowledge_bases: [], count: 0 }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
+  await page.goto("/projects/ops-command/knowledge");
+
+  await expect(page.getByRole("heading", { name: "Knowledge Center" })).toBeVisible();
+  await expect(page.getByText("No knowledge bases")).toBeVisible();
+});

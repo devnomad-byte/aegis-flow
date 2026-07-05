@@ -7,6 +7,40 @@ from pydantic import BaseModel, ConfigDict, Field
 ContentFormat = Literal["text", "markdown"]
 KnowledgeImportStatus = Literal["created", "unchanged", "versioned"]
 DataClassification = Literal["public", "internal", "confidential", "restricted", "secret"]
+KnowledgeBaseVisibility = Literal["project"]
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    purpose: str = Field(default="project_knowledge", min_length=1, max_length=80)
+    data_classification: DataClassification = "internal"
+    environment: str = Field(default="shared", min_length=1, max_length=80)
+    visibility: KnowledgeBaseVisibility = "project"
+    retention_policy_ref: str = Field(default="", max_length=120)
+
+
+class KnowledgeBaseRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    key: str
+    name: str
+    description: str
+    purpose: str
+    data_classification: str
+    environment: str
+    visibility: str
+    retention_policy_ref: str
+    status: str
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 class KnowledgeDocumentImportRequest(BaseModel):
@@ -79,4 +113,9 @@ class KnowledgeDocumentImportResult(BaseModel):
 
 class KnowledgeDocumentListResponse(BaseModel):
     documents: list[KnowledgeDocumentRead]
+    count: int
+
+
+class KnowledgeBaseListResponse(BaseModel):
+    knowledge_bases: list[KnowledgeBaseRead]
     count: int

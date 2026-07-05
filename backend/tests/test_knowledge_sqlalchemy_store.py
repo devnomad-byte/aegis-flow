@@ -4,10 +4,53 @@ import pytest
 from backend.app.db.base import Base
 from backend.app.knowledge.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocumentVersion
 from backend.app.knowledge.object_store import InMemoryKnowledgeObjectStore
-from backend.app.knowledge.schemas import KnowledgeDocumentImportRequest
+from backend.app.knowledge.schemas import KnowledgeBaseCreateRequest, KnowledgeDocumentImportRequest
 from backend.app.knowledge.sqlalchemy_store import SqlAlchemyKnowledgeIngestionStore
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_knowledge_store_creates_and_lists_project_scoped_bases() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        project_id = uuid4()
+        other_project_id = uuid4()
+        actor_id = uuid4()
+        store = SqlAlchemyKnowledgeIngestionStore(session)
+
+        created = await store.create_knowledge_base(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=KnowledgeBaseCreateRequest(
+                key="ops-runbooks",
+                name="Ops Runbooks",
+                description="Operational troubleshooting knowledge.",
+                data_classification="internal",
+                environment="prod",
+            ),
+        )
+        other = await store.create_knowledge_base(
+            project_id=other_project_id,
+            actor_id=actor_id,
+            request=KnowledgeBaseCreateRequest(
+                key="customer-care",
+                name="Customer Care",
+            ),
+        )
+
+        listed = await store.list_knowledge_bases(project_id)
+
+    await engine.dispose()
+
+    assert created.key == "ops-runbooks"
+    assert created.project_id == project_id
+    assert other.project_id == other_project_id
+    assert [knowledge_base.id for knowledge_base in listed] == [created.id]
 
 
 @pytest.mark.asyncio

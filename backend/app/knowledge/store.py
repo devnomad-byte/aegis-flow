@@ -2,6 +2,8 @@ from typing import Protocol
 from uuid import UUID
 
 from backend.app.knowledge.schemas import (
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseRead,
     KnowledgeDocumentImportRequest,
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
@@ -9,6 +11,18 @@ from backend.app.knowledge.schemas import (
 
 
 class KnowledgeIngestionStore(Protocol):
+    async def create_knowledge_base(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: KnowledgeBaseCreateRequest,
+    ) -> KnowledgeBaseRead:
+        raise NotImplementedError
+
+    async def list_knowledge_bases(self, project_id: UUID) -> list[KnowledgeBaseRead]:
+        raise NotImplementedError
+
     async def import_text_document(
         self,
         *,

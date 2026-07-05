@@ -6,6 +6,7 @@ export type ProjectFeatureView =
   | "agent-console"
   | "command"
   | "debug-chat"
+  | "knowledge-center"
   | "workflows"
   | "tool-registry"
   | "model-gateway-settings"
@@ -29,6 +30,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   "debug-chat": () =>
     import("../modules/debug-chat/ProjectDebugChat").then((module) => ({
       default: module.ProjectDebugChat,
+    })),
+  "knowledge-center": () =>
+    import("../modules/knowledge-center/ProjectKnowledgeCenter").then((module) => ({
+      default: module.ProjectKnowledgeCenter,
     })),
   workflows: () =>
     import("../modules/workflow-studio/WorkflowStudio").then((module) => ({

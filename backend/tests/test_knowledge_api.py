@@ -11,6 +11,8 @@ from backend.app.api.dependencies import (
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.knowledge.schemas import (
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseRead,
     KnowledgeDocumentImportRequest,
     KnowledgeDocumentImportResult,
     KnowledgeDocumentRead,
@@ -46,6 +48,42 @@ class InMemoryKnowledgeIngestionStore:
         self.allowed_knowledge_base_id = allowed_knowledge_base_id
         self.imports: list[KnowledgeDocumentImportResult] = []
         self.deleted_ids: list[UUID] = []
+        self.bases: list[KnowledgeBaseRead] = []
+
+    async def create_knowledge_base(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        request: KnowledgeBaseCreateRequest,
+    ) -> KnowledgeBaseRead:
+        now = datetime.now(UTC)
+        knowledge_base = KnowledgeBaseRead(
+            id=self.allowed_knowledge_base_id,
+            project_id=project_id,
+            key=request.key,
+            name=request.name,
+            description=request.description,
+            purpose=request.purpose,
+            data_classification=request.data_classification,
+            environment=request.environment,
+            visibility=request.visibility,
+            retention_policy_ref=request.retention_policy_ref,
+            status="active",
+            created_by=actor_id,
+            updated_by=actor_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.bases.append(knowledge_base)
+        return knowledge_base
+
+    async def list_knowledge_bases(self, project_id: UUID) -> list[KnowledgeBaseRead]:
+        return [
+            knowledge_base
+            for knowledge_base in self.bases
+            if knowledge_base.project_id == project_id
+        ]
 
     async def import_text_document(
         self,
@@ -170,6 +208,58 @@ class InMemoryAuditEventStore:
                 "metadata": metadata or {},
             }
         )
+
+
+def test_knowledge_base_create_and_list_api_records_sanitized_audit() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:write", "knowledge:view"])
+    store = InMemoryKnowledgeIngestionStore(uuid4())
+    audit_store = InMemoryAuditEventStore()
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=store,
+        audit_store=audit_store,
+    )
+
+    create_response = client.post(
+        f"/api/v1/projects/{project.id}/knowledge/bases",
+        json={
+            "key": "ops-runbooks",
+            "name": "Ops Runbooks",
+            "description": "contains secret-looking text that must not enter audit",
+            "purpose": "project_knowledge",
+            "data_classification": "internal",
+            "environment": "prod",
+        },
+    )
+    list_response = client.get(f"/api/v1/projects/{project.id}/knowledge/bases")
+
+    assert create_response.status_code == 201
+    assert create_response.json()["key"] == "ops-runbooks"
+    assert list_response.status_code == 200
+    assert list_response.json()["count"] == 1
+    assert list_response.json()["knowledge_bases"][0]["name"] == "Ops Runbooks"
+    assert [event["action"] for event in audit_store.events] == [
+        "knowledge.base.create",
+        "knowledge.base.list",
+    ]
+    assert "secret-looking text" not in str(audit_store.events)
+
+
+def test_knowledge_base_list_requires_view_permission() -> None:
+    account = AccountPrincipal(account_id=uuid4(), status="active")
+    project = make_project(permissions=["knowledge:write"])
+    client = build_client(
+        account=account,
+        provider=PermissionAwareProjectProvider([project]),
+        knowledge_store=InMemoryKnowledgeIngestionStore(uuid4()),
+        audit_store=InMemoryAuditEventStore(),
+    )
+
+    response = client.get(f"/api/v1/projects/{project.id}/knowledge/bases")
+
+    assert response.status_code == 403
 
 
 def test_knowledge_import_list_and_delete_api_records_sanitized_audit() -> None:

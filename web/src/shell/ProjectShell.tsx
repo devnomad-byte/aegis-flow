@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   Boxes,
+  Database,
   GitBranch,
   LayoutDashboard,
   MessageSquareText,
@@ -21,6 +22,7 @@ const navItems = [
   { label: "Project Command", icon: LayoutDashboard, route: "command" },
   { label: "Workflow Studio", icon: GitBranch, route: "workflows" },
   { label: "Agent Console", icon: Bot, route: "agent-console" },
+  { label: "Knowledge Center", icon: Database, route: "knowledge-center" },
   { label: "Tool Registry", icon: Boxes, route: "tool-registry" },
   { label: "Run Observatory", icon: Activity, route: "runs" },
   { label: "Debug Chat", icon: MessageSquareText, route: "debug-chat" },
@@ -39,6 +41,7 @@ const ProjectFeatureComponents = {
   "agent-console": lazy(PROJECT_FEATURE_LOADERS["agent-console"]),
   command: lazy(PROJECT_FEATURE_LOADERS.command),
   "debug-chat": lazy(PROJECT_FEATURE_LOADERS["debug-chat"]),
+  "knowledge-center": lazy(PROJECT_FEATURE_LOADERS["knowledge-center"]),
   workflows: lazy(PROJECT_FEATURE_LOADERS.workflows),
   "tool-registry": lazy(PROJECT_FEATURE_LOADERS["tool-registry"]),
   "model-gateway-settings": lazy(PROJECT_FEATURE_LOADERS["model-gateway-settings"]),
@@ -66,6 +69,7 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
             const isActive =
               (view === "command" && item.route === "command") ||
               (view === "agent-console" && item.route === "agent-console") ||
+              (view === "knowledge-center" && item.route === "knowledge-center") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
               (view === "debug-chat" && item.route === "debug-chat") ||
               (view === "tool-registry" && item.route === "tool-registry") ||
@@ -109,6 +113,13 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId/tools",
+                    });
+                    return;
+                  }
+                  if (item.route === "knowledge-center") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/knowledge",
                     });
                     return;
                   }
@@ -190,6 +201,8 @@ function getFeatureLabel(view: ProjectFeatureView) {
       return "Project Command Center";
     case "debug-chat":
       return "Debug Chat";
+    case "knowledge-center":
+      return "Knowledge Center";
     case "workflows":
       return "Workflow Studio";
     case "tool-registry":

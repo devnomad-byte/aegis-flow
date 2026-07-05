@@ -30,6 +30,9 @@ describe("resolveAegisManualChunk", () => {
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/agent-console/ProjectAgentConsole.tsx")).toBe(
       "agent-console",
     );
+    expect(resolveAegisManualChunk("D:/projects/web/src/modules/knowledge-center/ProjectKnowledgeCenter.tsx")).toBe(
+      "knowledge-center",
+    );
     expect(resolveAegisManualChunk("D:/projects/web/src/modules/global-command-center/globalCommandCenter.ts")).toBe(
       "global-command-center",
     );
@@ -40,6 +43,7 @@ describe("resolveAegisManualChunk", () => {
     expect(PROJECT_FEATURE_LOADERS.runs.toString()).toContain("run-observatory");
     expect(PROJECT_FEATURE_LOADERS["tool-registry"].toString()).toContain("tool-registry");
     expect(PROJECT_FEATURE_LOADERS["agent-console"].toString()).toContain("agent-console");
+    expect(PROJECT_FEATURE_LOADERS["knowledge-center"].toString()).toContain("knowledge-center");
     expect(PROJECT_FEATURE_LOADERS.command.toString()).toContain("project-command-center");
   });
 });

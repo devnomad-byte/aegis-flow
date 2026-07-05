@@ -12,6 +12,9 @@ from backend.app.audit.store import AuditEventStore
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.knowledge.schemas import (
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseListResponse,
+    KnowledgeBaseRead,
     KnowledgeDocumentImportRequest,
     KnowledgeDocumentImportResult,
     KnowledgeDocumentListResponse,
@@ -24,6 +27,81 @@ CurrentAccount = Depends(get_current_account)
 ProjectAccess = Depends(get_project_access_provider)
 KnowledgeStore = Depends(get_knowledge_ingestion_store)
 AuditStore = Depends(get_audit_event_store)
+
+
+@router.post(
+    "/bases",
+    response_model=KnowledgeBaseRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_knowledge_base(
+    project_id: UUID,
+    request: KnowledgeBaseCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: KnowledgeIngestionStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> KnowledgeBaseRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:write",
+    )
+    try:
+        knowledge_base = await knowledge_store.create_knowledge_base(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.base.create",
+        target_type="knowledge_base",
+        target_id=str(knowledge_base.id),
+        metadata={
+            "knowledge_base_key": knowledge_base.key,
+            "data_classification": knowledge_base.data_classification,
+            "environment": knowledge_base.environment,
+        },
+    )
+    return knowledge_base
+
+
+@router.get("/bases", response_model=KnowledgeBaseListResponse)
+async def list_knowledge_bases(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    knowledge_store: KnowledgeIngestionStore = KnowledgeStore,
+    audit_store: AuditEventStore = AuditStore,
+) -> KnowledgeBaseListResponse:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "knowledge:view",
+    )
+    knowledge_bases = await knowledge_store.list_knowledge_bases(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="knowledge.base.list",
+        target_type="knowledge_base",
+        target_id="project",
+        metadata={"knowledge_base_count": len(knowledge_bases)},
+    )
+    return KnowledgeBaseListResponse(
+        knowledge_bases=knowledge_bases,
+        count=len(knowledge_bases),
+    )
 
 
 @router.post(
