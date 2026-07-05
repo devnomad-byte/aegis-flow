@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,7 +7,10 @@ import { AppProviders } from "../../app/providers/AppProviders";
 import { createAegisRuntime } from "../../app/runtime";
 import { defaultProjectContext } from "../../shell/projectContext";
 import { ProjectToolRegistry } from "./ProjectToolRegistry";
-import type { ShellImageArtifactCleanupGovernance } from "./toolRegistryApi";
+import type {
+  ShellImageArtifactCleanupGovernance,
+  ShellImageArtifactLifecycleRemediationPlan,
+} from "./toolRegistryApi";
 
 describe("ProjectToolRegistry", () => {
   it("loads shell templates, creates a version, and renders sanitized preview output", async () => {
@@ -133,6 +136,9 @@ describe("ProjectToolRegistry", () => {
           }),
           { status: 200 },
         );
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(JSON.stringify(remediationPlanFixture()), { status: 200 });
       }
       if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as { dry_run: boolean };
@@ -522,6 +528,12 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("Scan artifacts")).toBeInTheDocument();
     expect(screen.getByText("Expired artifacts")).toBeInTheDocument();
     expect(screen.getByText("S3 / MinIO Retention Controls")).toBeInTheDocument();
+    expect(screen.getByText("Lifecycle remediation plan")).toBeInTheDocument();
+    expect(screen.getByText("add_rule")).toBeInTheDocument();
+    expect(screen.getByText("shell-image-admissions/ops-command/")).toBeInTheDocument();
+    const noncurrentVersions = screen.getByText("Noncurrent versions").closest(".detail-item");
+    expect(noncurrentVersions).not.toBeNull();
+    expect(within(noncurrentVersions as HTMLElement).getByText("2")).toBeInTheDocument();
     expect(screen.getByText("object-lock-default")).toBeInTheDocument();
     expect(screen.getAllByText("drift").length).toBeGreaterThan(0);
     expect(screen.getByText("needs_reconciliation")).toBeInTheDocument();
@@ -665,6 +677,9 @@ describe("ProjectToolRegistry", () => {
       if (url.endsWith("/shell-images/artifacts/governance")) {
         return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
       }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(JSON.stringify(emptyRemediationPlan()), { status: 200 });
+      }
       if (url.endsWith("/shell-images/notation/trust-certificates")) {
         return new Response(JSON.stringify([]), { status: 200 });
       }
@@ -733,6 +748,9 @@ describe("ProjectToolRegistry", () => {
       }
       if (url.endsWith("/shell-images/artifacts/governance")) {
         return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(JSON.stringify(emptyRemediationPlan()), { status: 200 });
       }
       if (url.endsWith("/shell-images/artifacts/cleanup-runs") && !init) {
         return new Response(JSON.stringify([]), { status: 200 });
@@ -859,6 +877,9 @@ describe("ProjectToolRegistry", () => {
       if (url.endsWith("/shell-images/artifacts/governance")) {
         return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
       }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(JSON.stringify(emptyRemediationPlan()), { status: 200 });
+      }
       if (url.endsWith("/shell-images/notation/trust-certificates")) {
         return new Response(JSON.stringify([]), { status: 200 });
       }
@@ -922,6 +943,67 @@ function emptyArtifactGovernance(): ShellImageArtifactCleanupGovernance {
     deleted_artifact_count: 0,
     failed_artifact_count: 0,
     candidates: [],
+    generated_at: "2026-07-05T00:00:00Z",
+  };
+}
+
+function remediationPlanFixture(): ShellImageArtifactLifecycleRemediationPlan {
+  return {
+    project_id: "ops-command",
+    status: "action_required",
+    apply_allowed: false,
+    approval_required: true,
+    rule_proposals: [
+      {
+        proposal_type: "add_rule",
+        rule_id: "aegisflow-shell-image-artifacts-ops-command",
+        prefix: "shell-image-admissions/ops-command/",
+        expiration_days: 30,
+        noncurrent_expiration_days: 30,
+        expired_object_delete_marker: true,
+        matched_rule_ids: [],
+        reason_codes: ["missing_lifecycle_rule"],
+        safe_to_apply: false,
+        notes: ["Review bucket lifecycle configuration before apply."],
+      },
+    ],
+    object_lock_risks: [
+      {
+        code: "missing_object_lock_default_retention",
+        severity: "medium",
+        message: "Object Lock default retention is missing.",
+      },
+    ],
+    versioned_object_impact: {
+      status: "needs_reconciliation",
+      current_version_count: 1,
+      noncurrent_version_count: 2,
+      delete_marker_count: 1,
+      checked_prefixes: ["shell-image-admissions/ops-command/"],
+      notes: ["Noncurrent versions remain billable."],
+    },
+    rollback_hints: ["Approval is required before any future apply."],
+    generated_at: "2026-07-05T00:00:00Z",
+  };
+}
+
+function emptyRemediationPlan(): ShellImageArtifactLifecycleRemediationPlan {
+  return {
+    project_id: "ops-command",
+    status: "ready",
+    apply_allowed: false,
+    approval_required: true,
+    rule_proposals: [],
+    object_lock_risks: [],
+    versioned_object_impact: {
+      status: "ready",
+      current_version_count: 0,
+      noncurrent_version_count: 0,
+      delete_marker_count: 0,
+      checked_prefixes: [],
+      notes: [],
+    },
+    rollback_hints: [],
     generated_at: "2026-07-05T00:00:00Z",
   };
 }

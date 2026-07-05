@@ -11,6 +11,9 @@ from backend.app.tool_registry.cleanup_worker import ShellImageArtifactCleanupSc
 from backend.app.tool_registry.image_artifact_cleanup import (
     ShellImageArtifactCleanupService,
 )
+from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
+    ShellImageArtifactLifecycleRemediationPlanner,
+)
 from backend.app.tool_registry.image_artifacts import (
     ShellImageArtifactObjectStore,
     ShellImageArtifactWriter,
@@ -27,6 +30,7 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupRequest,
     ShellImageArtifactCleanupRunRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleRemediationPlanRead,
 )
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
@@ -191,6 +195,59 @@ def test_real_minio_postgres_shell_image_artifact_cleanup_lifecycle_history_v2()
         asyncio.run(engine.dispose())
 
 
+def test_real_minio_postgres_shell_image_artifact_lifecycle_remediation_plan_v1() -> None:
+    require_real_database_and_s3_cleanup_final_acceptance()
+    settings = AppSettings()
+    project_id = uuid4()
+    actor_id = uuid4()
+    digest = "sha256:" + ("b" * 64)
+    artifact_ref = ""
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    object_store = build_shell_image_artifact_object_store(settings.s3)
+
+    asyncio.run(_seed(session_factory, project_id=project_id, actor_id=actor_id))
+    try:
+        artifact_ref = asyncio.run(
+            _write_expired_artifact_and_record_admission(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                digest=digest,
+            )
+        )
+        plan = asyncio.run(
+            _build_lifecycle_remediation_plan(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+            )
+        )
+        rendered = plan.model_dump_json()
+
+        assert plan.project_id == project_id
+        assert plan.apply_allowed is False
+        assert plan.approval_required is True
+        assert plan.rollback_hints
+        assert plan.versioned_object_impact.checked_prefixes == [
+            f"shell-image-admissions/cleanup-final/{project_id.hex}/{project_id}/"
+        ]
+        if plan.status != "unknown":
+            assert plan.rule_proposals
+            assert plan.rule_proposals[0].proposal_type in {"add_rule", "manual_review"}
+            assert plan.rule_proposals[0].prefix.endswith(f"{project_id}/")
+            assert plan.rule_proposals[0].safe_to_apply is False
+        assert artifact_ref not in rendered
+        assert "secret" not in rendered.lower()
+        assert "b" * 64 not in rendered
+    finally:
+        if artifact_ref:
+            asyncio.run(_delete_if_exists(object_store, artifact_ref))
+        asyncio.run(_cleanup(session_factory, project_id=project_id, actor_id=actor_id))
+        asyncio.run(engine.dispose())
+
+
 async def _write_expired_artifact_and_record_admission(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -270,6 +327,21 @@ async def _run_cleanup(
             request=ShellImageArtifactCleanupRequest(dry_run=dry_run),
         )
     return run
+
+
+async def _build_lifecycle_remediation_plan(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    object_store: ShellImageArtifactObjectStore,
+    project_id: UUID,
+) -> ShellImageArtifactLifecycleRemediationPlanRead:
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        planner = ShellImageArtifactLifecycleRemediationPlanner(
+            store=store,
+            object_store=object_store,
+        )
+        return await planner.build_plan(project_id)
 
 
 async def _run_scheduled_dry_run(

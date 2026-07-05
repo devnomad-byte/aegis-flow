@@ -6,6 +6,9 @@ from backend.app.tool_registry.image_artifact_cleanup import (
     ShellImageArtifactCleanupScheduler,
     ShellImageArtifactCleanupService,
 )
+from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
+    ShellImageArtifactLifecycleRemediationPlanner,
+)
 from backend.app.tool_registry.image_artifacts import (
     InMemoryShellImageArtifactObjectStore,
     StoredShellImageArtifact,
@@ -608,6 +611,126 @@ async def test_shell_image_artifact_cleanup_default_retention_requires_object_lo
 
     assert governance.retention_controls.object_lock_enabled is False
     assert governance.retention_controls.default_retention_configured is False
+
+
+@pytest.mark.asyncio
+async def test_shell_image_artifact_lifecycle_remediation_plan_adds_project_rule() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        object_lock_enabled=True,
+        default_retention_mode="GOVERNANCE",
+        default_retention_days=30,
+        lifecycle_rules=[],
+        version_reconciliation={
+            f"shell-image-admissions/{project_id}/": {
+                "current_version_count": 2,
+                "noncurrent_version_count": 3,
+                "delete_marker_count": 1,
+            }
+        },
+    )
+    store = _CleanupStore(
+        [
+            _admission(
+                project_id=project_id,
+                actor_id=actor_id,
+                now=now,
+                evidence={
+                    "sbom": {
+                        "artifact_ref": f"s3://capievo/shell-image-admissions/{project_id}/2026/07/05/sbom.json",
+                        "artifact_sha256": "a" * 64,
+                        "artifact_size_bytes": 17,
+                        "artifact_retention_days": 30,
+                        "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                    }
+                },
+            )
+        ]
+    )
+    planner = ShellImageArtifactLifecycleRemediationPlanner(
+        store=store,
+        object_store=object_store,
+        clock=lambda: now,
+    )
+
+    plan = await planner.build_plan(project_id)
+
+    assert plan.status == "action_required"
+    assert plan.apply_allowed is False
+    assert plan.approval_required is True
+    assert plan.rule_proposals[0].proposal_type == "add_rule"
+    assert plan.rule_proposals[0].prefix == f"shell-image-admissions/{project_id}/"
+    assert plan.rule_proposals[0].expiration_days == 30
+    assert plan.rule_proposals[0].noncurrent_expiration_days == 30
+    assert plan.rule_proposals[0].expired_object_delete_marker is True
+    assert plan.rule_proposals[0].safe_to_apply is False
+    assert "missing_lifecycle_rule" in plan.rule_proposals[0].reason_codes
+    assert plan.versioned_object_impact.noncurrent_version_count == 3
+    assert plan.versioned_object_impact.delete_marker_count == 1
+    assert any("approval" in hint.lower() for hint in plan.rollback_hints)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_remediation_plan_requires_manual_review_for_unknown_rules() -> None:
+    project_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        object_lock_enabled=True,
+        default_retention_mode="GOVERNANCE",
+        default_retention_days=30,
+        lifecycle_rules=[
+            {
+                "ID": "company-wide-retention",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "shell-image-admissions/"},
+                "Expiration": {"Days": 365},
+            }
+        ],
+    )
+    planner = ShellImageArtifactLifecycleRemediationPlanner(
+        store=_CleanupStore([]),
+        object_store=object_store,
+        clock=lambda: now,
+    )
+
+    plan = await planner.build_plan(project_id)
+
+    assert plan.status == "manual_review"
+    assert plan.rule_proposals[0].proposal_type == "manual_review"
+    assert plan.rule_proposals[0].matched_rule_ids == ["company-wide-retention"]
+    assert plan.rule_proposals[0].safe_to_apply is False
+    assert "unknown_existing_lifecycle_rule" in plan.rule_proposals[0].reason_codes
+    assert "missing_noncurrent_version_expiration" in plan.rule_proposals[0].reason_codes
+
+
+@pytest.mark.asyncio
+async def test_shell_image_artifact_lifecycle_remediation_plan_reports_object_lock_risks() -> None:
+    project_id = uuid4()
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        object_lock_enabled=True,
+        default_retention_mode=None,
+        default_retention_days=None,
+        lifecycle_rules=[],
+    )
+    planner = ShellImageArtifactLifecycleRemediationPlanner(
+        store=_CleanupStore([]),
+        object_store=object_store,
+    )
+
+    plan = await planner.build_plan(project_id)
+
+    assert plan.status == "action_required"
+    assert plan.object_lock_risks
+    assert plan.object_lock_risks[0].code == "missing_object_lock_default_retention"
+    assert plan.object_lock_risks[0].severity == "medium"
 
 
 def _stored_json(

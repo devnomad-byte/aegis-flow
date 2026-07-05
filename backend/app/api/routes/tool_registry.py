@@ -20,6 +20,9 @@ from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_registry.image_artifact_cleanup import (
     ShellImageArtifactCleanupService,
 )
+from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
+    ShellImageArtifactLifecycleRemediationPlanner,
+)
 from backend.app.tool_registry.image_artifacts import (
     ShellImageArtifactObjectStore,
     ShellImageArtifactWriter,
@@ -67,6 +70,7 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
     ShellImageArtifactLifecycleDriftRead,
+    ShellImageArtifactLifecycleRemediationPlanRead,
     ShellImageArtifactRetentionControlsRead,
     ShellImageArtifactVersionReconciliationRead,
     ShellTemplateCreateRequest,
@@ -1137,6 +1141,47 @@ async def list_shell_image_artifact_cleanup_runs(
         },
     )
     return runs
+
+
+@router.get(
+    "/shell-images/artifacts/lifecycle-remediation-plan",
+    response_model=ShellImageArtifactLifecycleRemediationPlanRead,
+)
+async def get_shell_image_artifact_lifecycle_remediation_plan(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    artifact_object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactLifecycleRemediationPlanRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    planner = ShellImageArtifactLifecycleRemediationPlanner(
+        store=registry_store,
+        object_store=artifact_object_store,
+    )
+    plan = await planner.build_plan(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.lifecycle_remediation_plan.view",
+        target_type="tool_registry_image_admission_artifact_lifecycle_remediation_plan",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={
+            "status": plan.status,
+            "proposal_count": len(plan.rule_proposals),
+            "risk_count": len(plan.object_lock_risks),
+            "checked_prefix_count": len(plan.versioned_object_impact.checked_prefixes),
+            "apply_allowed": plan.apply_allowed,
+        },
+    )
+    return plan
 
 
 @router.get(

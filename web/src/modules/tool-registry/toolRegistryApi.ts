@@ -197,6 +197,46 @@ export type ShellImageArtifactCleanupSchedule = {
   updated_at?: string | null;
 };
 
+export type ShellImageArtifactLifecycleRuleProposal = {
+  proposal_type: "add_rule" | "manual_review";
+  rule_id: string;
+  prefix: string;
+  expiration_days: number;
+  noncurrent_expiration_days?: number | null;
+  expired_object_delete_marker: boolean;
+  matched_rule_ids: string[];
+  reason_codes: string[];
+  safe_to_apply: boolean;
+  notes: string[];
+};
+
+export type ShellImageArtifactObjectLockRisk = {
+  code: string;
+  severity: "low" | "medium" | "high";
+  message: string;
+};
+
+export type ShellImageArtifactVersionedObjectImpact = {
+  status: "ready" | "needs_reconciliation" | "unknown";
+  current_version_count: number;
+  noncurrent_version_count: number;
+  delete_marker_count: number;
+  checked_prefixes: string[];
+  notes: string[];
+};
+
+export type ShellImageArtifactLifecycleRemediationPlan = {
+  project_id: string;
+  status: "ready" | "action_required" | "manual_review" | "unknown";
+  apply_allowed: boolean;
+  approval_required: boolean;
+  rule_proposals: ShellImageArtifactLifecycleRuleProposal[];
+  object_lock_risks: ShellImageArtifactObjectLockRisk[];
+  versioned_object_impact: ShellImageArtifactVersionedObjectImpact;
+  rollback_hints: string[];
+  generated_at: string;
+};
+
 export type ShellImageArtifactCleanupScheduleUpdateRequest = Pick<
   ShellImageArtifactCleanupSchedule,
   "enabled" | "interval_hours" | "limit"
@@ -311,6 +351,14 @@ export const shellImageArtifactCleanupRunsQueryKey = (projectId: string) =>
 export const shellImageArtifactCleanupScheduleQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-image-artifact-cleanup-schedule"] as const;
 
+export const shellImageArtifactLifecycleRemediationPlanQueryKey = (projectId: string) =>
+  [
+    "project",
+    projectId,
+    "tool-registry",
+    "shell-image-artifact-lifecycle-remediation-plan",
+  ] as const;
+
 export const notationTrustCertificatesQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "notation-trust-certificates"] as const;
 
@@ -391,6 +439,17 @@ export async function getShellImageArtifactCleanupSchedule(
 ): Promise<ShellImageArtifactCleanupSchedule> {
   return requestJson<ShellImageArtifactCleanupSchedule>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/cleanup-schedule`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function getShellImageArtifactLifecycleRemediationPlan(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactLifecycleRemediationPlan> {
+  return requestJson<ShellImageArtifactLifecycleRemediationPlan>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/lifecycle-remediation-plan`,
     undefined,
     fetcher,
   );

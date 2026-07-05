@@ -8,6 +8,7 @@ import {
   createShellTemplate,
   getShellImageAdmissionGovernance,
   getShellImageArtifactCleanupGovernance,
+  getShellImageArtifactLifecycleRemediationPlan,
   getShellImageAdmissionPolicy,
   getShellImageArtifactCleanupSchedule,
   listShellImageArtifactCleanupRuns,
@@ -19,6 +20,7 @@ import {
   runShellImageArtifactCleanup,
   shellImageArtifactCleanupRunsQueryKey,
   shellImageArtifactCleanupScheduleQueryKey,
+  shellImageArtifactLifecycleRemediationPlanQueryKey,
   type NotationTrustCertificate,
   type NotationTrustCertificateCreateRequest,
   type ShellImageAdmission,
@@ -27,6 +29,7 @@ import {
   type ShellImageArtifactCleanupRun,
   type ShellImageArtifactCleanupSchedule,
   type ShellImageArtifactCleanupScheduleUpdateRequest,
+  type ShellImageArtifactLifecycleRemediationPlan,
   type ShellImageAdmissionPolicy,
   type ShellImageAdmissionPolicyUpdateRequest,
   shellImageArtifactGovernanceQueryKey,
@@ -117,6 +120,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     () => shellImageArtifactCleanupScheduleQueryKey(project.projectId),
     [project.projectId],
   );
+  const artifactLifecycleRemediationPlanQueryKey = useMemo(
+    () => shellImageArtifactLifecycleRemediationPlanQueryKey(project.projectId),
+    [project.projectId],
+  );
   const notationTrustQueryKey = useMemo(
     () => notationTrustCertificatesQueryKey(project.projectId),
     [project.projectId],
@@ -165,6 +172,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const artifactCleanupScheduleQuery = useQuery({
     queryFn: () => getShellImageArtifactCleanupSchedule(project.projectId),
     queryKey: artifactCleanupScheduleQueryKey,
+    retry: false,
+  });
+  const artifactLifecycleRemediationPlanQuery = useQuery({
+    queryFn: () => getShellImageArtifactLifecycleRemediationPlan(project.projectId),
+    queryKey: artifactLifecycleRemediationPlanQueryKey,
     retry: false,
   });
   const notationTrustQuery = useQuery({
@@ -295,6 +307,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     notationTrustQuery.error ||
     artifactCleanupRunsQuery.error ||
     artifactCleanupScheduleQuery.error ||
+    artifactLifecycleRemediationPlanQuery.error ||
     artifactGovernanceQuery.error ||
     policyQuery.error ||
     governanceQuery.error ||
@@ -461,10 +474,12 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               governance={artifactGovernanceQuery.data ?? null}
               history={artifactCleanupRunsQuery.data ?? []}
               isLoading={artifactGovernanceQuery.isLoading}
+              isRemediationLoading={artifactLifecycleRemediationPlanQuery.isLoading}
               isRunning={artifactCleanupMutation.isPending}
               isSavingSchedule={artifactCleanupScheduleMutation.isPending}
-          onRun={(dryRun) => artifactCleanupMutation.mutate({ dryRun, projectId: project.projectId })}
+              onRun={(dryRun) => artifactCleanupMutation.mutate({ dryRun, projectId: project.projectId })}
               onSaveSchedule={() => artifactCleanupScheduleMutation.mutate(cleanupScheduleForm)}
+              remediationPlan={artifactLifecycleRemediationPlanQuery.data ?? null}
               run={artifactCleanupRun}
               schedule={artifactCleanupScheduleQuery.data ?? null}
               scheduleForm={cleanupScheduleForm}
@@ -824,10 +839,12 @@ function ArtifactCleanupPanel({
   governance,
   history,
   isLoading,
+  isRemediationLoading,
   isRunning,
   isSavingSchedule,
   onRun,
   onSaveSchedule,
+  remediationPlan,
   run,
   schedule,
   scheduleForm,
@@ -836,10 +853,12 @@ function ArtifactCleanupPanel({
   governance: ShellImageArtifactCleanupGovernance | null;
   history: ShellImageArtifactCleanupRun[];
   isLoading: boolean;
+  isRemediationLoading: boolean;
   isRunning: boolean;
   isSavingSchedule: boolean;
   onRun: (dryRun: boolean) => void;
   onSaveSchedule: () => void;
+  remediationPlan: ShellImageArtifactLifecycleRemediationPlan | null;
   run: ShellImageArtifactCleanupRun | null;
   schedule: ShellImageArtifactCleanupSchedule | null;
   scheduleForm: ShellImageArtifactCleanupScheduleUpdateRequest;
@@ -899,6 +918,10 @@ function ArtifactCleanupPanel({
           Drift issues: {lifecycleDrift.issues.join(", ")}
         </div>
       ) : null}
+      <LifecycleRemediationPlanPanel
+        isLoading={isRemediationLoading}
+        plan={remediationPlan}
+      />
       <div className="preview-alert artifact-cleanup-row">
         <strong>Schedule dry-run</strong>
         <label className="inline-check">
@@ -1007,6 +1030,73 @@ function ArtifactCleanupPanel({
         ))}
       </div>
     </section>
+  );
+}
+
+function LifecycleRemediationPlanPanel({
+  isLoading,
+  plan,
+}: {
+  isLoading: boolean;
+  plan: ShellImageArtifactLifecycleRemediationPlan | null;
+}) {
+  if (isLoading) {
+    return <div className="preview-alert">Loading lifecycle remediation plan</div>;
+  }
+
+  const status = plan?.status ?? "unknown";
+  const proposals = plan?.rule_proposals ?? [];
+  const objectLockRisks = plan?.object_lock_risks ?? [];
+  const impact = plan?.versioned_object_impact;
+
+  return (
+    <div className="preview-alert artifact-cleanup-remediation">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">READ-ONLY REMEDIATION</div>
+          <h4>Lifecycle remediation plan</h4>
+        </div>
+        <span className={`status-pill ${status === "ready" ? "status-ready" : "status-warning"}`}>
+          {status}
+        </span>
+      </div>
+      <div className="shell-governance-grid">
+        <Detail label="Apply gate" value={plan?.apply_allowed ? "apply enabled" : "read-only plan"} />
+        <Detail label="Approval" value={plan?.approval_required ? "required" : "not required"} />
+        <Detail label="Proposals" value={String(proposals.length)} />
+        <Detail label="Noncurrent versions" value={String(impact?.noncurrent_version_count ?? 0)} />
+        <Detail label="Delete markers" value={String(impact?.delete_marker_count ?? 0)} />
+      </div>
+      {proposals.length === 0 ? (
+        <div className="preview-alert">No lifecycle rule changes proposed</div>
+      ) : null}
+      {proposals.map((proposal) => (
+        <div className="preview-alert artifact-cleanup-row" key={`${proposal.rule_id}-${proposal.prefix}`}>
+          <strong>{proposal.proposal_type}</strong>
+          <code>{proposal.prefix}</code>
+          <small>{proposal.expiration_days}d current</small>
+          <small>{proposal.noncurrent_expiration_days ?? "no"}d noncurrent</small>
+          <span className={`status-pill ${proposal.safe_to_apply ? "status-ready" : "status-warning"}`}>
+            {proposal.safe_to_apply ? "safe" : "approval"}
+          </span>
+        </div>
+      ))}
+      {objectLockRisks.map((risk) => (
+        <div className="preview-alert preview-alert-danger" key={risk.code}>
+          {risk.severity}: {risk.message}
+        </div>
+      ))}
+      {impact?.notes.slice(0, 2).map((note) => (
+        <div className="preview-alert" key={note}>
+          {note}
+        </div>
+      ))}
+      {plan?.rollback_hints.slice(0, 2).map((hint) => (
+        <div className="preview-alert" key={hint}>
+          Rollback: {hint}
+        </div>
+      ))}
+    </div>
   );
 }
 

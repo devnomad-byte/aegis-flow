@@ -2676,6 +2676,99 @@ def test_tool_registry_shell_image_artifact_cleanup_dry_run_and_execute() -> Non
     assert expired_ref not in governance.text
 
 
+def test_tool_registry_shell_image_artifact_lifecycle_plan_is_read_only_and_audited() -> None:
+    project = make_project(permissions=["tool-registry:view"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    now = datetime.now(UTC)
+    artifact_ref = f"s3://capievo/shell-image-admissions/{project.id}/2026/07/05/sbom.json"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        object_lock_enabled=True,
+        default_retention_mode=None,
+        default_retention_days=None,
+        lifecycle_rules=[],
+        version_reconciliation={
+            f"shell-image-admissions/{project.id}/": {
+                "current_version_count": 1,
+                "noncurrent_version_count": 2,
+                "delete_marker_count": 1,
+            }
+        },
+    )
+    registry_store.image_admissions[project.id] = [
+        ShellImageAdmissionRead(
+            id=uuid4(),
+            project_id=project.id,
+            image_ref="registry.example/aegis/runtime:7-alpine",
+            image_digest="sha256:" + ("c" * 64),
+            registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+            registry_digest="sha256:" + ("c" * 64),
+            digest_match=True,
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="passed",
+            policy_decision="approved",
+            decision_reason="registry digest, SBOM, and vulnerability evidence passed",
+            checked_at=now,
+            evidence={
+                "sbom": {
+                    "artifact_ref": artifact_ref,
+                    "artifact_sha256": "c" * 64,
+                    "artifact_size_bytes": 17,
+                    "artifact_retention_days": 30,
+                    "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                    "raw_sbom": {"token": "redaction-canary-value"},
+                }
+            },
+            created_by=uuid4(),
+            updated_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        artifact_object_store=object_store,
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-plan"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == str(project.id)
+    assert body["status"] == "action_required"
+    assert body["apply_allowed"] is False
+    assert body["approval_required"] is True
+    assert body["rule_proposals"][0]["proposal_type"] == "add_rule"
+    assert body["rule_proposals"][0]["prefix"] == f"shell-image-admissions/{project.id}/"
+    assert body["object_lock_risks"][0]["code"] == "missing_object_lock_default_retention"
+    assert body["versioned_object_impact"]["noncurrent_version_count"] == 2
+    assert body["versioned_object_impact"]["delete_marker_count"] == 1
+    assert body["rollback_hints"]
+    assert audit_store.events[-1]["action"] == (
+        "tool_registry.shell_image_artifact.lifecycle_remediation_plan.view"
+    )
+    metadata = cast(dict[str, object], audit_store.events[-1]["metadata"])
+    assert metadata == {
+        "status": "action_required",
+        "proposal_count": 1,
+        "risk_count": 1,
+        "checked_prefix_count": 1,
+        "apply_allowed": False,
+    }
+    rendered = response.text + repr(audit_store.events)
+    assert artifact_ref not in rendered
+    assert "redaction-canary-value" not in rendered
+    assert "c" * 64 not in rendered
+
+
 def test_tool_registry_shell_image_artifact_cleanup_history_is_project_scoped() -> None:
     project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
     other_project = make_project(permissions=["tool-registry:view", "tool-registry:write"])

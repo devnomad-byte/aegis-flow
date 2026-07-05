@@ -7,6 +7,7 @@ import {
   getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
   getShellImageArtifactCleanupSchedule,
+  getShellImageArtifactLifecycleRemediationPlan,
   listShellImageArtifactCleanupRuns,
   listNotationTrustCertificates,
   listShellTemplates,
@@ -17,6 +18,7 @@ import {
   shellImageArtifactCleanupRunsQueryKey,
   shellImageArtifactCleanupScheduleQueryKey,
   shellImageArtifactGovernanceQueryKey,
+  shellImageArtifactLifecycleRemediationPlanQueryKey,
   shellImageGovernanceQueryKey,
   shellTemplatesQueryKey,
   shellImagePolicyQueryKey,
@@ -147,6 +149,48 @@ describe("toolRegistryApi", () => {
             deleted_artifact_count: 0,
             failed_artifact_count: 0,
             candidates: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(
+          JSON.stringify({
+            project_id: "ops-command",
+            status: "action_required",
+            apply_allowed: false,
+            approval_required: true,
+            rule_proposals: [
+              {
+                proposal_type: "add_rule",
+                rule_id: "aegisflow-shell-image-artifacts-ops-command",
+                prefix: "shell-image-admissions/ops-command/",
+                expiration_days: 30,
+                noncurrent_expiration_days: 30,
+                expired_object_delete_marker: true,
+                matched_rule_ids: [],
+                reason_codes: ["missing_lifecycle_rule"],
+                safe_to_apply: false,
+                notes: ["Review before apply"],
+              },
+            ],
+            object_lock_risks: [
+              {
+                code: "missing_object_lock_default_retention",
+                severity: "medium",
+                message: "Object Lock default retention is missing.",
+              },
+            ],
+            versioned_object_impact: {
+              status: "needs_reconciliation",
+              current_version_count: 1,
+              noncurrent_version_count: 2,
+              delete_marker_count: 1,
+              checked_prefixes: ["shell-image-admissions/ops-command/"],
+              notes: ["Noncurrent versions remain billable."],
+            },
+            rollback_hints: ["Approval is required before any future apply."],
             generated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
@@ -407,6 +451,13 @@ describe("toolRegistryApi", () => {
       retention_controls: { bucket: "capievo", worm_capable: true, default_retention_configured: true },
     });
     await expect(
+      getShellImageArtifactLifecycleRemediationPlan("ops-command", fetcher),
+    ).resolves.toMatchObject({
+      apply_allowed: false,
+      rule_proposals: [{ proposal_type: "add_rule", prefix: "shell-image-admissions/ops-command/" }],
+      versioned_object_impact: { noncurrent_version_count: 2, delete_marker_count: 1 },
+    });
+    await expect(
       runShellImageArtifactCleanup("ops-command", { dry_run: false, limit: 10 }, fetcher),
     ).resolves.toMatchObject({ deleted_count: 1, dry_run: false });
     await expect(listShellImageArtifactCleanupRuns("ops-command", fetcher)).resolves.toMatchObject([
@@ -494,6 +545,12 @@ describe("toolRegistryApi", () => {
       "tool-registry",
       "shell-image-artifact-cleanup-schedule",
     ]);
+    expect(shellImageArtifactLifecycleRemediationPlanQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-artifact-lifecycle-remediation-plan",
+    ]);
     expect(notationTrustCertificatesQueryKey("ops-command")).toEqual([
       "project",
       "ops-command",
@@ -517,6 +574,9 @@ describe("toolRegistryApi", () => {
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/governance",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-plan",
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",

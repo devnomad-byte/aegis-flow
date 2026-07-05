@@ -51,6 +51,14 @@ ShellImageArtifactVersionReconciliationStatus = Literal[
     "needs_reconciliation",
     "unknown",
 ]
+ShellImageArtifactLifecycleRemediationStatus = Literal[
+    "ready",
+    "action_required",
+    "manual_review",
+    "unknown",
+]
+ShellImageArtifactLifecycleRuleProposalType = Literal["add_rule", "manual_review"]
+ShellImageArtifactLifecycleRiskSeverity = Literal["low", "medium", "high"]
 
 DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}
 DEFAULT_BLOCKED_SEVERITIES = ["HIGH", "CRITICAL"]
@@ -625,6 +633,48 @@ class ShellImageArtifactCleanupScheduleRead(BaseModel):
     updated_by: UUID | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class ShellImageArtifactLifecycleRuleProposalRead(BaseModel):
+    proposal_type: ShellImageArtifactLifecycleRuleProposalType
+    rule_id: str
+    prefix: str
+    expiration_days: int
+    noncurrent_expiration_days: int | None = None
+    expired_object_delete_marker: bool = True
+    matched_rule_ids: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    safe_to_apply: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class ShellImageArtifactObjectLockRiskRead(BaseModel):
+    code: str
+    severity: ShellImageArtifactLifecycleRiskSeverity
+    message: str
+
+
+class ShellImageArtifactVersionedObjectImpactRead(BaseModel):
+    status: ShellImageArtifactVersionReconciliationStatus = "unknown"
+    current_version_count: int = 0
+    noncurrent_version_count: int = 0
+    delete_marker_count: int = 0
+    checked_prefixes: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ShellImageArtifactLifecycleRemediationPlanRead(BaseModel):
+    project_id: UUID
+    status: ShellImageArtifactLifecycleRemediationStatus = "unknown"
+    apply_allowed: bool = False
+    approval_required: bool = True
+    rule_proposals: list[ShellImageArtifactLifecycleRuleProposalRead] = Field(default_factory=list)
+    object_lock_risks: list[ShellImageArtifactObjectLockRiskRead] = Field(default_factory=list)
+    versioned_object_impact: ShellImageArtifactVersionedObjectImpactRead = Field(
+        default_factory=ShellImageArtifactVersionedObjectImpactRead
+    )
+    rollback_hints: list[str] = Field(default_factory=list)
+    generated_at: datetime
 
 
 class CredentialRefRead(BaseModel):
