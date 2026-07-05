@@ -165,3 +165,39 @@ test("renders the policy center workspace", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Policy Posture" })).toBeVisible();
   await expect(page.getByText("No recent policy decisions")).toBeVisible();
 });
+
+test("renders the project admin workspace", async ({ page }) => {
+  await page.route("**/api/v1/projects/ops-command/admin/overview", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        project: {
+          project_id: "ops-command",
+          project_name: "Ops Command",
+          project_slug: "ops-command",
+          status: "active",
+        },
+        summary: {
+          member_count: 0,
+          active_member_count: 0,
+          inactive_member_count: 0,
+          role_count: 0,
+          permission_count: 0,
+          permission_group_count: 0,
+          recent_permission_event_count: 0,
+        },
+        members: [],
+        roles: [],
+        permission_groups: [],
+        recent_permission_events: [],
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
+  await page.goto("/projects/ops-command/admin");
+
+  await expect(page.getByRole("heading", { name: "Project Admin" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Member Directory" })).toBeVisible();
+  await expect(page.getByText("No members in this project")).toBeVisible();
+});

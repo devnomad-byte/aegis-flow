@@ -7,6 +7,7 @@ export type ProjectFeatureView =
   | "command"
   | "debug-chat"
   | "knowledge-center"
+  | "project-admin"
   | "template-gallery"
   | "policy-center"
   | "workflows"
@@ -36,6 +37,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   "knowledge-center": () =>
     import("../modules/knowledge-center/ProjectKnowledgeCenter").then((module) => ({
       default: module.ProjectKnowledgeCenter,
+    })),
+  "project-admin": () =>
+    import("../modules/project-admin/ProjectAdmin").then((module) => ({
+      default: module.ProjectAdmin,
     })),
   "template-gallery": () =>
     import("../modules/template-gallery/ProjectTemplateGallery").then((module) => ({

@@ -78,6 +78,12 @@ const projectPolicyCenterRoute = createRoute({
   component: ProjectPolicyCenterRoute,
 });
 
+const projectAdminRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/admin",
+  component: ProjectAdminRoute,
+});
+
 const projectToolRegistryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId/tools",
@@ -118,6 +124,7 @@ const routeTree = rootRoute.addChildren([
   projectKnowledgeRoute,
   projectTemplatesRoute,
   projectPolicyCenterRoute,
+  projectAdminRoute,
   projectToolRegistryRoute,
   projectModelGatewaySettingsRoute,
   projectPromptLibraryRoute,
@@ -220,6 +227,18 @@ function ProjectPolicyCenterRoute() {
   }
 
   return <ProjectShell project={project} runtime={context} view="policy-center" />;
+}
+
+function ProjectAdminRoute() {
+  const context = projectAdminRoute.useRouteContext();
+  const params = projectAdminRoute.useParams();
+  const project = findProjectForRoute(context.account, params.projectId);
+
+  if (!project) {
+    return <ForbiddenView permission="project:membership" />;
+  }
+
+  return <ProjectShell project={project} runtime={context} view="project-admin" />;
 }
 
 function ProjectToolRegistryRoute() {

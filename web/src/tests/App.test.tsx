@@ -239,6 +239,41 @@ describe("App", () => {
     expect(await screen.findByText("No recent policy decisions")).toBeInTheDocument();
   });
 
+  it("renders project admin for project admin routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          project: {
+            project_id: "ops-command",
+            project_name: "Ops Command",
+            project_slug: "ops-command",
+            status: "active",
+          },
+          summary: {
+            member_count: 0,
+            active_member_count: 0,
+            inactive_member_count: 0,
+            role_count: 0,
+            permission_count: 0,
+            permission_group_count: 0,
+            recent_permission_event_count: 0,
+          },
+          members: [],
+          roles: [],
+          permission_groups: [],
+          recent_permission_events: [],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    render(<App initialPath="/projects/ops-command/admin" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Project Admin" })).toBeInTheDocument();
+    expect(await screen.findByText("No members in this project")).toBeInTheDocument();
+  });
+
   it("shows forbidden instead of global data for regular project members", async () => {
     render(<App account={DEMO_ACCOUNTS.projectMember} initialPath="/global" />);
 

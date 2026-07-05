@@ -10,6 +10,7 @@ import {
   ScrollText,
   ShieldCheck,
   SlidersHorizontal,
+  UserCog,
 } from "lucide-react";
 import { useRouter } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect } from "react";
@@ -28,6 +29,7 @@ const navItems = [
   { label: "Tool Registry", icon: Boxes, route: "tool-registry" },
   { label: "Run Observatory", icon: Activity, route: "runs" },
   { label: "Debug Chat", icon: MessageSquareText, route: "debug-chat" },
+  { label: "Project Admin", icon: UserCog, route: "project-admin" },
   { label: "Policy Center", icon: ShieldCheck, route: "policy-center" },
   { label: "Model Gateway", icon: SlidersHorizontal, route: "model-gateway-settings" },
   { label: "Prompt Library", icon: ScrollText, route: "prompt-library" },
@@ -45,6 +47,7 @@ const ProjectFeatureComponents = {
   "debug-chat": lazy(PROJECT_FEATURE_LOADERS["debug-chat"]),
   "knowledge-center": lazy(PROJECT_FEATURE_LOADERS["knowledge-center"]),
   "policy-center": lazy(PROJECT_FEATURE_LOADERS["policy-center"]),
+  "project-admin": lazy(PROJECT_FEATURE_LOADERS["project-admin"]),
   "template-gallery": lazy(PROJECT_FEATURE_LOADERS["template-gallery"]),
   workflows: lazy(PROJECT_FEATURE_LOADERS.workflows),
   "tool-registry": lazy(PROJECT_FEATURE_LOADERS["tool-registry"]),
@@ -75,6 +78,7 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
               (view === "agent-console" && item.route === "agent-console") ||
               (view === "knowledge-center" && item.route === "knowledge-center") ||
               (view === "policy-center" && item.route === "policy-center") ||
+              (view === "project-admin" && item.route === "project-admin") ||
               (view === "template-gallery" && item.route === "template-gallery") ||
               (view === "workflows" && item.label === "Workflow Studio") ||
               (view === "debug-chat" && item.route === "debug-chat") ||
@@ -140,6 +144,13 @@ export function ProjectShell({ project, runtime, view = "command" }: ProjectShel
                     void router.navigate({
                       params: { projectId: project.projectId },
                       to: "/projects/$projectId/policies",
+                    });
+                    return;
+                  }
+                  if (item.route === "project-admin") {
+                    void router.navigate({
+                      params: { projectId: project.projectId },
+                      to: "/projects/$projectId/admin",
                     });
                     return;
                   }
@@ -225,6 +236,8 @@ function getFeatureLabel(view: ProjectFeatureView) {
       return "Knowledge Center";
     case "policy-center":
       return "Policy Center";
+    case "project-admin":
+      return "Project Admin";
     case "template-gallery":
       return "Template Gallery";
     case "workflows":

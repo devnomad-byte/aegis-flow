@@ -32,6 +32,7 @@ const featureChunkRules: Array<{ chunk: string; markers: string[] }> = [
   },
   { chunk: "agent-console", markers: ["/src/modules/agent-console/"] },
   { chunk: "knowledge-center", markers: ["/src/modules/knowledge-center/"] },
+  { chunk: "project-admin", markers: ["/src/modules/project-admin/"] },
   { chunk: "template-gallery", markers: ["/src/modules/template-gallery/"] },
   { chunk: "policy-center", markers: ["/src/modules/policy-center/"] },
   { chunk: "workflow-studio", markers: ["/src/modules/workflow-studio/"] },

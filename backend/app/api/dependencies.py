@@ -27,6 +27,8 @@ from backend.app.observability.sqlalchemy_store import SqlAlchemyRuntimeTraceSto
 from backend.app.policy_center.sqlalchemy_store import SqlAlchemyPolicyCenterStore
 from backend.app.policy_center.store import PolicyCenterStore
 from backend.app.policy_gate.sqlalchemy_store import SqlAlchemyPolicyGateEventStore
+from backend.app.project_admin.sqlalchemy_store import SqlAlchemyProjectAdminStore
+from backend.app.project_admin.store import ProjectAdminStore
 from backend.app.project_command.sqlalchemy_store import SqlAlchemyProjectCommandCenterStore
 from backend.app.project_command.store import ProjectCommandCenterStore
 from backend.app.retrieval.eval_store import RetrievalEvalStore
@@ -110,6 +112,12 @@ def get_policy_center_store(
     session: AsyncSession = AsyncSessionDependency,
 ) -> PolicyCenterStore:
     return SqlAlchemyPolicyCenterStore(session)
+
+
+def get_project_admin_store(
+    session: AsyncSession = AsyncSessionDependency,
+) -> ProjectAdminStore:
+    return SqlAlchemyProjectAdminStore(session)
 
 
 def get_knowledge_ingestion_store(

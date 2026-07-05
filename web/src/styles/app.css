@@ -2576,6 +2576,186 @@ select {
   grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
 }
 
+.project-admin-main {
+  display: grid;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+
+.project-admin-hero {
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(46, 243, 197, 0.13), transparent 54%),
+    var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  display: grid;
+  gap: var(--space-xl);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr);
+  padding: var(--space-xl);
+}
+
+.project-admin-hero h2 {
+  font-size: 34px;
+  line-height: 1.15;
+  margin: 8px 0;
+}
+
+.project-admin-hero p {
+  color: var(--color-text-muted);
+  margin: 0;
+  max-width: 760px;
+}
+
+.project-admin-hero-metrics {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.project-admin-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(0, 0.9fr) minmax(380px, 1.1fr);
+}
+
+.project-admin-members-panel,
+.project-admin-roles-panel,
+.project-admin-permissions-panel,
+.project-admin-audit-panel {
+  min-width: 0;
+}
+
+.project-admin-audit-panel {
+  grid-column: 1 / -1;
+}
+
+.project-admin-posture-list,
+.project-admin-member-list,
+.project-admin-role-list,
+.project-admin-permission-list,
+.project-admin-audit-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.project-admin-posture-row,
+.project-admin-member-row,
+.project-admin-role-row,
+.project-admin-permission-row,
+.project-admin-audit-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.project-admin-posture-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content;
+  min-height: 48px;
+}
+
+.project-admin-posture-row svg {
+  color: var(--color-accent);
+}
+
+.project-admin-posture-row span {
+  color: var(--color-text-muted);
+}
+
+.project-admin-posture-row strong {
+  font-family: var(--font-mono);
+}
+
+.project-admin-member-row {
+  grid-template-columns: 40px minmax(0, 1fr) max-content;
+}
+
+.project-admin-role-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.project-admin-permission-row {
+  align-items: flex-start;
+  grid-template-columns: 22px minmax(0, 1fr);
+}
+
+.project-admin-audit-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.project-admin-avatar {
+  align-items: center;
+  background: rgba(46, 243, 197, 0.14);
+  border: 1px solid rgba(46, 243, 197, 0.38);
+  border-radius: var(--radius-md);
+  color: var(--color-accent);
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  height: 40px;
+  justify-content: center;
+  width: 40px;
+}
+
+.project-admin-member-row strong,
+.project-admin-member-row small,
+.project-admin-role-row strong,
+.project-admin-role-row small,
+.project-admin-permission-row strong,
+.project-admin-permission-row small,
+.project-admin-audit-row strong,
+.project-admin-audit-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.project-admin-member-row small {
+  align-items: center;
+  color: var(--color-text-muted);
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.project-admin-role-row p,
+.project-admin-audit-row p {
+  color: var(--color-text-muted);
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.project-admin-chip-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.project-admin-member-row .project-admin-chip-row,
+.project-admin-role-row .project-admin-chip-row {
+  grid-column: 2 / -1;
+}
+
+.project-admin-chip-row code {
+  background: rgba(11, 15, 14, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 7px;
+}
+
+.muted-inline {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
 @media (max-width: 1180px) {
   .aegis-shell {
     grid-template-areas:
@@ -2695,13 +2875,16 @@ select {
   .template-gallery-hero,
   .template-gallery-grid,
   .policy-center-hero,
-  .policy-center-grid {
+  .policy-center-grid,
+  .project-admin-hero,
+  .project-admin-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .template-gallery-metrics,
   .template-detail-stat-grid,
-  .policy-hero-metrics {
+  .policy-hero-metrics,
+  .project-admin-hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
