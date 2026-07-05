@@ -64,11 +64,24 @@ type RunScope = {
   versionId: string;
 };
 
+type RunHistoryStatusFilter = WorkflowRunStatus | "all";
+
 const EMPTY_RUNTIME_SPANS: RuntimeTraceSpan[] = [];
 const EMPTY_MODEL_INVOCATIONS: ModelGatewayInvocation[] = [];
 const EMPTY_TOOL_INVOCATIONS: ToolGatewayInvocation[] = [];
 const EMPTY_RUNTIME_EVENTS: WorkflowRunEventRead[] = [];
 const SPAN_LIMIT = 500;
+const RUN_HISTORY_STATUS_FILTERS: Array<{
+  label: string;
+  value: RunHistoryStatusFilter;
+}> = [
+  { label: "All", value: "all" },
+  { label: "Pending", value: "pending_approval" },
+  { label: "Running", value: "running" },
+  { label: "Failed", value: "failed" },
+  { label: "Cancelled", value: "cancelled" },
+  { label: "Success", value: "success" },
+];
 
 const SAFE_ATTRIBUTE_LABELS: Record<string, string> = {
   input_summary: "INPUT SUMMARY",
@@ -99,11 +112,15 @@ const SAFE_ATTRIBUTE_LABELS: Record<string, string> = {
 export function RunObservatory({ project }: RunObservatoryProps) {
   const queryClient = useQueryClient();
   const [accessReason, setAccessReason] = useState("Need to inspect sanitized run trace");
+  const [historyStatusFilter, setHistoryStatusFilter] =
+    useState<RunHistoryStatusFilter>("all");
   const [ledgerDrilldown, setLedgerDrilldown] = useState<LedgerDrilldown>(null);
   const [runScope, setRunScope] = useState<RunScope>(() => readInitialRunScope());
 
   const hasTraceScope = Boolean(runScope.runId && runScope.traceId);
   const hasRunDetailScope = Boolean(runScope.versionId && runScope.runId);
+  const selectedHistoryStatus =
+    historyStatusFilter === "all" ? undefined : historyStatusFilter;
   const runtimeTraceFilters: RuntimeTraceSpanFilters = {
     run_id: runScope.runId,
     trace_id: runScope.traceId,
@@ -130,8 +147,16 @@ export function RunObservatory({ project }: RunObservatoryProps) {
   });
   const runListQuery = useQuery({
     enabled: Boolean(runScope.versionId),
-    queryFn: () => listWorkflowRuns(project.projectId, runScope.versionId, { limit: 20 }),
-    queryKey: workflowRunListQueryKey(project.projectId, runScope.versionId),
+    queryFn: () =>
+      listWorkflowRuns(project.projectId, runScope.versionId, {
+        limit: 20,
+        status: selectedHistoryStatus,
+      }),
+    queryKey: workflowRunListQueryKey(
+      project.projectId,
+      runScope.versionId,
+      selectedHistoryStatus,
+    ),
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => isActiveRunStatus(run.status)) ? 2500 : false,
     retry: false,
@@ -231,6 +256,15 @@ export function RunObservatory({ project }: RunObservatoryProps) {
   const runtimeEvents = runEventsQuery.data?.events ?? EMPTY_RUNTIME_EVENTS;
   const traceEvents = useMemo(() => buildTraceEvents(runtimeSpans), [runtimeSpans]);
   const hasEvents = traceEvents.length > 0;
+  const handleSelectHistoryRun = (run: WorkflowRunRead) => {
+    setLedgerDrilldown(null);
+    setRunScope({
+      nodeId: "",
+      runId: run.run_id,
+      traceId: run.trace_id,
+      versionId: run.workflow_version_id,
+    });
+  };
 
   return (
     <main className="aegis-main settings-main">
@@ -257,13 +291,21 @@ export function RunObservatory({ project }: RunObservatoryProps) {
               operationError={
                 resumeMutation.error ?? cancelMutation.error ?? retryMutation.error ?? null
               }
+              projectId={project.projectId}
               onCancel={() => cancelMutation.mutate()}
               onResume={(payload) => resumeMutation.mutate(payload)}
               onRetry={() => retryMutation.mutate()}
             />
           ) : null}
           {runScope.versionId ? (
-            <WorkflowRunHistoryPanel error={runListQuery.error} runs={runListQuery.data?.runs ?? []} />
+            <WorkflowRunHistoryPanel
+              error={runListQuery.error}
+              onSelectRun={handleSelectHistoryRun}
+              onStatusFilterChange={setHistoryStatusFilter}
+              runs={runListQuery.data?.runs ?? []}
+              selectedRunId={runScope.runId}
+              statusFilter={historyStatusFilter}
+            />
           ) : null}
           {hasRunDetailScope ? (
             <RuntimeEventStreamPanel
@@ -533,6 +575,7 @@ function WorkflowRunDetailPanel({
   onResume,
   onRetry,
   operationError,
+  projectId,
 }: {
   detail: WorkflowRunDetailResponse | undefined;
   error: unknown;
@@ -542,6 +585,7 @@ function WorkflowRunDetailPanel({
   onResume: (payload: Record<string, unknown>) => void;
   onRetry: () => void;
   operationError: unknown;
+  projectId: string;
 }) {
   const [resumePayloadText, setResumePayloadText] = useState("{\n}");
   const [resumePayloadError, setResumePayloadError] = useState("");
@@ -577,6 +621,7 @@ function WorkflowRunDetailPanel({
           ) : null}
           {pendingApproval ? <PendingApprovalBanner approval={pendingApproval} /> : null}
           <WorkflowRunActions
+            debugChatHref={buildDebugChatHref(projectId, detail.run)}
             isOperating={isOperating}
             onCancel={onCancel}
             onPayloadChange={(value) => {
@@ -612,6 +657,7 @@ function WorkflowRunDetailPanel({
 }
 
 function WorkflowRunActions({
+  debugChatHref,
   isOperating,
   onCancel,
   onPayloadChange,
@@ -621,6 +667,7 @@ function WorkflowRunActions({
   payloadText,
   status,
 }: {
+  debugChatHref: string;
   isOperating: boolean;
   onCancel: () => void;
   onPayloadChange: (value: string) => void;
@@ -680,6 +727,9 @@ function WorkflowRunActions({
         >
           Retry Run
         </button>
+        <a className="toolbar-button workflow-run-link" href={debugChatHref}>
+          Open Debug Chat
+        </a>
       </div>
     </div>
   );
@@ -732,14 +782,35 @@ function RuntimeEventStreamPanel({
 
 function WorkflowRunHistoryPanel({
   error,
+  onSelectRun,
+  onStatusFilterChange,
   runs,
+  selectedRunId,
+  statusFilter,
 }: {
   error: unknown;
+  onSelectRun: (run: WorkflowRunRead) => void;
+  onStatusFilterChange: (status: RunHistoryStatusFilter) => void;
   runs: WorkflowRunRead[];
+  selectedRunId: string;
+  statusFilter: RunHistoryStatusFilter;
 }) {
   return (
     <section className="global-panel run-detail-panel" aria-label="Workflow Run History">
       <PanelHeader count={runs.length} label="RUN HISTORY" title="Run History" />
+      <div className="run-history-toolbar" aria-label="Run history status filter">
+        {RUN_HISTORY_STATUS_FILTERS.map((filter) => (
+          <button
+            aria-pressed={statusFilter === filter.value}
+            className="toolbar-button run-history-filter-button"
+            key={filter.value}
+            onClick={() => onStatusFilterChange(filter.value)}
+            type="button"
+          >
+            {filter.label}
+          </button>
+        ))}
+      </div>
       {error ? (
         <div className="preview-alert preview-alert-danger" role="alert">
           {(error as Error).message}
@@ -748,13 +819,20 @@ function WorkflowRunHistoryPanel({
       {runs.length ? (
         <div className="workflow-run-checkpoints workflow-run-history">
           {runs.map((run) => (
-            <article className="workflow-run-checkpoint" key={run.id}>
+            <button
+              aria-current={selectedRunId === run.run_id ? "true" : undefined}
+              aria-label={`Load run ${run.run_id}`}
+              className="workflow-run-checkpoint workflow-run-history-button"
+              key={run.id}
+              onClick={() => onSelectRun(run)}
+              type="button"
+            >
               <div>
                 <strong>{run.run_id}</strong>
                 <span className="telemetry">{formatTimestamp(run.updated_at)}</span>
               </div>
               <span className={`status-pill ${runStatusClass(run.status)}`}>{run.status}</span>
-            </article>
+            </button>
           ))}
         </div>
       ) : (
@@ -1141,6 +1219,14 @@ function isActiveRunStatus(status: string | undefined) {
 
 function isTerminalRunStatus(status: WorkflowRunStatus) {
   return status === "success" || status === "failed" || status === "cancelled";
+}
+
+function buildDebugChatHref(projectId: string, run: WorkflowRunRead) {
+  const params = new URLSearchParams({
+    run_id: run.run_id,
+    trace_id: run.trace_id,
+  });
+  return `/projects/${encodeURIComponent(projectId)}/debug-chat?${params.toString()}`;
 }
 
 async function invalidateWorkflowRunQueries(

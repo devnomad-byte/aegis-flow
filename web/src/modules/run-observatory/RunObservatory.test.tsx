@@ -452,6 +452,113 @@ describe("RunObservatory", () => {
     expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
   });
 
+  it("selects historical workflow runs, filters history by status, and links to Debug Chat with run scope", async () => {
+    const user = userEvent.setup();
+    const versionId = "44444444-4444-4444-8444-444444444444";
+    window.history.pushState({}, "", `/projects/ops-command/runs?version_id=${versionId}`);
+    const failedRunDetail = workflowRunDetailFixture({
+      error_message: "Tool invocation failed after policy gate",
+      error_type: "ToolExecutionError",
+      id: "run-row-failed",
+      outputs_summary: "failed before recovery",
+      pending_approval: null,
+      run_id: "run-failed",
+      status: "failed",
+      trace_id: "trace-failed",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith(`/workflows/versions/${versionId}/runs?limit=20`)) {
+        return new Response(
+          JSON.stringify({
+            count: 2,
+            runs: [
+              workflowRunDetailFixture().run,
+              {
+                ...failedRunDetail.run,
+                updated_at: "2026-07-04T00:05:00Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/workflows/versions/${versionId}/runs?limit=20&status=failed`)) {
+        return new Response(JSON.stringify({ count: 1, runs: [failedRunDetail.run] }), {
+          status: 200,
+        });
+      }
+      if (url.endsWith(`/workflows/versions/${versionId}/runs/run-failed`)) {
+        return new Response(JSON.stringify(failedRunDetail), { status: 200 });
+      }
+      if (url.endsWith(`/workflows/versions/${versionId}/runs/run-failed/events?limit=100`)) {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            events: [
+              runtimeEvent({
+                event_type: "run.failed",
+                id: "runtime-event-failed",
+                message: "tool execution failed",
+                run_id: "run-failed",
+                status: "failed",
+                trace_id: "trace-failed",
+              }),
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/runtime-traces/spans?run_id=run-failed&trace_id=trace-failed")) {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            spans: [
+              runtimeSpan({
+                attributes: { error_summary: "tool failed" },
+                id: "span-row-failed",
+                run_id: "run-failed",
+                span_id: "span-failed",
+                status: "failed",
+                trace_id: "trace-failed",
+              }),
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ detail: `unexpected request ${url}` }), { status: 500 });
+    });
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+
+    render(
+      <AppProviders runtime={runtime}>
+        <RunObservatory project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    expect(await screen.findByText("Run History")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /Load run run-failed/i }));
+
+    expect(await screen.findByText("Tool invocation failed after policy gate")).toBeInTheDocument();
+    expect(screen.getByLabelText("Run ID")).toHaveValue("run-failed");
+    expect(screen.getByLabelText("Trace ID")).toHaveValue("trace-failed");
+    expect(screen.getByRole("link", { name: "Open Debug Chat" })).toHaveAttribute(
+      "href",
+      "/projects/ops-command/debug-chat?run_id=run-failed&trace_id=trace-failed",
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      `/api/v1/projects/ops-command/runtime-traces/spans?run_id=run-failed&trace_id=trace-failed&limit=500`,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Failed" }));
+    expect(fetchSpy).toHaveBeenCalledWith(
+      `/api/v1/projects/ops-command/workflows/versions/${versionId}/runs?limit=20&status=failed`,
+    );
+    expect(screen.getByRole("button", { name: "Failed" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText("raw-secret-token")).not.toBeInTheDocument();
+  });
+
   it("renders forbidden runtime span errors without falling back to ledger data", async () => {
     window.history.pushState(
       {},
@@ -543,11 +650,21 @@ function runtimeEvent(overrides: Record<string, unknown> = {}) {
 }
 
 type RuntimeSpanFixture = {
+  actor_id: string;
   attributes: Record<string, unknown>;
   component: string;
+  created_at: string;
+  created_by: string;
   duration_ms: number;
+  end_time_unix_nano: number;
+  events: unknown[];
   id: string;
+  links: unknown[];
   node_id: string;
+  parent_span_id: string;
+  project_id: string;
+  resource: Record<string, unknown>;
+  run_id: string;
   span_id: string;
   span_kind: string;
   span_name: string;
@@ -555,10 +672,14 @@ type RuntimeSpanFixture = {
   source_type: string;
   start_time_unix_nano: number;
   status: string;
+  trace_id: string;
+  updated_at: string;
+  updated_by: string;
+  workflow_ref: string;
 };
 
-function workflowRunDetailFixture() {
-  return {
+function workflowRunDetailFixture(overrides: Record<string, unknown> = {}) {
+  const workflowRunDetailBase = {
     run: {
       actor_id: "acct-1",
       created_at: "2026-07-04T00:00:00Z",
@@ -609,5 +730,12 @@ function workflowRunDetailFixture() {
         workflow_version_id: "44444444-4444-4444-8444-444444444444",
       },
     ],
+  };
+  return {
+    ...workflowRunDetailBase,
+    run: {
+      ...workflowRunDetailBase.run,
+      ...overrides,
+    },
   };
 }

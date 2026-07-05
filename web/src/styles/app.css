@@ -1750,6 +1750,36 @@ select {
   overflow-wrap: anywhere;
 }
 
+.run-history-toolbar,
+.workflow-run-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.run-history-filter-button[aria-pressed="true"] {
+  background: rgba(46, 243, 197, 0.16);
+  border-color: rgba(46, 243, 197, 0.72);
+  color: var(--color-accent);
+}
+
+.workflow-run-history-button {
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.workflow-run-history-button[aria-current="true"] {
+  border-color: rgba(46, 243, 197, 0.72);
+  box-shadow: inset 3px 0 0 rgba(46, 243, 197, 0.82);
+}
+
+.workflow-run-history-button:hover {
+  border-color: rgba(46, 243, 197, 0.58);
+}
+
 .run-replay-panel,
 .run-evidence-panel {
   grid-column: 1 / -1;
