@@ -220,11 +220,13 @@ class ToolRegistryStore(Protocol):
     ) -> ShellImageArtifactCleanupScheduleRead:
         raise NotImplementedError
 
-    async def list_due_shell_image_artifact_cleanup_schedules(
+    async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
         *,
         now: datetime,
         limit: int,
+        worker_id: str,
+        lease_seconds: int,
     ) -> list[ShellImageArtifactCleanupScheduleRead]:
         raise NotImplementedError
 

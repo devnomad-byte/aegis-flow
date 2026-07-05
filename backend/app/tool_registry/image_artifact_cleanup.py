@@ -72,11 +72,13 @@ class ShellImageArtifactCleanupStore(Protocol):
     ) -> ShellImageArtifactCleanupScheduleRead:
         raise NotImplementedError
 
-    async def list_due_shell_image_artifact_cleanup_schedules(
+    async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
         *,
         now: datetime,
         limit: int,
+        worker_id: str,
+        lease_seconds: int,
     ) -> list[ShellImageArtifactCleanupScheduleRead]:
         raise NotImplementedError
 
@@ -313,11 +315,15 @@ class ShellImageArtifactCleanupScheduler:
         *,
         actor_id: UUID,
         limit: int = 10,
+        worker_id: str = "shell-image-artifact-cleanup-worker",
+        lease_seconds: int = 300,
     ) -> list[ShellImageArtifactCleanupRunRead]:
         now = self.clock()
-        schedules = await self.store.list_due_shell_image_artifact_cleanup_schedules(
+        schedules = await self.store.claim_due_shell_image_artifact_cleanup_schedules(
             now=now,
             limit=limit,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
         )
         runs: list[ShellImageArtifactCleanupRunRead] = []
         for schedule in schedules:

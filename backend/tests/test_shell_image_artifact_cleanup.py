@@ -466,12 +466,96 @@ async def test_shell_image_artifact_cleanup_scheduler_runs_due_dry_run() -> None
 
 
 @pytest.mark.asyncio
+async def test_shell_image_artifact_cleanup_scheduler_claims_due_schedules_with_lease() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    store = _CleanupStore([])
+    await store.upsert_shell_image_artifact_cleanup_schedule(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactCleanupScheduleUpdateRequest(
+            enabled=True,
+            interval_hours=24,
+            limit=50,
+            next_run_at=now - timedelta(minutes=5),
+        ),
+    )
+    scheduler = ShellImageArtifactCleanupScheduler(
+        store=store,
+        object_store_factory=lambda _project_id: InMemoryShellImageArtifactObjectStore(
+            bucket="capievo"
+        ),
+        clock=lambda: now,
+    )
+
+    runs = await scheduler.run_due(actor_id=actor_id, limit=10, worker_id="cleanup-worker-a")
+
+    assert len(runs) == 1
+    assert store.claims == [
+        {
+            "now": now,
+            "limit": 10,
+            "worker_id": "cleanup-worker-a",
+            "lease_seconds": 300,
+        }
+    ]
+    refreshed = await store.get_shell_image_artifact_cleanup_schedule(project_id)
+    assert refreshed is not None
+    assert refreshed.lease_owner == ""
+    assert refreshed.leased_until is None
+
+
+@pytest.mark.asyncio
+async def test_shell_image_artifact_cleanup_store_claim_holds_lease_until_expiry() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    store = _CleanupStore([])
+    await store.upsert_shell_image_artifact_cleanup_schedule(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactCleanupScheduleUpdateRequest(
+            enabled=True,
+            next_run_at=now - timedelta(minutes=1),
+        ),
+    )
+
+    first_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+        now=now,
+        limit=10,
+        worker_id="worker-a",
+        lease_seconds=300,
+    )
+    second_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+        now=now + timedelta(seconds=30),
+        limit=10,
+        worker_id="worker-b",
+        lease_seconds=300,
+    )
+    expired_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+        now=now + timedelta(seconds=301),
+        limit=10,
+        worker_id="worker-c",
+        lease_seconds=300,
+    )
+
+    assert [schedule.project_id for schedule in first_claim] == [project_id]
+    assert second_claim == []
+    assert [schedule.project_id for schedule in expired_claim] == [project_id]
+    refreshed = await store.get_shell_image_artifact_cleanup_schedule(project_id)
+    assert refreshed is not None
+    assert refreshed.lease_owner == "worker-c"
+    assert refreshed.leased_until == now + timedelta(seconds=601)
+
+
+@pytest.mark.asyncio
 async def test_shell_image_artifact_cleanup_scheduler_records_failed_run_on_factory_error() -> None:
     project_id = uuid4()
     actor_id = uuid4()
     now = datetime(2026, 7, 5, 12, tzinfo=UTC)
     store = _CleanupStore([])
-    schedule = await store.upsert_shell_image_artifact_cleanup_schedule(
+    await store.upsert_shell_image_artifact_cleanup_schedule(
         project_id=project_id,
         actor_id=actor_id,
         request=ShellImageArtifactCleanupScheduleUpdateRequest(
@@ -497,7 +581,12 @@ async def test_shell_image_artifact_cleanup_scheduler_records_failed_run_on_fact
     refreshed = await store.get_shell_image_artifact_cleanup_schedule(project_id)
     assert refreshed is not None
     assert refreshed.last_run_id == runs[0].id
-    assert refreshed.next_run_at == now + timedelta(hours=schedule.interval_hours)
+    assert refreshed.next_run_at == now + timedelta(minutes=1)
+    assert refreshed.lease_owner == ""
+    assert refreshed.leased_until is None
+    assert refreshed.failure_count == 1
+    assert refreshed.last_error_type == "RuntimeError"
+    assert refreshed.last_error_message == "RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -568,6 +657,7 @@ class _CleanupStore:
         self.updates: list[dict[str, object]] = []
         self.cleanup_runs: list[ShellImageArtifactCleanupRunRead] = []
         self.schedules: dict[UUID, ShellImageArtifactCleanupScheduleRead] = {}
+        self.claims: list[dict[str, object]] = []
 
     async def list_shell_image_admissions(self, project_id: UUID) -> list[ShellImageAdmissionRead]:
         return [admission for admission in self.admissions if admission.project_id == project_id]
@@ -638,6 +728,11 @@ class _CleanupStore:
             next_run_at=request.next_run_at or now + timedelta(hours=request.interval_hours),
             last_run_id=existing.last_run_id if existing else None,
             last_run_at=existing.last_run_at if existing else None,
+            leased_until=existing.leased_until if existing else None,
+            lease_owner=existing.lease_owner if existing else "",
+            failure_count=existing.failure_count if existing else 0,
+            last_error_type=existing.last_error_type if existing else "",
+            last_error_message=existing.last_error_message if existing else "",
             created_by=existing.created_by if existing else actor_id,
             updated_by=actor_id,
             created_at=existing.created_at if existing else now,
@@ -646,18 +741,41 @@ class _CleanupStore:
         self.schedules[project_id] = schedule
         return schedule
 
-    async def list_due_shell_image_artifact_cleanup_schedules(
+    async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
         *,
         now: datetime,
         limit: int,
+        worker_id: str,
+        lease_seconds: int,
     ) -> list[ShellImageArtifactCleanupScheduleRead]:
+        self.claims.append(
+            {
+                "now": now,
+                "limit": limit,
+                "worker_id": worker_id,
+                "lease_seconds": lease_seconds,
+            }
+        )
         schedules = [
             schedule
             for schedule in self.schedules.values()
-            if schedule.enabled and schedule.next_run_at is not None and schedule.next_run_at <= now
+            if schedule.enabled
+            and schedule.next_run_at is not None
+            and schedule.next_run_at <= now
+            and (schedule.leased_until is None or schedule.leased_until <= now)
         ]
-        return schedules[:limit]
+        claimed: list[ShellImageArtifactCleanupScheduleRead] = []
+        for schedule in schedules[:limit]:
+            updated = schedule.model_copy(
+                update={
+                    "lease_owner": worker_id,
+                    "leased_until": now + timedelta(seconds=lease_seconds),
+                }
+            )
+            self.schedules[schedule.project_id] = updated
+            claimed.append(updated)
+        return claimed
 
     async def mark_shell_image_artifact_cleanup_schedule_run(
         self,
@@ -669,11 +787,30 @@ class _CleanupStore:
         completed_at: datetime,
     ) -> ShellImageArtifactCleanupScheduleRead:
         schedule = self.schedules[project_id]
+        run = next(cleanup_run for cleanup_run in self.cleanup_runs if cleanup_run.id == run_id)
+        failure_count = schedule.failure_count
+        last_error_type = ""
+        last_error_message = ""
+        next_run_at = completed_at + timedelta(hours=schedule.interval_hours)
+        if run.status == "failed":
+            failure_count += 1
+            last_error_type = run.retention_controls.error or "scheduled_cleanup_failed"
+            last_error_message = run.retention_controls.error or "scheduled cleanup failed"
+            next_run_at = completed_at + timedelta(
+                seconds=min(3600, 60 * (2 ** min(failure_count - 1, 5)))
+            )
+        else:
+            failure_count = 0
         updated = schedule.model_copy(
             update={
                 "last_run_id": run_id,
                 "last_run_at": completed_at,
-                "next_run_at": completed_at + timedelta(hours=schedule.interval_hours),
+                "next_run_at": next_run_at,
+                "leased_until": None,
+                "lease_owner": "",
+                "failure_count": failure_count,
+                "last_error_type": last_error_type,
+                "last_error_message": last_error_message,
                 "updated_by": actor_id,
                 "updated_at": completed_at,
             }

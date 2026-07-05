@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from uuid import uuid4
 
@@ -14,6 +14,9 @@ from backend.app.tool_registry.schemas import (
     NotationTrustCertificateCreateRequest,
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionResolveRequest,
+    ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactRetentionControlsRead,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
 )
@@ -396,3 +399,138 @@ async def test_sqlalchemy_tool_registry_updates_shell_image_admission_evidence()
 
     assert updated.evidence["sbom"]["artifact_cleanup_status"] == "deleted"
     assert admissions[0].evidence["sbom"]["artifact_cleanup_status"] == "deleted"
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_tool_registry_claims_cleanup_schedule_with_lease() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="cleanup-worker@example.com", display_name="Worker"))
+        session.add(Project(id=project_id, slug="cleanup-worker", name="Cleanup Worker"))
+        await session.commit()
+
+        store = SqlAlchemyToolRegistryStore(session)
+        await store.upsert_shell_image_artifact_cleanup_schedule(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactCleanupScheduleUpdateRequest(
+                enabled=True,
+                next_run_at=now - timedelta(minutes=1),
+            ),
+        )
+
+        first_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+            now=now,
+            limit=10,
+            worker_id="worker-a",
+            lease_seconds=300,
+        )
+        second_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+            now=now + timedelta(seconds=30),
+            limit=10,
+            worker_id="worker-b",
+            lease_seconds=300,
+        )
+        expired_claim = await store.claim_due_shell_image_artifact_cleanup_schedules(
+            now=now + timedelta(seconds=301),
+            limit=10,
+            worker_id="worker-c",
+            lease_seconds=300,
+        )
+        reread = await store.get_shell_image_artifact_cleanup_schedule(project_id)
+
+    await engine.dispose()
+
+    assert [schedule.project_id for schedule in first_claim] == [project_id]
+    assert first_claim[0].lease_owner == "worker-a"
+    assert first_claim[0].leased_until == now + timedelta(seconds=300)
+    assert second_claim == []
+    assert [schedule.project_id for schedule in expired_claim] == [project_id]
+    assert expired_claim[0].lease_owner == "worker-c"
+    assert reread is not None
+    assert reread.lease_owner == "worker-c"
+    assert reread.leased_until == now + timedelta(seconds=601)
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_tool_registry_marks_failed_cleanup_schedule_with_backoff() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="cleanup-worker@example.com", display_name="Worker"))
+        session.add(Project(id=project_id, slug="cleanup-worker", name="Cleanup Worker"))
+        await session.commit()
+
+        store = SqlAlchemyToolRegistryStore(session)
+        schedule = await store.upsert_shell_image_artifact_cleanup_schedule(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactCleanupScheduleUpdateRequest(
+                enabled=True,
+                interval_hours=24,
+                next_run_at=now - timedelta(minutes=1),
+            ),
+        )
+        claimed = await store.claim_due_shell_image_artifact_cleanup_schedules(
+            now=now,
+            limit=10,
+            worker_id="worker-a",
+            lease_seconds=300,
+        )
+        assert claimed
+        run = await store.record_shell_image_artifact_cleanup_run(
+            project_id=project_id,
+            actor_id=actor_id,
+            run=ShellImageArtifactCleanupRunRead(
+                id=uuid4(),
+                project_id=project_id,
+                trigger_type="scheduled",
+                status="failed",
+                dry_run=True,
+                candidate_count=0,
+                deleted_count=0,
+                failed_count=0,
+                retained_count=0,
+                retention_controls=ShellImageArtifactRetentionControlsRead(
+                    bucket="unknown",
+                    error="RuntimeError",
+                ),
+                generated_at=now,
+                started_at=now,
+                completed_at=now,
+                created_by=actor_id,
+                updated_by=actor_id,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        updated = await store.mark_shell_image_artifact_cleanup_schedule_run(
+            project_id=project_id,
+            schedule_id=schedule.id or uuid4(),
+            actor_id=actor_id,
+            run_id=run.id,
+            completed_at=now,
+        )
+
+    await engine.dispose()
+
+    assert updated.last_run_id == run.id
+    assert updated.next_run_at == now + timedelta(minutes=1)
+    assert updated.lease_owner == ""
+    assert updated.leased_until is None
+    assert updated.failure_count == 1
+    assert updated.last_error_type == "RuntimeError"
+    assert updated.last_error_message == "RuntimeError"

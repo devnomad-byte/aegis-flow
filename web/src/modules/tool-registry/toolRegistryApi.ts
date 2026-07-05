@@ -186,6 +186,11 @@ export type ShellImageArtifactCleanupSchedule = {
   next_run_at?: string | null;
   last_run_id?: string | null;
   last_run_at?: string | null;
+  leased_until?: string | null;
+  lease_owner?: string;
+  failure_count?: number;
+  last_error_type?: string;
+  last_error_message?: string;
   created_by?: string | null;
   updated_by?: string | null;
   created_at?: string | null;

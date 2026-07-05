@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TypeVar, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -540,11 +540,13 @@ class SqlAlchemyToolRegistryStore:
         await self._session.refresh(schedule)
         return _cleanup_schedule_read(schedule)
 
-    async def list_due_shell_image_artifact_cleanup_schedules(
+    async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
         *,
         now: datetime,
         limit: int,
+        worker_id: str,
+        lease_seconds: int,
     ) -> list[ShellImageArtifactCleanupScheduleRead]:
         result = await self._session.scalars(
             select(ToolRegistryImageArtifactCleanupSchedule)
@@ -552,14 +554,27 @@ class SqlAlchemyToolRegistryStore:
                 ToolRegistryImageArtifactCleanupSchedule.enabled.is_(True),
                 ToolRegistryImageArtifactCleanupSchedule.next_run_at.is_not(None),
                 ToolRegistryImageArtifactCleanupSchedule.next_run_at <= now,
+                or_(
+                    ToolRegistryImageArtifactCleanupSchedule.leased_until.is_(None),
+                    ToolRegistryImageArtifactCleanupSchedule.leased_until <= now,
+                ),
             )
             .order_by(
                 ToolRegistryImageArtifactCleanupSchedule.next_run_at,
                 ToolRegistryImageArtifactCleanupSchedule.id,
             )
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
-        return [_cleanup_schedule_read(resource) for resource in result.all()]
+        schedules = list(result.all())
+        leased_until = now + timedelta(seconds=lease_seconds)
+        for schedule in schedules:
+            schedule.lease_owner = worker_id[:160]
+            schedule.leased_until = leased_until
+        await self._session.commit()
+        for schedule in schedules:
+            await self._session.refresh(schedule)
+        return [_cleanup_schedule_read(resource) for resource in schedules]
 
     async def mark_shell_image_artifact_cleanup_schedule_run(
         self,
@@ -578,16 +593,30 @@ class SqlAlchemyToolRegistryStore:
         )
         if schedule is None:
             raise ToolRegistryResourceNotFoundError("artifact cleanup schedule not found")
-        run_project_id = await self._session.scalar(
-            select(ToolRegistryImageArtifactCleanupRun.project_id).where(
+        run = await self._session.scalar(
+            select(ToolRegistryImageArtifactCleanupRun).where(
                 ToolRegistryImageArtifactCleanupRun.id == run_id,
             )
         )
-        if run_project_id != project_id:
+        if run is None or run.project_id != project_id:
             raise ToolRegistryResourceNotFoundError("artifact cleanup run not found")
         schedule.last_run_id = run_id
         schedule.last_run_at = completed_at
-        schedule.next_run_at = completed_at + timedelta(hours=schedule.interval_hours)
+        if run.status == "failed":
+            failure_count = schedule.failure_count + 1
+            schedule.failure_count = failure_count
+            schedule.last_error_type = _cleanup_run_error(run) or "scheduled_cleanup_failed"
+            schedule.last_error_message = _cleanup_run_error(run) or "scheduled cleanup failed"
+            schedule.next_run_at = completed_at + timedelta(
+                seconds=_cleanup_schedule_backoff_seconds(failure_count)
+            )
+        else:
+            schedule.failure_count = 0
+            schedule.last_error_type = ""
+            schedule.last_error_message = ""
+            schedule.next_run_at = completed_at + timedelta(hours=schedule.interval_hours)
+        schedule.leased_until = None
+        schedule.lease_owner = ""
         schedule.updated_by = actor_id
         await self._session.commit()
         await self._session.refresh(schedule)
@@ -1790,14 +1819,40 @@ def _cleanup_schedule_read(
         enabled=resource.enabled,
         interval_hours=resource.interval_hours,
         limit=resource.limit,
-        next_run_at=resource.next_run_at,
+        next_run_at=_ensure_aware_datetime(resource.next_run_at),
         last_run_id=resource.last_run_id,
-        last_run_at=resource.last_run_at,
+        last_run_at=_ensure_aware_datetime(resource.last_run_at),
+        leased_until=_ensure_aware_datetime(resource.leased_until),
+        lease_owner=resource.lease_owner,
+        failure_count=resource.failure_count,
+        last_error_type=resource.last_error_type,
+        last_error_message=resource.last_error_message,
         created_by=resource.created_by,
         updated_by=resource.updated_by,
-        created_at=resource.created_at,
-        updated_at=resource.updated_at,
+        created_at=_ensure_aware_datetime(resource.created_at),
+        updated_at=_ensure_aware_datetime(resource.updated_at),
     )
+
+
+def _ensure_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _cleanup_run_error(run: ToolRegistryImageArtifactCleanupRun) -> str:
+    for payload in (run.retention_controls, run.lifecycle_drift, run.version_reconciliation):
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, str) and error:
+            return error[:1000]
+    return ""
+
+
+def _cleanup_schedule_backoff_seconds(failure_count: int) -> int:
+    capped_failure_count = min(max(failure_count - 1, 0), 5)
+    return int(min(3600, 60 * (2**capped_failure_count)))
 
 
 def _authorized_context_matches(

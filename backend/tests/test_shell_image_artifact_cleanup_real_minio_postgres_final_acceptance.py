@@ -7,8 +7,8 @@ import pytest
 from backend.app.audit.models import AuditLog
 from backend.app.core.settings import AppSettings
 from backend.app.iam.models import Account, Project
+from backend.app.tool_registry.cleanup_worker import ShellImageArtifactCleanupScheduleWorker
 from backend.app.tool_registry.image_artifact_cleanup import (
-    ShellImageArtifactCleanupScheduler,
     ShellImageArtifactCleanupService,
 )
 from backend.app.tool_registry.image_artifacts import (
@@ -292,14 +292,16 @@ async def _run_scheduled_dry_run(
                 next_run_at=now - timedelta(minutes=1),
             ),
         )
+    worker = ShellImageArtifactCleanupScheduleWorker(
+        session_factory=session_factory,
+        object_store_factory=lambda: object_store,
+        clock=lambda: now,
+    )
+    result = await worker.run_once(actor_id=actor_id, limit=10, worker_id="final-acceptance")
+    assert result.claimed_count == 1
     async with session_factory() as session:
         store = SqlAlchemyToolRegistryStore(session)
-        scheduler = ShellImageArtifactCleanupScheduler(
-            store=store,
-            object_store_factory=lambda _project_id: object_store,
-            clock=lambda: now,
-        )
-        runs = await scheduler.run_due(actor_id=actor_id, limit=10)
+        runs = await store.list_shell_image_artifact_cleanup_runs(project_id, limit=10)
     assert len(runs) == 1
     return runs[0]
 

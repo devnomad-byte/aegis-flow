@@ -616,6 +616,11 @@ class ShellImageArtifactCleanupScheduleRead(BaseModel):
     next_run_at: datetime | None = None
     last_run_id: UUID | None = None
     last_run_at: datetime | None = None
+    leased_until: datetime | None = None
+    lease_owner: str = ""
+    failure_count: int = 0
+    last_error_type: str = ""
+    last_error_message: str = ""
     created_by: UUID | None = None
     updated_by: UUID | None = None
     created_at: datetime | None = None

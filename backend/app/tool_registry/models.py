@@ -300,6 +300,12 @@ class ToolRegistryImageArtifactCleanupSchedule(Base, TimestampMixin):
             "project_id",
             name="uq_tool_image_artifact_cleanup_schedule_project",
         ),
+        Index(
+            "ix_tool_image_artifact_cleanup_schedules_claim",
+            "enabled",
+            "next_run_at",
+            "leased_until",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -314,6 +320,11 @@ class ToolRegistryImageArtifactCleanupSchedule(Base, TimestampMixin):
         index=True,
     )
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    leased_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    failure_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    last_error_type: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    last_error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     created_at: Mapped[datetime]

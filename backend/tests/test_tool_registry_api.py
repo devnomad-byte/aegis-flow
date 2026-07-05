@@ -130,6 +130,7 @@ class InMemoryToolRegistryStore:
         self.image_artifact_cleanup_schedules: dict[
             UUID, ShellImageArtifactCleanupScheduleRead
         ] = {}
+        self.image_artifact_cleanup_schedule_claims: list[dict[str, object]] = []
         self.notation_trust_certificates: dict[UUID, list[NotationTrustCertificateRead]] = {}
         self.fail_next_sync = False
 
@@ -832,6 +833,11 @@ class InMemoryToolRegistryStore:
             next_run_at=request.next_run_at or now + timedelta(hours=request.interval_hours),
             last_run_id=existing.last_run_id if existing else None,
             last_run_at=existing.last_run_at if existing else None,
+            leased_until=existing.leased_until if existing else None,
+            lease_owner=existing.lease_owner if existing else "",
+            failure_count=existing.failure_count if existing else 0,
+            last_error_type=existing.last_error_type if existing else "",
+            last_error_message=existing.last_error_message if existing else "",
             created_by=existing.created_by if existing else actor_id,
             updated_by=actor_id,
             created_at=existing.created_at if existing else now,
@@ -840,18 +846,41 @@ class InMemoryToolRegistryStore:
         self.image_artifact_cleanup_schedules[project_id] = schedule
         return schedule
 
-    async def list_due_shell_image_artifact_cleanup_schedules(
+    async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
         *,
         now: datetime,
         limit: int,
+        worker_id: str,
+        lease_seconds: int,
     ) -> list[ShellImageArtifactCleanupScheduleRead]:
+        self.image_artifact_cleanup_schedule_claims.append(
+            {
+                "now": now,
+                "limit": limit,
+                "worker_id": worker_id,
+                "lease_seconds": lease_seconds,
+            }
+        )
         schedules = [
             schedule
             for schedule in self.image_artifact_cleanup_schedules.values()
-            if schedule.enabled and schedule.next_run_at is not None and schedule.next_run_at <= now
+            if schedule.enabled
+            and schedule.next_run_at is not None
+            and schedule.next_run_at <= now
+            and (schedule.leased_until is None or schedule.leased_until <= now)
         ]
-        return schedules[:limit]
+        claimed: list[ShellImageArtifactCleanupScheduleRead] = []
+        for schedule in schedules[:limit]:
+            updated = schedule.model_copy(
+                update={
+                    "lease_owner": worker_id,
+                    "leased_until": now + timedelta(seconds=lease_seconds),
+                }
+            )
+            self.image_artifact_cleanup_schedules[schedule.project_id] = updated
+            claimed.append(updated)
+        return claimed
 
     async def mark_shell_image_artifact_cleanup_schedule_run(
         self,
@@ -863,11 +892,34 @@ class InMemoryToolRegistryStore:
         completed_at: datetime,
     ) -> ShellImageArtifactCleanupScheduleRead:
         schedule = self.image_artifact_cleanup_schedules[project_id]
+        run = next(
+            cleanup_run
+            for cleanup_run in self.image_artifact_cleanup_runs.get(project_id, [])
+            if cleanup_run.id == run_id
+        )
+        failure_count = schedule.failure_count
+        last_error_type = ""
+        last_error_message = ""
+        next_run_at = completed_at + timedelta(hours=schedule.interval_hours)
+        if run.status == "failed":
+            failure_count += 1
+            last_error_type = run.retention_controls.error or "scheduled_cleanup_failed"
+            last_error_message = run.retention_controls.error or "scheduled cleanup failed"
+            next_run_at = completed_at + timedelta(
+                seconds=min(3600, 60 * (2 ** min(failure_count - 1, 5)))
+            )
+        else:
+            failure_count = 0
         updated = schedule.model_copy(
             update={
                 "last_run_id": run_id,
                 "last_run_at": completed_at,
-                "next_run_at": completed_at + timedelta(hours=schedule.interval_hours),
+                "next_run_at": next_run_at,
+                "leased_until": None,
+                "lease_owner": "",
+                "failure_count": failure_count,
+                "last_error_type": last_error_type,
+                "last_error_message": last_error_message,
                 "updated_by": actor_id,
                 "updated_at": completed_at,
             }
