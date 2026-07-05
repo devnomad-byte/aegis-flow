@@ -22,6 +22,8 @@ from backend.app.model_gateway.openai_compatible import OpenAICompatibleModelGat
 from backend.app.model_gateway.runner import LlmNodeRunner
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
 from backend.app.observability.sqlalchemy_store import SqlAlchemyRuntimeTraceStore
+from backend.app.policy_center.runtime import ApprovalPolicyRuntimeEvaluator
+from backend.app.policy_center.sqlalchemy_store import SqlAlchemyPolicyCenterStore
 from backend.app.policy_gate.sqlalchemy_store import SqlAlchemyPolicyGateEventStore
 from backend.app.security.egress_policy import EgressPolicy
 from backend.app.tool_gateway.mcp_client import HttpMcpToolCallClient
@@ -372,11 +374,16 @@ class WorkflowRunWorker:
     ) -> WorkflowRuntimeRunner:
         registry_store = SqlAlchemyToolRegistryStore(session)
         model_gateway_store = SqlAlchemyModelGatewayStore(session)
+        approval_evaluator = ApprovalPolicyRuntimeEvaluator(
+            policy_store=SqlAlchemyPolicyCenterStore(session),
+            policy_gate_store=SqlAlchemyPolicyGateEventStore(session),
+        )
         tool_gateway = ToolGatewayService(
             registry_store=registry_store,
             invocation_store=SqlAlchemyToolInvocationStore(session),
             audit_store=SqlAlchemyAuditEventStore(session),
             call_client=HttpMcpToolCallClient(),
+            approval_evaluator=approval_evaluator,
         )
         return WorkflowRuntimeRunner(
             run_store=run_store,
@@ -389,11 +396,13 @@ class WorkflowRunWorker:
                     self._settings.model_gateway.openai_compatible
                 ),
                 prompt_store=model_gateway_store,
+                approval_evaluator=approval_evaluator,
             ),
             tool_gateway=tool_gateway,
             execution_gateway=ShellExecutionGatewayService(
                 template_store=registry_store,
                 invocation_store=SqlAlchemyShellInvocationStore(session),
+                approval_evaluator=approval_evaluator,
             ),
             http_execution_gateway=HttpExecutionGatewayService(
                 environment_store=registry_store,

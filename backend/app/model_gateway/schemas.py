@@ -11,6 +11,7 @@ ModelGatewayPolicyStatus = Literal["active", "disabled", "archived"]
 ModelGatewayInvocationStatus = Literal[
     "success",
     "failed",
+    "denied",
     "budget_exceeded",
     "schema_validation_failed",
 ]

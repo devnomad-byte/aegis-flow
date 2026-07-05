@@ -22,6 +22,10 @@ from backend.app.model_gateway.schemas import (
     ModelGatewayPolicyRead,
     PromptTemplateVersionRead,
 )
+from backend.app.policy_center.runtime import (
+    ApprovalPolicyDecisionRequest,
+    ApprovalPolicyRuntimeEvaluator,
+)
 from backend.app.workflows.dsl import LlmNodeData, WorkflowDefinition
 
 _TEMPLATE_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
@@ -37,6 +41,10 @@ class LlmNodeBudgetExceeded(ModelGatewayError):
 
 class LlmNodePromptNotFound(ModelGatewayError):
     """Raised when an LLM node references a missing prompt template version."""
+
+
+class LlmNodePolicyDenied(ModelGatewayError):
+    """Raised when a runtime approval policy blocks an LLM node call."""
 
 
 class LlmNodeStructuredOutputInvalid(ModelGatewayError):
@@ -119,6 +127,7 @@ class LlmNodeRunner:
     invocation_store: ModelInvocationStore
     model_client: ChatCompletionClient
     prompt_store: PromptTemplateVersionStore | None = None
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None = None
 
     async def run(self, request: LlmNodeRunRequest) -> LlmNodeRunResult:
         node_data = _load_llm_node_data(request.workflow, request.node_id, request.project_id)
@@ -132,6 +141,51 @@ class LlmNodeRunner:
             )
         if policy.provider != "openai-compatible":
             raise ModelGatewayError(f"unsupported model provider: {policy.provider}")
+
+        invocation_ref = _build_invocation_ref(request.run_id, request.node_id)
+        prompt_version_for_policy = node_data.prompt_version or policy.prompt_version
+        policy_decision = await _evaluate_model_approval_policy(
+            approval_evaluator=self.approval_evaluator,
+            request=request,
+            policy=policy,
+        )
+        if policy_decision in {"denied", "approval_required"}:
+            error_type = (
+                "approval_policy_denied"
+                if policy_decision == "denied"
+                else "approval_policy_approval_required"
+            )
+            message = (
+                "Model invocation denied by approval policy"
+                if policy_decision == "denied"
+                else (
+                    "Model invocation requires approval; "
+                    "model approval recovery is not available in v1"
+                )
+            )
+            await self._record_invocation(
+                request=request,
+                policy=policy,
+                invocation_ref=invocation_ref,
+                prompt_version=prompt_version_for_policy,
+                request_hash=_hash_model_request(
+                    policy_ref=policy.policy_ref,
+                    node_id=request.node_id,
+                    prompt_version=prompt_version_for_policy,
+                    system_prompt="",
+                    user_prompt="",
+                ),
+                status="denied",
+                output_summary="",
+                usage={},
+                error_type=error_type,
+                error_message=message,
+                output_schema_ref=node_data.output_schema_ref,
+                schema_validation_status="not_applicable",
+                schema_validation_error="",
+                latency_ms=0,
+            )
+            raise LlmNodePolicyDenied(message)
 
         prompt_source = await self._load_prompt_source(request, node_data)
         system_prompt = _render_template(prompt_source.system_prompt, request.inputs)
@@ -152,7 +206,6 @@ class LlmNodeRunner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
-        invocation_ref = _build_invocation_ref(request.run_id, request.node_id)
         estimated_total_tokens = _estimate_tokens(system_prompt, user_prompt) + max_tokens
 
         if estimated_total_tokens > policy.max_total_tokens_per_call:
@@ -365,6 +418,32 @@ class _PromptSource:
     prompt_version: str
     output_schema: dict[str, object]
     output_schema_ref: str
+
+
+async def _evaluate_model_approval_policy(
+    *,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None,
+    request: LlmNodeRunRequest,
+    policy: ModelGatewayPolicyRead,
+) -> str:
+    if approval_evaluator is None:
+        return "allowed"
+
+    result = await approval_evaluator.evaluate_and_record(
+        ApprovalPolicyDecisionRequest(
+            project_id=request.project_id,
+            actor_id=request.actor_id,
+            target_kind="model_invocation",
+            target_ref=policy.policy_ref,
+            risk_level="medium",
+            workflow_ref=f"{request.workflow.workflow.id}:{request.workflow.workflow.version}",
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            model_policy_ref=policy.policy_ref,
+        )
+    )
+    return result.decision
 
 
 def _load_llm_node_data(

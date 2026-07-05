@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from backend.app.api.dependencies import (
+    get_approval_policy_runtime_evaluator,
     get_audit_event_store,
     get_current_account,
     get_mcp_tool_call_client,
@@ -14,6 +15,9 @@ from backend.app.api.dependencies import (
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider, ProjectSummary
 from backend.app.main import create_app
+from backend.app.policy_center.runtime import ApprovalPolicyRuntimeEvaluator
+from backend.app.policy_center.schemas import ApprovalPolicyVersionRead
+from backend.app.policy_gate.schemas import PolicyGateEventCreate, PolicyGateEventRead
 from backend.app.tool_gateway.mcp_client import McpToolCallError, McpToolCallResult
 from backend.app.tool_gateway.schemas import (
     ToolApprovalDecisionRead,
@@ -362,6 +366,32 @@ class InMemoryAuditEventStore:
         )
 
 
+class NoopPublishedApprovalPolicyStore:
+    async def load_published_approval_policy(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+    ) -> ApprovalPolicyVersionRead | None:
+        return None
+
+
+class InMemoryPolicyGateEventStore:
+    def __init__(self) -> None:
+        self.events: list[PolicyGateEventRead] = []
+
+    async def record_event(self, request: PolicyGateEventCreate) -> PolicyGateEventRead:
+        now = datetime.now(UTC)
+        event = PolicyGateEventRead(
+            id=uuid4(),
+            created_at=now,
+            updated_at=now,
+            **request.model_dump(),
+        )
+        self.events.append(event)
+        return event
+
+
 class RecordingToolGatewayService:
     def __init__(self, *, response_status: str = "success") -> None:
         self.invoke_calls: list[dict[str, object]] = []
@@ -476,6 +506,12 @@ def build_client(
     app.dependency_overrides[get_tool_invocation_store] = lambda: invocation_store
     app.dependency_overrides[get_audit_event_store] = lambda: audit_store
     app.dependency_overrides[get_mcp_tool_call_client] = lambda: call_client
+    app.dependency_overrides[get_approval_policy_runtime_evaluator] = lambda: (
+        ApprovalPolicyRuntimeEvaluator(
+            policy_store=NoopPublishedApprovalPolicyStore(),
+            policy_gate_store=InMemoryPolicyGateEventStore(),
+        )
+    )
     return TestClient(app)
 
 

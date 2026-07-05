@@ -21,6 +21,14 @@ class PolicyCenterStore(Protocol):
     ) -> ApprovalPolicyVersionListResponse:
         raise NotImplementedError
 
+    async def load_published_approval_policy(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+    ) -> ApprovalPolicyVersionRead | None:
+        raise NotImplementedError
+
     async def create_approval_policy_draft(
         self,
         *,

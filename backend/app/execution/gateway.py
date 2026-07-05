@@ -29,6 +29,10 @@ from backend.app.execution.shell_runner import (
     ScriptTemplateInvocation,
     build_docker_run_command,
 )
+from backend.app.policy_center.runtime import (
+    ApprovalPolicyDecisionRequest,
+    ApprovalPolicyRuntimeEvaluator,
+)
 from backend.app.security.egress_policy import EgressPolicy, EgressPolicyViolation
 from backend.app.security.egress_proxy import (
     EgressProxyMode,
@@ -227,8 +231,10 @@ class ShellExecutionGatewayService:
     invocation_store: ShellInvocationStore
     command_executor: ShellCommandExecutor = DockerShellCommandExecutor()
     sandbox_policy: DockerSandboxPolicy = DockerSandboxPolicy()
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None = None
 
     async def run_shell(self, request: ShellExecutionRequest) -> ShellExecutionResult:
+        started = time.perf_counter()
         template = await self.template_store.get_active_shell_template(
             project_id=request.project_id,
             template_ref=request.template_ref,
@@ -243,6 +249,78 @@ class ShellExecutionGatewayService:
         _validate_parameters(template, request.parameters)
 
         invocation_id = f"shell_{uuid4().hex}"
+        policy_decision = await _evaluate_shell_approval_policy(
+            approval_evaluator=self.approval_evaluator,
+            request=request,
+            template=template,
+        )
+        if policy_decision in {"denied", "approval_required"}:
+            error_type = (
+                "approval_policy_denied"
+                if policy_decision == "denied"
+                else "approval_policy_approval_required"
+            )
+            error_message = (
+                "Shell execution denied by approval policy"
+                if policy_decision == "denied"
+                else (
+                    "Shell execution requires approval; "
+                    "shell approval recovery is not available in v1"
+                )
+            )
+            command_hash = hash_command(
+                [
+                    "approval-policy",
+                    policy_decision,
+                    template.template_ref,
+                    str(template.template_version),
+                ]
+            )
+            duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+            await self.invocation_store.record_invocation(
+                ShellInvocationCreate(
+                    project_id=request.project_id,
+                    actor_id=request.actor_id,
+                    invocation_ref=invocation_id,
+                    template_ref=template.template_ref,
+                    template_version=template.template_version,
+                    command_hash=command_hash,
+                    sandbox_image=template.image_ref,
+                    sandbox_image_digest=template.image_digest,
+                    egress_profile_ref="",
+                    egress_proxy_mode="",
+                    network_mode=self.sandbox_policy.network_mode,
+                    workflow_ref=request.workflow_ref,
+                    run_id=request.run_id,
+                    node_id=request.node_id,
+                    trace_id=request.trace_id,
+                    status="denied",
+                    exit_code=None,
+                    duration_ms=duration_ms,
+                    resource_usage={},
+                    stdout_summary="",
+                    stderr_summary="",
+                    error_type=error_type,
+                    error_message=error_message,
+                    created_by=request.actor_id,
+                    updated_by=request.actor_id,
+                )
+            )
+            return ShellExecutionResult(
+                status="denied",
+                exit_code=None,
+                duration_ms=duration_ms,
+                stdout_summary="",
+                stderr_summary="",
+                invocation_id=invocation_id,
+                command_hash=command_hash,
+                sandbox_image=template.image_ref,
+                sandbox_image_digest=template.image_digest,
+                network_mode=self.sandbox_policy.network_mode,
+                error_type=error_type,
+                error_message=error_message,
+            )
+
         argv = render_template_args(template.argv_template, request.parameters)
         invocation = ScriptTemplateInvocation(
             image_ref=template.image_ref,
@@ -251,7 +329,6 @@ class ShellExecutionGatewayService:
         )
         command = build_docker_run_command(invocation, self.sandbox_policy)
         command_hash = hash_command(command)
-        started = time.perf_counter()
         status: ShellInvocationStatus = "success"
         exit_code: int | None = None
         stdout_summary = ""
@@ -326,6 +403,33 @@ class ShellExecutionGatewayService:
             error_type=error_type,
             error_message=error_message,
         )
+
+
+async def _evaluate_shell_approval_policy(
+    *,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None,
+    request: ShellExecutionRequest,
+    template: ShellTemplateRead,
+) -> str:
+    if approval_evaluator is None:
+        return "approval_required" if template.risk_level in {"high", "critical"} else "allowed"
+
+    result = await approval_evaluator.evaluate_and_record(
+        ApprovalPolicyDecisionRequest(
+            project_id=request.project_id,
+            actor_id=request.actor_id,
+            target_kind="shell_execution",
+            target_ref=template.template_ref,
+            risk_level=template.risk_level,
+            workflow_ref=request.workflow_ref,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            shell_template_ref=template.template_ref,
+            environment_key=template.environment_key,
+        )
+    )
+    return result.decision
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from backend.app.model_gateway.openai_compatible import OpenAICompatibleModelGat
 from backend.app.model_gateway.runner import LlmNodeRunner
 from backend.app.model_gateway.sqlalchemy_store import SqlAlchemyModelGatewayStore
 from backend.app.observability.sqlalchemy_store import SqlAlchemyRuntimeTraceStore
+from backend.app.policy_center.runtime import ApprovalPolicyRuntimeEvaluator
 from backend.app.policy_center.sqlalchemy_store import SqlAlchemyPolicyCenterStore
 from backend.app.policy_center.store import PolicyCenterStore
 from backend.app.policy_gate.sqlalchemy_store import SqlAlchemyPolicyGateEventStore
@@ -227,6 +228,7 @@ WorkflowRunStoreDependency = Depends(get_workflow_run_store)
 WorkflowRunEventStoreDependency = Depends(get_workflow_run_event_store)
 PolicyGateEventStoreDependency = Depends(get_policy_gate_event_store)
 RuntimeTraceStoreDependency = Depends(get_runtime_trace_store)
+PolicyCenterStoreDependency = Depends(get_policy_center_store)
 
 
 def get_workflow_checkpointer_provider() -> WorkflowCheckpointerProvider:
@@ -243,27 +245,44 @@ def get_checkpoint_lifecycle_service() -> LangGraphCheckpointLifecycleService:
 CheckpointLifecycleServiceDependency = Depends(get_checkpoint_lifecycle_service)
 
 
+def get_approval_policy_runtime_evaluator(
+    policy_center_store: PolicyCenterStore = PolicyCenterStoreDependency,
+    policy_gate_store: SqlAlchemyPolicyGateEventStore = PolicyGateEventStoreDependency,
+) -> ApprovalPolicyRuntimeEvaluator:
+    return ApprovalPolicyRuntimeEvaluator(
+        policy_store=policy_center_store,
+        policy_gate_store=policy_gate_store,
+    )
+
+
+ApprovalPolicyRuntimeEvaluatorDependency = Depends(get_approval_policy_runtime_evaluator)
+
+
 def get_tool_gateway_service(
     registry_store: ToolRegistryStore = ToolRegistryStoreDependency,
     invocation_store: ToolInvocationStore = ToolInvocationStoreDependency,
     audit_store: AuditEventStore = AuditEventStoreDependency,
     call_client: McpToolCallClient = McpToolCallClientDependency,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator = ApprovalPolicyRuntimeEvaluatorDependency,
 ) -> ToolGatewayService:
     return ToolGatewayService(
         registry_store=registry_store,
         invocation_store=invocation_store,
         audit_store=audit_store,
         call_client=call_client,
+        approval_evaluator=approval_evaluator,
     )
 
 
 def get_shell_execution_gateway_service(
     registry_store: ToolRegistryStore = ToolRegistryStoreDependency,
     invocation_store: SqlAlchemyShellInvocationStore = ShellInvocationStoreDependency,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator = ApprovalPolicyRuntimeEvaluatorDependency,
 ) -> ShellExecutionGatewayService:
     return ShellExecutionGatewayService(
         template_store=registry_store,
         invocation_store=invocation_store,
+        approval_evaluator=approval_evaluator,
     )
 
 
@@ -288,6 +307,7 @@ def get_http_execution_gateway_service(
 
 def get_llm_node_runner(
     model_gateway_store: SqlAlchemyModelGatewayStore = ModelGatewayStoreDependency,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator = ApprovalPolicyRuntimeEvaluatorDependency,
 ) -> LlmNodeRunner:
     settings = AppSettings().model_gateway
     return LlmNodeRunner(
@@ -295,6 +315,7 @@ def get_llm_node_runner(
         invocation_store=model_gateway_store,
         model_client=OpenAICompatibleModelGatewayClient(settings.openai_compatible),
         prompt_store=model_gateway_store,
+        approval_evaluator=approval_evaluator,
     )
 
 

@@ -330,6 +330,26 @@ class SqlAlchemyPolicyCenterStore:
             count=len(versions),
         )
 
+    async def load_published_approval_policy(
+        self,
+        *,
+        project_id: UUID,
+        policy_ref: str,
+    ) -> ApprovalPolicyVersionRead | None:
+        version = await self._session.scalar(
+            select(ApprovalPolicyVersion)
+            .where(
+                ApprovalPolicyVersion.project_id == project_id,
+                ApprovalPolicyVersion.policy_ref == policy_ref,
+                ApprovalPolicyVersion.status == APPROVAL_POLICY_STATUS_PUBLISHED,
+            )
+            .order_by(ApprovalPolicyVersion.version.desc(), ApprovalPolicyVersion.id.desc())
+            .limit(1)
+        )
+        if version is None:
+            return None
+        return _approval_policy_version_read(version)
+
     async def _active_member_count(self, project_id: UUID) -> int:
         members = await self._session.scalars(
             select(ProjectMember.id)

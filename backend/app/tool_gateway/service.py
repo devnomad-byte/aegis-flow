@@ -8,6 +8,11 @@ from uuid import UUID, uuid4
 from jsonschema import ValidationError, validate
 
 from backend.app.audit.store import AuditEventStore
+from backend.app.policy_center.runtime import (
+    ApprovalPolicyDecisionRequest,
+    ApprovalPolicyDecisionResult,
+    ApprovalPolicyRuntimeEvaluator,
+)
 from backend.app.tool_gateway.mcp_client import McpToolCallClient, McpToolCallError
 from backend.app.tool_gateway.schemas import (
     ToolApprovalTaskCreate,
@@ -44,6 +49,7 @@ class ToolGatewayService:
     invocation_store: ToolInvocationStore
     audit_store: AuditEventStore
     call_client: McpToolCallClient
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None = None
 
     async def invoke(
         self,
@@ -102,7 +108,36 @@ class ToolGatewayService:
                 detail="arguments do not match tool input schema",
             ) from exc
 
-        if _requires_approval(authorized_tool):
+        policy_decision = await _evaluate_approval_policy(
+            approval_evaluator=self.approval_evaluator,
+            project_id=project_id,
+            actor_id=actor_id,
+            request=request,
+            authorized_tool=authorized_tool,
+        )
+        if policy_decision.decision == "denied":
+            invocation = await _record_invocation(
+                self.invocation_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                request=request,
+                authorized_tool=authorized_tool,
+                server=None,
+                status="denied",
+                policy_decision="denied",
+                started=started,
+                output_summary="tool invocation denied by approval policy",
+                error_type="approval_policy_denied",
+                error_message="Tool invocation denied by approval policy",
+                approval_required=policy_decision.approval_required,
+            )
+            await _record_audit_event(self.audit_store, invocation=invocation, result="failure")
+            raise ToolGatewayServiceError(
+                status_code=403,
+                detail="Tool invocation denied by approval policy",
+            )
+
+        if policy_decision.decision == "approval_required":
             invocation = await _record_invocation(
                 self.invocation_store,
                 project_id=project_id,
@@ -114,6 +149,7 @@ class ToolGatewayService:
                 policy_decision="approval_required",
                 started=started,
                 output_summary="tool invocation is waiting for approval",
+                approval_required=True,
             )
             approval_task = await _create_approval_task(
                 self.invocation_store,
@@ -366,6 +402,36 @@ class ToolGatewayService:
                 detail="arguments do not match tool input schema",
             ) from exc
 
+        policy_decision = await _evaluate_approval_policy(
+            approval_evaluator=self.approval_evaluator,
+            project_id=project_id,
+            actor_id=actor_id,
+            request=original_request,
+            authorized_tool=authorized_tool,
+        )
+        if policy_decision.decision == "denied":
+            invocation = await self.invocation_store.update_invocation_status(
+                project_id=project_id,
+                invocation_id=approval_task.invocation_id,
+                actor_id=actor_id,
+                status="denied",
+                policy_decision="denied",
+                output_summary="tool invocation denied by approval policy at resume",
+                error_type="approval_policy_denied",
+                error_message="Tool invocation denied by approval policy",
+            )
+            await _record_audit_event(
+                self.audit_store,
+                invocation=invocation,
+                result="failure",
+                action="tool_gateway.resume",
+                actor_id=actor_id,
+            )
+            raise ToolGatewayServiceError(
+                status_code=403,
+                detail="Tool invocation denied by approval policy",
+            )
+
         server = await self.registry_store.get_mcp_server_credential_for_tool(
             project_id=project_id,
             tool_ref=authorized_tool.tool_ref,
@@ -605,6 +671,7 @@ async def _record_invocation(
     credential_ref: str = "",
     secret_lease_id: UUID | None = None,
     secret_lease_ref: str = "",
+    approval_required: bool | None = None,
 ) -> ToolInvocationRead:
     duration_ms = max(0, int((time.perf_counter() - started) * 1000))
     server_ref = ""
@@ -631,7 +698,11 @@ async def _record_invocation(
             effective_risk_level=authorized_tool.effective_risk_level
             if authorized_tool
             else "medium",
-            approval_required=authorized_tool.approval_required if authorized_tool else False,
+            approval_required=approval_required
+            if approval_required is not None
+            else authorized_tool.approval_required
+            if authorized_tool
+            else False,
             policy_decision=policy_decision,
             status=status,
             input_summary=_summarize_payload(request.arguments),
@@ -644,6 +715,48 @@ async def _record_invocation(
             secret_lease_ref=secret_lease_ref,
             created_by=actor_id,
             updated_by=actor_id,
+        )
+    )
+
+
+async def _evaluate_approval_policy(
+    *,
+    approval_evaluator: ApprovalPolicyRuntimeEvaluator | None,
+    project_id: UUID,
+    actor_id: UUID,
+    request: ToolInvocationRequest,
+    authorized_tool: AuthorizedToolRead,
+) -> ApprovalPolicyDecisionResult:
+    if approval_evaluator is None:
+        decision: ToolInvocationPolicyDecision = (
+            "approval_required" if _requires_approval(authorized_tool) else "allowed"
+        )
+        return ApprovalPolicyDecisionResult(
+            decision=decision,
+            policy_ref="default",
+            policy_version=None,
+            rule_ref="legacy_tool_default",
+            target_type="tool_invocation",
+            target_ref=authorized_tool.tool_ref,
+            risk_level=authorized_tool.effective_risk_level,
+            approval_required=decision == "approval_required",
+            reason_summary="legacy tool approval default",
+        )
+
+    return await approval_evaluator.evaluate_and_record(
+        ApprovalPolicyDecisionRequest(
+            project_id=project_id,
+            actor_id=actor_id,
+            target_kind="tool_invocation",
+            target_ref=authorized_tool.tool_ref,
+            risk_level=authorized_tool.effective_risk_level,
+            workflow_ref=request.workflow_ref,
+            run_id=request.run_id,
+            node_id=request.node_id,
+            trace_id=request.trace_id,
+            tool_group_refs=request.tool_group_refs,
+            tool_ref=authorized_tool.tool_ref,
+            default_approval_required=authorized_tool.approval_required,
         )
     )
 
