@@ -25,6 +25,19 @@ class ShellImageArtifactMetadata:
     metadata: dict[str, str]
 
 
+@dataclass(frozen=True)
+class ShellImageArtifactRetentionControls:
+    bucket: str
+    versioning_status: str = "unknown"
+    object_lock_enabled: bool = False
+    worm_capable: bool = False
+    default_retention_configured: bool = False
+    default_retention_mode: str | None = None
+    default_retention_days: int | None = None
+    default_retention_years: int | None = None
+    error: str = ""
+
+
 class ShellImageArtifactObjectStore(Protocol):
     async def put_artifact(
         self,
@@ -45,10 +58,29 @@ class ShellImageArtifactObjectStore(Protocol):
     async def delete_artifact(self, artifact_ref: str) -> None:
         raise NotImplementedError
 
+    async def inspect_retention_controls(self) -> ShellImageArtifactRetentionControls:
+        raise NotImplementedError
+
 
 class InMemoryShellImageArtifactObjectStore:
-    def __init__(self, *, bucket: str = "aegis-flow") -> None:
+    def __init__(
+        self,
+        *,
+        bucket: str = "aegis-flow",
+        versioning_status: str = "Suspended",
+        object_lock_enabled: bool = False,
+        default_retention_mode: str | None = None,
+        default_retention_days: int | None = None,
+        default_retention_years: int | None = None,
+        retention_error: str = "",
+    ) -> None:
         self.bucket = bucket
+        self.versioning_status = versioning_status
+        self.object_lock_enabled = object_lock_enabled
+        self.default_retention_mode = default_retention_mode
+        self.default_retention_days = default_retention_days
+        self.default_retention_years = default_retention_years
+        self.retention_error = retention_error
         self.objects: dict[str, StoredShellImageArtifact] = {}
 
     async def put_artifact(
@@ -68,6 +100,7 @@ class InMemoryShellImageArtifactObjectStore:
         return artifact_ref
 
     async def head_artifact(self, artifact_ref: str) -> ShellImageArtifactMetadata:
+        _validate_artifact_ref_bucket(artifact_ref, self.bucket)
         stored = self.objects[artifact_ref]
         return ShellImageArtifactMetadata(
             size_bytes=len(stored.body),
@@ -76,10 +109,30 @@ class InMemoryShellImageArtifactObjectStore:
         )
 
     async def get_artifact(self, artifact_ref: str) -> StoredShellImageArtifact:
+        _validate_artifact_ref_bucket(artifact_ref, self.bucket)
         return self.objects[artifact_ref]
 
     async def delete_artifact(self, artifact_ref: str) -> None:
-        self.objects.pop(artifact_ref, None)
+        _validate_artifact_ref_bucket(artifact_ref, self.bucket)
+        del self.objects[artifact_ref]
+
+    async def inspect_retention_controls(self) -> ShellImageArtifactRetentionControls:
+        default_retention_configured = _default_retention_configured(
+            mode=self.default_retention_mode,
+            days=self.default_retention_days,
+            years=self.default_retention_years,
+        )
+        return ShellImageArtifactRetentionControls(
+            bucket=self.bucket,
+            versioning_status=self.versioning_status,
+            object_lock_enabled=self.object_lock_enabled,
+            worm_capable=self.object_lock_enabled and self.versioning_status == "Enabled",
+            default_retention_configured=self.object_lock_enabled and default_retention_configured,
+            default_retention_mode=self.default_retention_mode,
+            default_retention_days=self.default_retention_days,
+            default_retention_years=self.default_retention_years,
+            error=self.retention_error,
+        )
 
 
 class S3ShellImageArtifactObjectStore:
@@ -116,7 +169,7 @@ class S3ShellImageArtifactObjectStore:
     async def head_artifact(self, artifact_ref: str) -> ShellImageArtifactMetadata:
         import aioboto3
 
-        bucket, key = _parse_s3_ref(artifact_ref)
+        bucket, key = _parse_expected_bucket_s3_ref(artifact_ref, self._settings.bucket)
         session = aioboto3.Session()
         async with session.client(
             "s3",
@@ -137,7 +190,7 @@ class S3ShellImageArtifactObjectStore:
     async def get_artifact(self, artifact_ref: str) -> StoredShellImageArtifact:
         import aioboto3
 
-        bucket, key = _parse_s3_ref(artifact_ref)
+        bucket, key = _parse_expected_bucket_s3_ref(artifact_ref, self._settings.bucket)
         session = aioboto3.Session()
         async with session.client(
             "s3",
@@ -159,7 +212,7 @@ class S3ShellImageArtifactObjectStore:
     async def delete_artifact(self, artifact_ref: str) -> None:
         import aioboto3
 
-        bucket, key = _parse_s3_ref(artifact_ref)
+        bucket, key = _parse_expected_bucket_s3_ref(artifact_ref, self._settings.bucket)
         session = aioboto3.Session()
         async with session.client(
             "s3",
@@ -169,6 +222,61 @@ class S3ShellImageArtifactObjectStore:
             aws_secret_access_key=self._settings.secret_key.get_secret_value(),
         ) as client:
             await client.delete_object(Bucket=bucket, Key=key)
+
+    async def inspect_retention_controls(self) -> ShellImageArtifactRetentionControls:
+        import aioboto3
+        from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            try:
+                versioning_response = await client.get_bucket_versioning(
+                    Bucket=self._settings.bucket
+                )
+                versioning_status = str(versioning_response.get("Status") or "Suspended")
+            except ClientError as exc:
+                return ShellImageArtifactRetentionControls(
+                    bucket=self._settings.bucket,
+                    error=_public_s3_error(exc),
+                )
+            try:
+                lock_response = await client.get_object_lock_configuration(
+                    Bucket=self._settings.bucket
+                )
+            except ClientError as exc:
+                return ShellImageArtifactRetentionControls(
+                    bucket=self._settings.bucket,
+                    versioning_status=versioning_status,
+                    error=_public_s3_error(exc),
+                )
+        configuration = lock_response.get("ObjectLockConfiguration", {})
+        enabled = configuration.get("ObjectLockEnabled") == "Enabled"
+        default_retention = (
+            configuration.get("Rule", {}).get("DefaultRetention", {})
+            if isinstance(configuration.get("Rule"), dict)
+            else {}
+        )
+        default_retention_configured = _default_retention_configured(
+            mode=default_retention.get("Mode"),
+            days=default_retention.get("Days"),
+            years=default_retention.get("Years"),
+        )
+        return ShellImageArtifactRetentionControls(
+            bucket=self._settings.bucket,
+            versioning_status=versioning_status,
+            object_lock_enabled=enabled,
+            worm_capable=enabled and versioning_status == "Enabled",
+            default_retention_configured=enabled and default_retention_configured,
+            default_retention_mode=default_retention.get("Mode"),
+            default_retention_days=default_retention.get("Days"),
+            default_retention_years=default_retention.get("Years"),
+        )
 
 
 @dataclass(frozen=True)
@@ -260,3 +368,32 @@ def _parse_s3_ref(artifact_ref: str) -> tuple[str, str]:
     if not bucket or not separator or not key:
         raise ValueError("artifact ref must include bucket and key")
     return bucket, key
+
+
+def _parse_expected_bucket_s3_ref(artifact_ref: str, expected_bucket: str) -> tuple[str, str]:
+    bucket, key = _parse_s3_ref(artifact_ref)
+    if bucket != expected_bucket:
+        raise ValueError("artifact ref bucket is outside configured bucket")
+    return bucket, key
+
+
+def _validate_artifact_ref_bucket(artifact_ref: str, expected_bucket: str) -> None:
+    _parse_expected_bucket_s3_ref(artifact_ref, expected_bucket)
+
+
+def _default_retention_configured(
+    *,
+    mode: object,
+    days: object,
+    years: object,
+) -> bool:
+    return (
+        isinstance(mode, str) and bool(mode) and (isinstance(days, int) or isinstance(years, int))
+    )
+
+
+def _public_s3_error(exc: Exception) -> str:
+    response = getattr(exc, "response", {})
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    code = str(error.get("Code") or exc.__class__.__name__)
+    return code[:120]

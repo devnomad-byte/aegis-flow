@@ -192,6 +192,9 @@ def sanitize_image_evidence_summary(evidence: dict[str, object]) -> dict[str, ob
         "artifact_content_type",
         "artifact_retention_days",
         "artifact_retention_expires_at",
+        "artifact_cleanup_status",
+        "artifact_deleted_at",
+        "artifact_cleanup_error",
     }
     allowed_nested_keys = {
         "signature": {"tool", "verifier", "identity", "issuer", "status"},

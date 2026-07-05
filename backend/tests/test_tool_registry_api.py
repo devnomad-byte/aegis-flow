@@ -15,6 +15,7 @@ from backend.app.api.dependencies import (
 )
 from backend.app.api.routes.tool_registry import (
     get_oci_digest_resolver,
+    get_shell_image_artifact_object_store,
     get_shell_image_evidence_provider,
 )
 from backend.app.execution.shell_policy import (
@@ -29,6 +30,10 @@ from backend.app.security.egress_policy import (
     EgressPolicy,
     EgressPolicyViolation,
     validate_egress_url,
+)
+from backend.app.tool_registry.image_artifacts import (
+    InMemoryShellImageArtifactObjectStore,
+    StoredShellImageArtifact,
 )
 from backend.app.tool_registry.image_evidence import (
     ShellImageEvidenceResult,
@@ -748,6 +753,36 @@ class InMemoryToolRegistryStore:
     ) -> ShellImageAdmissionGovernanceRead:
         return summarize_shell_image_admission_governance(self.image_admissions.get(project_id, []))
 
+    async def list_shell_image_admissions(self, project_id: UUID) -> list[ShellImageAdmissionRead]:
+        return self.image_admissions.get(project_id, [])
+
+    async def update_shell_image_admission_evidence(
+        self,
+        *,
+        project_id: UUID,
+        admission_id: UUID,
+        actor_id: UUID,
+        evidence: dict[str, object],
+    ) -> ShellImageAdmissionRead:
+        updated: ShellImageAdmissionRead | None = None
+        next_admissions: list[ShellImageAdmissionRead] = []
+        for admission in self.image_admissions.get(project_id, []):
+            if admission.id == admission_id:
+                updated = admission.model_copy(
+                    update={
+                        "evidence": evidence,
+                        "updated_by": actor_id,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+                next_admissions.append(updated)
+            else:
+                next_admissions.append(admission)
+        if updated is None:
+            raise ToolRegistryResourceNotFoundError("image admission not found")
+        self.image_admissions[project_id] = next_admissions
+        return updated
+
     async def upsert_shell_image_admission_policy(
         self,
         *,
@@ -1011,6 +1046,7 @@ def build_client(
     egress_policy: EgressPolicy | None = None,
     digest_resolver: object | None = None,
     evidence_provider: object | None = None,
+    artifact_object_store: object | None = None,
 ) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_account] = lambda: account
@@ -1025,6 +1061,10 @@ def build_client(
         app.dependency_overrides[get_oci_digest_resolver] = lambda: digest_resolver
     if evidence_provider is not None:
         app.dependency_overrides[get_shell_image_evidence_provider] = lambda: evidence_provider
+    if artifact_object_store is not None:
+        app.dependency_overrides[get_shell_image_artifact_object_store] = lambda: (
+            artifact_object_store
+        )
     return TestClient(app)
 
 
@@ -2325,6 +2365,136 @@ def test_tool_registry_shell_image_governance_summarizes_artifacts_and_blocks() 
     rendered = response.text + repr(audit_store.events[-1])
     assert "raw_report" not in rendered
     assert "raw vulnerability" not in rendered
+
+
+def test_tool_registry_shell_image_artifact_cleanup_dry_run_and_execute() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    now = datetime.now(UTC)
+    expired_ref = "s3://capievo/shell-image-admissions/expired-sbom.json"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        object_lock_enabled=True,
+        default_retention_mode="GOVERNANCE",
+        default_retention_days=30,
+    )
+    object_store.objects[expired_ref] = StoredShellImageArtifact(
+        body=b'{"components":[{"name":"secret-package"}]}',
+        content_type="application/vnd.cyclonedx+json",
+        metadata={
+            "artifact-kind": "sbom",
+            "artifact-sha256": "a" * 64,
+            "project-id": str(project.id),
+        },
+    )
+    registry_store.image_admissions[project.id] = [
+        ShellImageAdmissionRead(
+            id=uuid4(),
+            project_id=project.id,
+            image_ref="registry.example/aegis/runtime:7-alpine",
+            image_digest="sha256:" + ("a" * 64),
+            registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+            registry_digest="sha256:" + ("a" * 64),
+            digest_match=True,
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="passed",
+            policy_decision="approved",
+            decision_reason="registry digest, SBOM, and vulnerability evidence passed",
+            checked_at=now,
+            evidence={
+                "sbom": {
+                    "tool": "trivy",
+                    "format": "CycloneDX",
+                    "component_count": 1,
+                    "status": "passed",
+                    "artifact_ref": expired_ref,
+                    "artifact_sha256": "a" * 64,
+                    "artifact_size_bytes": 39,
+                    "artifact_retention_days": 1,
+                    "artifact_retention_expires_at": (now - timedelta(days=1)).isoformat(),
+                    "raw_sbom": {"components": [{"name": "secret-package"}]},
+                }
+            },
+            created_by=uuid4(),
+            updated_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        artifact_object_store=object_store,
+    )
+
+    governance = client.get(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/governance"
+    )
+    dry_run = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs",
+        json={"dry_run": True, "limit": 10},
+    )
+
+    assert governance.status_code == 200
+    assert governance.json()["retention_controls"] == {
+        "bucket": "capievo",
+        "versioning_status": "Enabled",
+        "object_lock_enabled": True,
+        "worm_capable": True,
+        "default_retention_configured": True,
+        "default_retention_mode": "GOVERNANCE",
+        "default_retention_days": 30,
+        "default_retention_years": None,
+        "error": "",
+    }
+    assert governance.json()["expired_artifact_count"] == 1
+    assert governance.json()["candidates"] == []
+    assert dry_run.status_code == 200
+    assert dry_run.json()["dry_run"] is True
+    assert dry_run.json()["candidate_count"] == 1
+    assert expired_ref in object_store.objects
+    execute = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs",
+        json={"dry_run": False, "limit": 10},
+    )
+    assert execute.status_code == 200
+    assert execute.json()["deleted_count"] == 1
+    assert execute.json()["candidates"][0]["cleanup_status"] == "deleted"
+    assert expired_ref not in object_store.objects
+    updated = registry_store.image_admissions[project.id][0].evidence["sbom"]
+    assert updated["artifact_cleanup_status"] == "deleted"
+    assert [event["action"] for event in audit_store.events][-3:] == [
+        "tool_registry.shell_image_artifact.governance",
+        "tool_registry.shell_image_artifact.cleanup_run",
+        "tool_registry.shell_image_artifact.cleanup_run",
+    ]
+    rendered = governance.text + dry_run.text + execute.text + repr(audit_store.events)
+    assert "raw_sbom" not in rendered
+    assert "secret-package" not in rendered
+    assert expired_ref not in governance.text
+
+
+def test_tool_registry_shell_image_artifact_cleanup_requires_write_permission() -> None:
+    project = make_project(permissions=["tool-registry:view"])
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=InMemoryToolRegistryStore(),
+        audit_store=InMemoryAuditEventStore(),
+        artifact_object_store=InMemoryShellImageArtifactObjectStore(bucket="capievo"),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/cleanup-runs",
+        json={"dry_run": True},
+    )
+
+    assert response.status_code == 403
 
 
 def test_tool_registry_creates_lists_and_revokes_secret_leases_without_secret_values() -> None:

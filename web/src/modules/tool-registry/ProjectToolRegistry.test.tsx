@@ -94,6 +94,69 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(
+          JSON.stringify({
+            retention_controls: {
+              bucket: "capievo",
+              versioning_status: "Enabled",
+              object_lock_enabled: true,
+              worm_capable: true,
+              default_retention_configured: true,
+              default_retention_mode: "GOVERNANCE",
+              default_retention_days: 30,
+              default_retention_years: null,
+              error: "",
+            },
+            expired_artifact_count: 1,
+            retained_artifact_count: 1,
+            deleted_artifact_count: 0,
+            failed_artifact_count: 0,
+            candidates: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { dry_run: boolean };
+        return new Response(
+          JSON.stringify({
+            dry_run: body.dry_run,
+            candidate_count: 1,
+            deleted_count: body.dry_run ? 0 : 1,
+            failed_count: 0,
+            retained_count: 1,
+            retention_controls: {
+              bucket: "capievo",
+              versioning_status: "Enabled",
+              object_lock_enabled: true,
+              worm_capable: true,
+              default_retention_configured: true,
+              default_retention_mode: "GOVERNANCE",
+              default_retention_days: 30,
+              default_retention_years: null,
+              error: "",
+            },
+            candidates: [
+              {
+                admission_id: "admission-1",
+                evidence_key: "sbom",
+                artifact_kind: "sbom",
+                artifact_ref: "s3://capievo/shell-image-admissions/expired-sbom.json",
+                artifact_sha256: "a".repeat(64),
+                artifact_size_bytes: 128,
+                artifact_retention_days: 1,
+                artifact_retention_expires_at: "2026-07-04T00:00:00Z",
+                cleanup_status: body.dry_run ? "pending" : "deleted",
+                cleanup_error: "",
+              },
+            ],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
       if (url.endsWith("/shell-images/notation/trust-certificates") && !init) {
         return new Response(
           JSON.stringify([
@@ -325,9 +388,16 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("SBOM artifacts")).toBeInTheDocument();
     expect(screen.getByText("Scan artifacts")).toBeInTheDocument();
     expect(screen.getByText("Expired artifacts")).toBeInTheDocument();
+    expect(screen.getByText("S3 / MinIO Retention Controls")).toBeInTheDocument();
+    expect(screen.getByText("object-lock-default")).toBeInTheDocument();
+    expect(screen.getByText("capievo")).toBeInTheDocument();
     expect(screen.getByText("vulnerability scan found blocked severities: 1")).toBeInTheDocument();
     expect(screen.getByText(/SBOM artifact: s3:\/\/capievo\/shell-image-admissions\/sbom\.json/)).toBeInTheDocument();
     expect(screen.getByText(/Scan artifact: s3:\/\/capievo\/shell-image-admissions\/scan\.json/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dry run cleanup" }));
+    expect(await screen.findByText(/Dry run: 1 candidates, 0 deleted, 0 failed/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Execute cleanup" }));
+    expect(await screen.findByText(/Executed: 1 candidates, 1 deleted, 0 failed/)).toBeInTheDocument();
     expect(screen.getByText("Production or high risk shell templates require approval")).toBeInTheDocument();
     expect(screen.queryByText(/BEGIN CERTIFICATE/)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open trace" })).toHaveAttribute(
@@ -351,6 +421,13 @@ describe("ProjectToolRegistry", () => {
     );
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/governance",
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
+      expect.objectContaining({ method: "POST" }),
     );
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",
@@ -440,6 +517,9 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
+      }
       if (url.endsWith("/shell-images/notation/trust-certificates")) {
         return new Response(JSON.stringify([]), { status: 200 });
       }
@@ -459,6 +539,109 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText(/dry-run would reject: cosign evidence missing/i)).toBeInTheDocument();
 
     fetchSpy.mockRestore();
+  });
+
+  it("clears artifact cleanup run descriptors when project changes", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/shell-templates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/admission-policy")) {
+        return new Response(
+          JSON.stringify({
+            id: null,
+            configured: false,
+            project_id: "dynamic",
+            enforcement_mode: "dry_run",
+            cosign_required: false,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 0,
+            policy_decisions: { approved: 0, would_reject: 0, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 0, passed: 0, failed: 0 },
+              sbom: { not_checked: 0, passed: 0, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 0, failed: 0 },
+            },
+            artifact_counts: { sbom: 0, scan_report: 0, expired: 0 },
+            blocked_vulnerability_count: 0,
+            top_block_reasons: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            dry_run: true,
+            candidate_count: 1,
+            deleted_count: 0,
+            failed_count: 0,
+            retained_count: 0,
+            retention_controls: emptyArtifactGovernance().retention_controls,
+            candidates: [
+              {
+                admission_id: "admission-old",
+                evidence_key: "sbom",
+                artifact_kind: "sbom",
+                artifact_ref: "s3://capievo/old-project/expired-sbom.json",
+                artifact_sha256: "f".repeat(64),
+                artifact_size_bytes: 128,
+                artifact_retention_days: 1,
+                artifact_retention_expires_at: "2026-07-04T00:00:00Z",
+                cleanup_status: "pending",
+                cleanup_error: "",
+              },
+            ],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/notation/trust-certificates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 });
+    });
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+    const { rerender } = render(
+      <AppProviders runtime={runtime}>
+        <ProjectToolRegistry project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    await screen.findByText("S3 / MinIO Retention Controls");
+    await user.click(screen.getByRole("button", { name: "Dry run cleanup" }));
+    expect(await screen.findByText("s3://capievo/old-project/expired-sbom.json")).toBeInTheDocument();
+
+    rerender(
+      <AppProviders runtime={runtime}>
+        <ProjectToolRegistry project={{ ...defaultProjectContext, projectId: "project-next" }} />
+      </AppProviders>,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("s3://capievo/old-project/expired-sbom.json")).not.toBeInTheDocument();
+    });
   });
 
   it("shows backend policy errors without exposing raw secret parameters", async () => {
@@ -506,6 +689,9 @@ describe("ProjectToolRegistry", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
+      }
       if (url.endsWith("/shell-images/notation/trust-certificates")) {
         return new Response(JSON.stringify([]), { status: 200 });
       }
@@ -535,3 +721,25 @@ describe("ProjectToolRegistry", () => {
     expect(screen.queryByText("raw-token")).not.toBeInTheDocument();
   });
 });
+
+function emptyArtifactGovernance() {
+  return {
+    retention_controls: {
+      bucket: "capievo",
+      versioning_status: "Suspended",
+      object_lock_enabled: false,
+      worm_capable: false,
+      default_retention_configured: false,
+      default_retention_mode: null,
+      default_retention_days: null,
+      default_retention_years: null,
+      error: "",
+    },
+    expired_artifact_count: 0,
+    retained_artifact_count: 0,
+    deleted_artifact_count: 0,
+    failed_artifact_count: 0,
+    candidates: [],
+    generated_at: "2026-07-05T00:00:00Z",
+  };
+}

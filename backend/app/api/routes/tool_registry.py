@@ -17,7 +17,11 @@ from backend.app.execution.shell_policy import ShellTemplatePolicyError
 from backend.app.iam.access import AccountPrincipal
 from backend.app.iam.schemas import ProjectAccessProvider
 from backend.app.security.egress_policy import EgressPolicy
+from backend.app.tool_registry.image_artifact_cleanup import (
+    ShellImageArtifactCleanupService,
+)
 from backend.app.tool_registry.image_artifacts import (
+    ShellImageArtifactObjectStore,
     ShellImageArtifactWriter,
     build_shell_image_artifact_object_store,
 )
@@ -56,6 +60,11 @@ from backend.app.tool_registry.schemas import (
     ShellImageAdmissionPolicyUpdateRequest,
     ShellImageAdmissionRead,
     ShellImageAdmissionResolveRequest,
+    ShellImageArtifactCleanupCandidateRead,
+    ShellImageArtifactCleanupGovernanceRead,
+    ShellImageArtifactCleanupRequest,
+    ShellImageArtifactCleanupRunRead,
+    ShellImageArtifactRetentionControlsRead,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -113,6 +122,13 @@ def get_shell_image_evidence_provider() -> ShellImageEvidenceProvider:
 
 
 ShellImageEvidenceProviderDependency = Depends(get_shell_image_evidence_provider)
+
+
+def get_shell_image_artifact_object_store() -> ShellImageArtifactObjectStore:
+    return build_shell_image_artifact_object_store(AppSettings().s3)
+
+
+ShellImageArtifactObjectStoreDependency = Depends(get_shell_image_artifact_object_store)
 
 
 @router.get("/catalog", response_model=ToolRegistryCatalogResponse)
@@ -985,6 +1001,97 @@ async def get_shell_image_admission_governance(
 
 
 @router.get(
+    "/shell-images/artifacts/governance",
+    response_model=ShellImageArtifactCleanupGovernanceRead,
+)
+async def get_shell_image_artifact_cleanup_governance(
+    project_id: UUID,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactCleanupGovernanceRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:view",
+    )
+    service = ShellImageArtifactCleanupService(
+        store=registry_store,
+        object_store=object_store,
+    )
+    governance = await service.get_governance(project_id)
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.governance",
+        target_type="tool_registry_image_admission_artifact",
+        target_id=str(project_id),
+        risk_level="medium",
+        metadata={
+            "expired_artifact_count": governance.expired_artifact_count,
+            "retained_artifact_count": governance.retained_artifact_count,
+            "deleted_artifact_count": governance.deleted_artifact_count,
+            "failed_artifact_count": governance.failed_artifact_count,
+            "retention_controls": _artifact_retention_controls_metadata(
+                governance.retention_controls
+            ),
+        },
+    )
+    return governance
+
+
+@router.post(
+    "/shell-images/artifacts/cleanup-runs",
+    response_model=ShellImageArtifactCleanupRunRead,
+)
+async def run_shell_image_artifact_cleanup(
+    project_id: UUID,
+    request: ShellImageArtifactCleanupRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactCleanupRunRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    service = ShellImageArtifactCleanupService(
+        store=registry_store,
+        object_store=object_store,
+    )
+    run = await service.run_cleanup(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        request=request,
+    )
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.cleanup_run",
+        target_type="tool_registry_image_admission_artifact",
+        target_id=str(project_id),
+        risk_level="high" if not run.dry_run else "medium",
+        metadata={
+            "dry_run": run.dry_run,
+            "candidate_count": run.candidate_count,
+            "deleted_count": run.deleted_count,
+            "failed_count": run.failed_count,
+            "retained_count": run.retained_count,
+            "retention_controls": _artifact_retention_controls_metadata(run.retention_controls),
+            "artifacts": _artifact_cleanup_candidate_metadata(run.candidates),
+        },
+    )
+    return run
+
+
+@router.get(
     "/shell-images/admission-policy",
     response_model=ShellImageAdmissionPolicyRead,
 )
@@ -1326,6 +1433,38 @@ def _notation_trust_certificate_metadata(
         "certificate_count": certificate.certificate_count,
         "status": certificate.status,
     }
+
+
+def _artifact_retention_controls_metadata(
+    controls: ShellImageArtifactRetentionControlsRead,
+) -> dict[str, object]:
+    return {
+        "bucket": controls.bucket,
+        "versioning_status": controls.versioning_status,
+        "object_lock_enabled": controls.object_lock_enabled,
+        "worm_capable": controls.worm_capable,
+        "default_retention_configured": controls.default_retention_configured,
+        "default_retention_mode": controls.default_retention_mode,
+        "default_retention_days": controls.default_retention_days,
+        "default_retention_years": controls.default_retention_years,
+        "error": controls.error,
+    }
+
+
+def _artifact_cleanup_candidate_metadata(
+    candidates: list[ShellImageArtifactCleanupCandidateRead],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "admission_id": str(candidate.admission_id),
+            "artifact_kind": candidate.artifact_kind,
+            "artifact_ref": candidate.artifact_ref,
+            "artifact_sha256": candidate.artifact_sha256,
+            "artifact_retention_expires_at": candidate.artifact_retention_expires_at.isoformat(),
+            "cleanup_status": candidate.cleanup_status,
+        }
+        for candidate in candidates
+    ]
 
 
 async def _record_egress_denied_event(

@@ -68,6 +68,8 @@ def _count_admission_artifacts(
         evidence = admission.evidence.get(key)
         if not isinstance(evidence, dict):
             continue
+        if evidence.get("artifact_cleanup_status") == "deleted":
+            continue
         if not isinstance(evidence.get("artifact_ref"), str):
             continue
         setattr(next_counts, field_name, getattr(next_counts, field_name) + 1)

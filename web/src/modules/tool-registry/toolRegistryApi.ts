@@ -94,6 +94,57 @@ export type ShellImageAdmissionGovernance = {
   generated_at: string;
 };
 
+export type ShellImageArtifactRetentionControls = {
+  bucket: string;
+  versioning_status: string;
+  object_lock_enabled: boolean;
+  worm_capable: boolean;
+  default_retention_configured: boolean;
+  default_retention_mode?: string | null;
+  default_retention_days?: number | null;
+  default_retention_years?: number | null;
+  error: string;
+};
+
+export type ShellImageArtifactCleanupCandidate = {
+  admission_id: string;
+  evidence_key: string;
+  artifact_kind: string;
+  artifact_ref: string;
+  artifact_sha256: string;
+  artifact_size_bytes: number;
+  artifact_retention_days?: number | null;
+  artifact_retention_expires_at: string;
+  cleanup_status: "pending" | "deleted" | "delete_failed";
+  cleanup_error: string;
+};
+
+export type ShellImageArtifactCleanupGovernance = {
+  retention_controls: ShellImageArtifactRetentionControls;
+  expired_artifact_count: number;
+  retained_artifact_count: number;
+  deleted_artifact_count: number;
+  failed_artifact_count: number;
+  candidates: ShellImageArtifactCleanupCandidate[];
+  generated_at: string;
+};
+
+export type ShellImageArtifactCleanupRequest = {
+  dry_run: boolean;
+  limit?: number;
+};
+
+export type ShellImageArtifactCleanupRun = {
+  dry_run: boolean;
+  candidate_count: number;
+  deleted_count: number;
+  failed_count: number;
+  retained_count: number;
+  retention_controls: ShellImageArtifactRetentionControls;
+  candidates: ShellImageArtifactCleanupCandidate[];
+  generated_at: string;
+};
+
 export type NotationTrustCertificate = {
   id: string;
   project_id: string;
@@ -192,6 +243,9 @@ export const shellImagePolicyQueryKey = (projectId: string) =>
 export const shellImageGovernanceQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "shell-image-governance"] as const;
 
+export const shellImageArtifactGovernanceQueryKey = (projectId: string) =>
+  ["project", projectId, "tool-registry", "shell-image-artifact-governance"] as const;
+
 export const notationTrustCertificatesQueryKey = (projectId: string) =>
   ["project", projectId, "tool-registry", "notation-trust-certificates"] as const;
 
@@ -224,6 +278,33 @@ export async function getShellImageAdmissionGovernance(
   return requestJson<ShellImageAdmissionGovernance>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/admissions/governance`,
     undefined,
+    fetcher,
+  );
+}
+
+export async function getShellImageArtifactCleanupGovernance(
+  projectId: string,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactCleanupGovernance> {
+  return requestJson<ShellImageArtifactCleanupGovernance>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/governance`,
+    undefined,
+    fetcher,
+  );
+}
+
+export async function runShellImageArtifactCleanup(
+  projectId: string,
+  request: ShellImageArtifactCleanupRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactCleanupRun> {
+  return requestJson<ShellImageArtifactCleanupRun>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/cleanup-runs`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
     fetcher,
   );
 }

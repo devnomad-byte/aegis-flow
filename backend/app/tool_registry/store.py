@@ -171,6 +171,19 @@ class ToolRegistryStore(Protocol):
     ) -> ShellImageAdmissionGovernanceRead:
         raise NotImplementedError
 
+    async def list_shell_image_admissions(self, project_id: UUID) -> list[ShellImageAdmissionRead]:
+        raise NotImplementedError
+
+    async def update_shell_image_admission_evidence(
+        self,
+        *,
+        project_id: UUID,
+        admission_id: UUID,
+        actor_id: UUID,
+        evidence: dict[str, object],
+    ) -> ShellImageAdmissionRead:
+        raise NotImplementedError
+
     async def upsert_shell_image_admission_policy(
         self,
         *,

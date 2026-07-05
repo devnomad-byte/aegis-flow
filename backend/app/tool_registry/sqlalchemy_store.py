@@ -410,6 +410,36 @@ class SqlAlchemyToolRegistryStore:
         ]
         return summarize_shell_image_admission_governance(admissions, now=now)
 
+    async def list_shell_image_admissions(self, project_id: UUID) -> list[ShellImageAdmissionRead]:
+        result = await self._session.scalars(
+            select(ToolRegistryImageAdmission)
+            .where(ToolRegistryImageAdmission.project_id == project_id)
+            .order_by(ToolRegistryImageAdmission.checked_at.desc())
+        )
+        return [ShellImageAdmissionRead.model_validate(admission) for admission in result.all()]
+
+    async def update_shell_image_admission_evidence(
+        self,
+        *,
+        project_id: UUID,
+        admission_id: UUID,
+        actor_id: UUID,
+        evidence: dict[str, object],
+    ) -> ShellImageAdmissionRead:
+        admission = await self._session.scalar(
+            select(ToolRegistryImageAdmission).where(
+                ToolRegistryImageAdmission.project_id == project_id,
+                ToolRegistryImageAdmission.id == admission_id,
+            )
+        )
+        if admission is None:
+            raise ToolRegistryResourceNotFoundError("image admission not found")
+        admission.evidence = evidence
+        admission.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(admission)
+        return ShellImageAdmissionRead.model_validate(admission)
+
     async def upsert_shell_image_admission_policy(
         self,
         *,

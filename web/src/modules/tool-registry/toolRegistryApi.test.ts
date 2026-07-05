@@ -4,12 +4,15 @@ import {
   createNotationTrustCertificate,
   createShellTemplate,
   getShellImageAdmissionGovernance,
+  getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
   listNotationTrustCertificates,
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
+  runShellImageArtifactCleanup,
+  shellImageArtifactGovernanceQueryKey,
   shellImageGovernanceQueryKey,
   shellTemplatesQueryKey,
   shellImagePolicyQueryKey,
@@ -100,6 +103,55 @@ describe("toolRegistryApi", () => {
             top_block_reasons: [
               { reason: "vulnerability scan found blocked severities", count: 1 },
             ],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(
+          JSON.stringify({
+            retention_controls: {
+              bucket: "capievo",
+              versioning_status: "Enabled",
+              object_lock_enabled: true,
+              worm_capable: true,
+              default_retention_configured: true,
+              default_retention_mode: "GOVERNANCE",
+              default_retention_days: 30,
+              default_retention_years: null,
+              error: "",
+            },
+            expired_artifact_count: 1,
+            retained_artifact_count: 2,
+            deleted_artifact_count: 0,
+            failed_artifact_count: 0,
+            candidates: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            dry_run: false,
+            candidate_count: 1,
+            deleted_count: 1,
+            failed_count: 0,
+            retained_count: 2,
+            retention_controls: {
+              bucket: "capievo",
+              versioning_status: "Enabled",
+              object_lock_enabled: true,
+              worm_capable: true,
+              default_retention_configured: true,
+              default_retention_mode: "GOVERNANCE",
+              default_retention_days: 30,
+              default_retention_years: null,
+              error: "",
+            },
+            candidates: [],
             generated_at: "2026-07-05T00:00:00Z",
           }),
           { status: 200 },
@@ -229,6 +281,15 @@ describe("toolRegistryApi", () => {
       artifact_counts: { sbom: 1, scan_report: 1, expired: 1 },
       blocked_vulnerability_count: 1,
     });
+    await expect(
+      getShellImageArtifactCleanupGovernance("ops-command", fetcher),
+    ).resolves.toMatchObject({
+      expired_artifact_count: 1,
+      retention_controls: { bucket: "capievo", worm_capable: true, default_retention_configured: true },
+    });
+    await expect(
+      runShellImageArtifactCleanup("ops-command", { dry_run: false, limit: 10 }, fetcher),
+    ).resolves.toMatchObject({ deleted_count: 1, dry_run: false });
     await expect(listNotationTrustCertificates("ops-command", fetcher)).resolves.toMatchObject([
       { store_type: "ca", store_name: "aegis-flow", certificate_ref: "root" },
     ]);
@@ -281,6 +342,12 @@ describe("toolRegistryApi", () => {
       "tool-registry",
       "shell-image-governance",
     ]);
+    expect(shellImageArtifactGovernanceQueryKey("ops-command")).toEqual([
+      "project",
+      "ops-command",
+      "tool-registry",
+      "shell-image-artifact-governance",
+    ]);
     expect(notationTrustCertificatesQueryKey("ops-command")).toEqual([
       "project",
       "ops-command",
@@ -301,6 +368,13 @@ describe("toolRegistryApi", () => {
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/governance",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",
+      expect.objectContaining({ method: "POST" }),
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/notation/trust-certificates",

@@ -329,3 +329,70 @@ async def test_notation_trust_certificate_descriptor_persists_without_raw_pem() 
     rendered = created.model_dump_json()
     assert "BEGIN CERTIFICATE" not in rendered
     assert "PRIVATE KEY" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_tool_registry_updates_shell_image_admission_evidence() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid4()
+    actor_id = uuid4()
+    digest = "sha256:" + ("d" * 64)
+    async with session_factory() as session:
+        session.add(Account(id=actor_id, email="cleanup@example.com", display_name="Cleanup"))
+        session.add(Project(id=project_id, slug="cleanup", name="Cleanup"))
+        await session.commit()
+
+        store = SqlAlchemyToolRegistryStore(session)
+        admission = await store.record_shell_image_admission(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageAdmissionResolveRequest(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                image_digest=digest,
+            ),
+            digest_result=OciManifestDigestResult(
+                image_ref="registry.example/aegis/runtime:7-alpine",
+                registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+                registry_digest=digest,
+                computed_digest=digest,
+                digest_match=True,
+                content_type="application/vnd.oci.image.manifest.v1+json",
+                manifest_size_bytes=128,
+            ),
+            digest_match=True,
+            policy_decision="approved",
+            decision_reason="registry digest, SBOM, and vulnerability evidence passed",
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="passed",
+            evidence_summary={
+                "sbom": {
+                    "artifact_ref": "s3://capievo/shell-image-admissions/expired.json",
+                    "artifact_sha256": "d" * 64,
+                    "artifact_retention_expires_at": "2026-07-04T00:00:00+00:00",
+                }
+            },
+        )
+
+        updated = await store.update_shell_image_admission_evidence(
+            project_id=project_id,
+            admission_id=admission.id,
+            actor_id=actor_id,
+            evidence={
+                "sbom": {
+                    **admission.evidence["sbom"],
+                    "artifact_cleanup_status": "deleted",
+                    "artifact_deleted_at": "2026-07-05T00:00:00+00:00",
+                }
+            },
+        )
+        admissions = await store.list_shell_image_admissions(project_id)
+
+    await engine.dispose()
+
+    assert updated.evidence["sbom"]["artifact_cleanup_status"] == "deleted"
+    assert admissions[0].evidence["sbom"]["artifact_cleanup_status"] == "deleted"

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, Save, ShieldCheck } from "lucide-react";
+import { Play, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
@@ -7,18 +7,23 @@ import {
   createNotationTrustCertificate,
   createShellTemplate,
   getShellImageAdmissionGovernance,
+  getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
   listNotationTrustCertificates,
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
   resolveShellImageAdmission,
+  runShellImageArtifactCleanup,
   type NotationTrustCertificate,
   type NotationTrustCertificateCreateRequest,
   type ShellImageAdmission,
   type ShellImageAdmissionGovernance,
+  type ShellImageArtifactCleanupGovernance,
+  type ShellImageArtifactCleanupRun,
   type ShellImageAdmissionPolicy,
   type ShellImageAdmissionPolicyUpdateRequest,
+  shellImageArtifactGovernanceQueryKey,
   shellImageGovernanceQueryKey,
   shellImagePolicyQueryKey,
   shellTemplatesQueryKey,
@@ -87,6 +92,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     () => shellImageGovernanceQueryKey(project.projectId),
     [project.projectId],
   );
+  const artifactGovernanceQueryKey = useMemo(
+    () => shellImageArtifactGovernanceQueryKey(project.projectId),
+    [project.projectId],
+  );
   const notationTrustQueryKey = useMemo(
     () => notationTrustCertificatesQueryKey(project.projectId),
     [project.projectId],
@@ -103,6 +112,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const [localError, setLocalError] = useState("");
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
   const [admission, setAdmission] = useState<ShellImageAdmission | null>(null);
+  const [artifactCleanupRun, setArtifactCleanupRun] = useState<ShellImageArtifactCleanupRun | null>(null);
 
   const templatesQuery = useQuery({
     queryFn: () => listShellTemplates(project.projectId),
@@ -117,6 +127,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const governanceQuery = useQuery({
     queryFn: () => getShellImageAdmissionGovernance(project.projectId),
     queryKey: governanceQueryKey,
+    retry: false,
+  });
+  const artifactGovernanceQuery = useQuery({
+    queryFn: () => getShellImageArtifactCleanupGovernance(project.projectId),
+    queryKey: artifactGovernanceQueryKey,
     retry: false,
   });
   const notationTrustQuery = useQuery({
@@ -172,6 +187,15 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
       void queryClient.invalidateQueries({ queryKey: notationTrustQueryKey });
     },
   });
+  const artifactCleanupMutation = useMutation({
+    mutationFn: (dryRun: boolean) =>
+      runShellImageArtifactCleanup(project.projectId, { dry_run: dryRun, limit: 100 }),
+    onSuccess: (run) => {
+      setArtifactCleanupRun(run);
+      void queryClient.invalidateQueries({ queryKey: artifactGovernanceQueryKey });
+      void queryClient.invalidateQueries({ queryKey: governanceQueryKey });
+    },
+  });
 
   useEffect(() => {
     const firstTemplate = templatesQuery.data?.[0];
@@ -183,6 +207,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   useEffect(() => {
     setAdmission(null);
   }, [form.image_digest, form.image_ref, project.projectId]);
+
+  useEffect(() => {
+    setArtifactCleanupRun(null);
+  }, [project.projectId]);
 
   useEffect(() => {
     if (policyQuery.data) {
@@ -207,7 +235,9 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     admissionMutation.error ||
     policyMutation.error ||
     notationTrustMutation.error ||
+    artifactCleanupMutation.error ||
     notationTrustQuery.error ||
+    artifactGovernanceQuery.error ||
     policyQuery.error ||
     governanceQuery.error ||
     templatesQuery.error;
@@ -368,6 +398,13 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
             <GovernancePanel
               governance={governanceQuery.data ?? null}
               isLoading={governanceQuery.isLoading}
+            />
+            <ArtifactCleanupPanel
+              governance={artifactGovernanceQuery.data ?? null}
+              isLoading={artifactGovernanceQuery.isLoading}
+              isRunning={artifactCleanupMutation.isPending}
+              onRun={(dryRun) => artifactCleanupMutation.mutate(dryRun)}
+              run={artifactCleanupRun}
             />
             <PolicyPanel
               isLoading={policyQuery.isLoading}
@@ -715,6 +752,102 @@ function GovernancePanel({
           {item.reason}: {item.count}
         </div>
       ))}
+    </section>
+  );
+}
+
+function ArtifactCleanupPanel({
+  governance,
+  isLoading,
+  isRunning,
+  onRun,
+  run,
+}: {
+  governance: ShellImageArtifactCleanupGovernance | null;
+  isLoading: boolean;
+  isRunning: boolean;
+  onRun: (dryRun: boolean) => void;
+  run: ShellImageArtifactCleanupRun | null;
+}) {
+  if (isLoading) {
+    return <div className="preview-alert">Loading artifact cleanup governance</div>;
+  }
+
+  const controls = governance?.retention_controls;
+  const defaultRetentionConfigured = controls?.default_retention_configured === true;
+  const retentionStatusLabel = defaultRetentionConfigured
+    ? "object-lock-default"
+    : controls?.worm_capable
+      ? "object-lock-capable"
+      : "worm-check";
+  const latestCandidates = run?.candidates ?? governance?.candidates ?? [];
+
+  return (
+    <section className="shell-governance-panel" aria-label="Shell Artifact Cleanup">
+      <div className="global-panel-header">
+        <div>
+          <div className="telemetry">ARTIFACT CLEANUP</div>
+          <h3>S3 / MinIO Retention Controls</h3>
+        </div>
+        <span className={`status-pill ${defaultRetentionConfigured ? "status-ready" : "status-warning"}`}>
+          {retentionStatusLabel}
+        </span>
+      </div>
+      <div className="shell-governance-grid">
+        <Detail label="Bucket" value={controls?.bucket ?? "unknown"} />
+        <Detail label="Versioning" value={controls?.versioning_status ?? "unknown"} />
+        <Detail label="Object Lock" value={controls?.object_lock_enabled ? "enabled" : "not enabled"} />
+        <Detail label="Default retention" value={defaultRetentionConfigured ? "default rule" : "not configured"} />
+        <Detail label="Retention mode" value={controls?.default_retention_mode ?? "none"} />
+        <Detail label="Expired" value={String(governance?.expired_artifact_count ?? 0)} />
+        <Detail label="Retained" value={String(governance?.retained_artifact_count ?? 0)} />
+        <Detail label="Deleted" value={String(governance?.deleted_artifact_count ?? 0)} />
+        <Detail label="Failed" value={String(governance?.failed_artifact_count ?? 0)} />
+      </div>
+      {controls?.error ? (
+        <div className="preview-alert preview-alert-danger">{controls.error}</div>
+      ) : null}
+      <div className="release-action-row">
+        <button
+          className="toolbar-button"
+          disabled={isRunning}
+          onClick={() => onRun(true)}
+          type="button"
+        >
+          <ShieldCheck aria-hidden="true" size={16} />
+          Dry run cleanup
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={isRunning || (governance?.expired_artifact_count ?? 0) === 0}
+          onClick={() => onRun(false)}
+          type="button"
+        >
+          <Trash2 aria-hidden="true" size={16} />
+          Execute cleanup
+        </button>
+      </div>
+      {run ? (
+        <div className="preview-alert preview-alert-success">
+          {run.dry_run ? "Dry run" : "Executed"}: {run.candidate_count} candidates, {run.deleted_count} deleted, {run.failed_count} failed
+        </div>
+      ) : null}
+      <div className="artifact-cleanup-list">
+        {latestCandidates.length === 0 ? (
+          <div className="preview-alert">No expired SBOM or scan report artifacts</div>
+        ) : null}
+        {latestCandidates.map((candidate) => (
+          <div className="preview-alert artifact-cleanup-row" key={`${candidate.admission_id}-${candidate.evidence_key}`}>
+            <strong>{candidate.artifact_kind}</strong>
+            <code>{candidate.artifact_ref}</code>
+            <small>{candidate.artifact_sha256.slice(0, 12)}</small>
+            <small>expires {candidate.artifact_retention_expires_at}</small>
+            <span className={`status-pill ${candidate.cleanup_status === "delete_failed" ? "status-blocked" : "status-ready"}`}>
+              {candidate.cleanup_status}
+            </span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
