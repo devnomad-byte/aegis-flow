@@ -60,11 +60,27 @@ Current technical direction:
 Backend quality gates:
 
 ```powershell
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy .
-uv run pytest --cov=backend.app --cov-report=term-missing
+.\scripts\verify-backend.ps1
 ```
+
+The backend verification script is `scripts/verify-backend.ps1`. It runs Ruff,
+format check, mypy, pytest, coverage with `--cov=backend.app`, and Alembic check.
+
+Frontend quality gates:
+
+```powershell
+pnpm --dir web lint
+pnpm --dir web typecheck
+pnpm --dir web test
+pnpm --dir web build
+pnpm --dir web design:lint
+pnpm --dir web test:e2e
+```
+
+`pnpm --dir web test:e2e` runs Playwright through `web/scripts/run-e2e.mjs`.
+The wrapper defaults `PLAYWRIGHT_BROWSERS_PATH` to
+`D:\agent-platform-cache\ms-playwright` to avoid filling the C drive. Set
+`PLAYWRIGHT_BROWSERS_PATH` before running the command if a different local cache is required.
 
 Final acceptance uses real dependencies and must not rely on mock/fake data:
 
