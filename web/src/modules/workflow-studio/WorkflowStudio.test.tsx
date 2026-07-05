@@ -93,6 +93,60 @@ describe("WorkflowStudio", () => {
     expect(screen.getByText(/sha256:sample-llm/)).toBeInTheDocument();
   });
 
+  it("marks would-reject shell node admission in the inspector", async () => {
+    const user = userEvent.setup();
+
+    renderWorkflowStudio();
+
+    const yamlEditor = screen.getByLabelText("Workflow YAML");
+    await user.clear(yamlEditor);
+    fireEvent.change(yamlEditor, {
+      target: {
+        value: `schema_version: workflow.dsl/v0.2
+workflow:
+  id: wf_shell_admission
+  project_id: ops-command
+  name: Shell admission workflow
+  version: 1
+  status: draft
+nodes:
+  - id: start_1
+    type: start
+    name: Start
+  - id: shell_1
+    type: shell
+    name: Dry Run Diagnostics
+    risk_level: high
+    data:
+      template_ref: dry-run-diag
+      template_version: 1
+      environment: prod
+      image_admission_status: would_reject
+      image_admission_reason: "dry-run would reject: cosign evidence missing"
+  - id: end_1
+    type: end
+    name: End
+edges:
+  - source: start_1
+    target: shell_1
+    kind: sequence
+  - source: shell_1
+    target: end_1
+    kind: sequence
+`,
+      },
+    });
+
+    await user.click(screen.getByRole("button", { name: "预览导入" }));
+    await user.click(screen.getByRole("button", { name: "应用预览到画布" }));
+    await user.selectOptions(screen.getByLabelText("Select node for inspector"), "shell_1");
+
+    expect(screen.getByText("Shell Controls")).toBeInTheDocument();
+    expect(screen.getAllByText("would_reject")[0]).toBeInTheDocument();
+    expect(screen.getByText(/Re-resolve required before runtime/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/dry-run would reject: cosign evidence missing/i).length).toBeGreaterThan(0);
+  });
+
   it("shows YAML v2 import diff and exports preserved loop metadata", async () => {
     const user = userEvent.setup();
 

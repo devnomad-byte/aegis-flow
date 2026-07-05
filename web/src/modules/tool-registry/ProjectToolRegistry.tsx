@@ -157,6 +157,16 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     }
   }, [policyQuery.data]);
 
+  const selectedTemplate = useMemo(
+    () =>
+      templatesQuery.data?.find(
+        (template) =>
+          template.template_ref === form.template_ref &&
+          template.template_version === form.template_version,
+      ) ?? null,
+    [form.template_ref, form.template_version, templatesQuery.data],
+  );
+  const effectivePolicy = policyMutation.data ?? policyQuery.data ?? null;
   const error =
     localError ||
     createMutation.error ||
@@ -197,28 +207,37 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
             {!templatesQuery.isLoading && templatesQuery.data?.length === 0 ? (
               <div className="preview-alert">No shell templates configured</div>
             ) : null}
-            {templatesQuery.data?.map((template) => (
-              <button
-                className="shell-template-row"
-                key={template.id}
-                onClick={() => {
-                  applyTemplate(template, setForm, setArgvText, setSchemaText);
-                  setPreview(null);
-                  setAdmission(null);
-                }}
-                type="button"
-              >
-                <span>
-                  <strong>{template.name}</strong>
-                  <small>{template.template_ref}@{template.template_version}</small>
-                </span>
-                <span className={`status-pill workflow-risk-${template.risk_level}`}>
-                  {template.risk_level}
-                </span>
-                <code>{template.image_ref}</code>
-                <small>{template.image_digest ? "digest pinned" : "digest missing"}</small>
-              </button>
-            ))}
+            {templatesQuery.data?.map((template) => {
+              const runtimePosture = buildTemplateRuntimePosture(template, effectivePolicy);
+              return (
+                <button
+                  className={`shell-template-row ${runtimePosture.isRisk ? "shell-template-row-warning" : ""}`}
+                  key={template.id}
+                  onClick={() => {
+                    applyTemplate(template, setForm, setArgvText, setSchemaText);
+                    setPreview(null);
+                    setAdmission(null);
+                  }}
+                  type="button"
+                >
+                  <span>
+                    <strong>{template.name}</strong>
+                    <small>{template.template_ref}@{template.template_version}</small>
+                  </span>
+                  <span className={`status-pill workflow-risk-${template.risk_level}`}>
+                    {template.risk_level}
+                  </span>
+                  <code>{template.image_ref}</code>
+                  <small>{template.image_digest ? "digest pinned" : "digest missing"}</small>
+                  <span className={`status-pill ${runtimePosture.isRisk ? "status-blocked" : "status-ready"}`}>
+                    {template.image_admission_status ?? "not_required"}
+                  </span>
+                  {runtimePosture.message ? (
+                    <small className="shell-template-runtime-warning">{runtimePosture.message}</small>
+                  ) : null}
+                </button>
+              );
+            })}
           </section>
 
           <form
@@ -306,7 +325,11 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               </div>
               <ShieldCheck aria-hidden="true" size={18} />
             </div>
-            <SupplyChainPanel admission={admission} />
+            <SupplyChainPanel
+              admission={admission}
+              policy={effectivePolicy}
+              template={selectedTemplate}
+            />
             <GovernancePanel
               governance={governanceQuery.data ?? null}
               isLoading={governanceQuery.isLoading}
@@ -322,7 +345,7 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
                   trustPolicyText,
                 });
               }}
-              policy={policyMutation.data ?? policyQuery.data ?? null}
+              policy={effectivePolicy}
               policyForm={policyForm}
               setPolicyForm={setPolicyForm}
               setTrustPolicyText={setTrustPolicyText}
@@ -473,16 +496,34 @@ function PolicyPanel({
   );
 }
 
-function SupplyChainPanel({ admission }: { admission: ShellImageAdmission | null }) {
+function SupplyChainPanel({
+  admission,
+  policy,
+  template,
+}: {
+  admission: ShellImageAdmission | null;
+  policy: ShellImageAdmissionPolicy | null;
+  template: ShellTemplate | null;
+}) {
   const evidenceSummaries = buildEvidenceSummaries(admission?.evidence);
+  const runtimePosture = template ? buildTemplateRuntimePosture(template, policy) : null;
 
   return (
     <div className="shell-preview-grid">
       <Detail label="Image admission" value={admission?.policy_decision ?? "not_checked"} />
+      <Detail label="Template admission" value={template?.image_admission_status ?? "not_selected"} />
       <Detail label="Registry digest" value={admission?.registry_digest ?? "not_checked"} />
       <Detail label="Signature" value={admission?.signature_status ?? "not_checked"} />
       <Detail label="SBOM" value={admission?.sbom_status ?? "not_checked"} />
       <Detail label="Vulnerability" value={admission?.vulnerability_status ?? "not_checked"} />
+      {runtimePosture?.message ? (
+        <div className="preview-alert preview-alert-danger">
+          {runtimePosture.message}
+        </div>
+      ) : null}
+      {template?.image_admission_reason ? (
+        <EvidenceCode label="TEMPLATE ADMISSION REASON" value={template.image_admission_reason} />
+      ) : null}
       {evidenceSummaries.map((summary) => (
         <div className="preview-alert" key={summary}>
           {summary}
@@ -532,15 +573,34 @@ function GovernancePanel({
 }
 
 function PreviewPanel({ preview }: { preview: ShellTemplatePreviewResponse }) {
+  const policyReasons = [
+    ...preview.policy.reasons,
+    preview.policy.runtime_recheck_required
+      ? (preview.policy.runtime_reason || "Re-resolve required before runtime")
+      : "",
+  ].filter(Boolean);
+  const uniquePolicyReasons = [...new Set(policyReasons)];
+
   return (
     <div className="shell-preview-grid">
       <Detail label="Template" value={`${preview.template_ref}@${preview.template_version}`} />
       <Detail label="Command hash" value={preview.command_hash} />
       <Detail label="Network" value={String(preview.sandbox.network_mode ?? "none")} />
       <Detail label="Approval" value={preview.policy.approval_required ? "required" : "not required"} />
+      <Detail label="Runtime admission" value={preview.policy.runtime_admission_status ?? "not_required"} />
+      <Detail
+        label="Runtime gate"
+        value={
+          preview.policy.runtime_blocked
+            ? "blocked"
+            : preview.policy.runtime_recheck_required
+              ? "re-resolve"
+              : "ready"
+        }
+      />
       <EvidenceCode label="COMMAND PREVIEW" value={preview.command_preview} />
       <EvidenceCode label="ARGV" value={preview.rendered_argv.join("\n")} />
-      {preview.policy.reasons.map((reason) => (
+      {uniquePolicyReasons.map((reason) => (
         <div className="preview-alert preview-alert-danger" key={reason}>
           {reason}
         </div>
@@ -550,6 +610,41 @@ function PreviewPanel({ preview }: { preview: ShellTemplatePreviewResponse }) {
       </a>
     </div>
   );
+}
+
+function buildTemplateRuntimePosture(
+  template: ShellTemplate,
+  policy: ShellImageAdmissionPolicy | null,
+) {
+  const admissionStatus = template.image_admission_status ?? "not_required";
+  const needsAdmission =
+    template.environment_key.toLowerCase() === "prod" ||
+    template.environment_key.toLowerCase() === "production" ||
+    template.risk_level === "high" ||
+    template.risk_level === "critical";
+  const digestMatchesSnapshot = Boolean(template.image_registry_digest) &&
+    template.image_registry_digest === template.image_digest;
+  const digestChanged = Boolean(template.image_registry_digest) && !digestMatchesSnapshot;
+
+  if (!needsAdmission) {
+    return { isRisk: false, message: "" };
+  }
+
+  if (policy?.enforcement_mode === "enforce" && (admissionStatus !== "approved" || !digestMatchesSnapshot)) {
+    return {
+      isRisk: true,
+      message: "Re-resolve required before runtime. Enforce mode will block this shell template until image admission is approved.",
+    };
+  }
+
+  if (admissionStatus === "would_reject" || digestChanged) {
+    return {
+      isRisk: true,
+      message: "Dry-run admission would reject this image. Re-resolve before switching this project policy to enforce.",
+    };
+  }
+
+  return { isRisk: false, message: "" };
 }
 
 function TextField({

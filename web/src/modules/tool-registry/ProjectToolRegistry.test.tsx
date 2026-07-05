@@ -246,7 +246,7 @@ describe("ProjectToolRegistry", () => {
 
     expect(await screen.findByText("sha256:preview")).toBeInTheDocument();
     expect(screen.getByText("configured")).toBeInTheDocument();
-    expect(screen.getByText("approved")).toBeInTheDocument();
+    expect(screen.getAllByText("approved").length).toBeGreaterThan(0);
     expect(screen.getAllByText("passed").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("failed")).toBeInTheDocument();
     expect(screen.getByText("Components: 42")).toBeInTheDocument();
@@ -280,6 +280,106 @@ describe("ProjectToolRegistry", () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/admissions/governance",
     );
+  });
+
+  it("marks dry-run would-reject shell templates as runtime risk", async () => {
+    const validDigest = `sha256:${"e".repeat(64)}`;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/shell-templates") && !init) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "template-1",
+              project_id: "ops-command",
+              template_ref: "dry-run-diag",
+              template_version: 1,
+              name: "Dry Run Diagnostics",
+              risk_level: "high",
+              environment_key: "prod",
+              credential_ref: "",
+              image_ref: "registry.example/aegis/runtime:7-alpine",
+              image_digest: validDigest,
+              image_registry_digest: validDigest,
+              image_signature_status: "not_checked",
+              image_sbom_status: "passed",
+              image_vulnerability_status: "passed",
+              image_admission_status: "would_reject",
+              image_admission_reason: "dry-run would reject: cosign evidence missing",
+              entrypoint: "/bin/sh",
+              argv_template: ["-lc", "echo {{message}}"],
+              parameter_schema: {
+                type: "object",
+                properties: { message: { type: "string" } },
+                required: ["message"],
+                additionalProperties: false,
+              },
+              timeout_seconds: 20,
+              status: "active",
+              description: "",
+              created_by: "acct-1",
+              updated_by: "acct-1",
+              created_at: "2026-07-05T00:00:00Z",
+              updated_at: "2026-07-05T00:00:00Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admission-policy") && !init) {
+        return new Response(
+          JSON.stringify({
+            id: "policy-1",
+            configured: true,
+            project_id: "ops-command",
+            enforcement_mode: "enforce",
+            cosign_required: true,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 1,
+            policy_decisions: { approved: 0, would_reject: 1, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 1, passed: 0, failed: 0 },
+              sbom: { not_checked: 0, passed: 1, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 1, failed: 0 },
+            },
+            artifact_counts: { sbom: 0, scan_report: 0, expired: 0 },
+            blocked_vulnerability_count: 0,
+            top_block_reasons: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 });
+    });
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+
+    render(
+      <AppProviders runtime={runtime}>
+        <ProjectToolRegistry project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    expect(await screen.findByText("Dry Run Diagnostics")).toBeInTheDocument();
+    expect(screen.getAllByText("would_reject")[0]).toBeInTheDocument();
+    expect(screen.getAllByText(/Re-resolve required before runtime/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/dry-run would reject: cosign evidence missing/i)).toBeInTheDocument();
+
+    fetchSpy.mockRestore();
   });
 
   it("shows backend policy errors without exposing raw secret parameters", async () => {

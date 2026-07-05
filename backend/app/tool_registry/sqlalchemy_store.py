@@ -431,11 +431,13 @@ class SqlAlchemyToolRegistryStore:
         )
         if template is None:
             raise ToolRegistryResourceNotFoundError("shell template not found")
+        admission_policy = await self.get_shell_image_admission_policy(project_id)
         preview = build_shell_template_preview(
             _policy_input_from_shell_read(template),
             parameters=request.parameters,
             run_id=request.run_id,
             trace_id=request.trace_id,
+            admission_enforcement_mode=admission_policy.enforcement_mode,
         )
         return ShellTemplatePreviewResponse(
             template_ref=template.template_ref,
@@ -448,6 +450,10 @@ class SqlAlchemyToolRegistryStore:
                 approval_required=preview.policy.approval_required,
                 digest_required=preview.policy.digest_required,
                 allowlisted=preview.policy.allowlisted,
+                runtime_admission_status=preview.policy.runtime_admission_status,
+                runtime_recheck_required=preview.policy.runtime_recheck_required,
+                runtime_blocked=preview.policy.runtime_blocked,
+                runtime_reason=preview.policy.runtime_reason,
                 reasons=preview.policy.reasons,
             ),
             trace_link=preview.trace_link,

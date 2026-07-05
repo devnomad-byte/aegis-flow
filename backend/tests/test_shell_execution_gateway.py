@@ -9,7 +9,7 @@ from backend.app.execution.gateway import (
     ShellExecutionRequest,
 )
 from backend.app.execution.schemas import ShellInvocationCreate
-from backend.app.tool_registry.schemas import ShellTemplateRead
+from backend.app.tool_registry.schemas import ShellImageAdmissionPolicyRead, ShellTemplateRead
 
 
 @pytest.mark.asyncio
@@ -178,6 +178,51 @@ async def test_shell_execution_gateway_rejects_unpinned_image_before_docker() ->
 
 
 @pytest.mark.asyncio
+async def test_shell_execution_gateway_blocks_would_reject_template_when_policy_enforces() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    digest = "sha256:" + ("d" * 64)
+    invocation_store = RecordingShellInvocationStore()
+    command_executor = RecordingCommandExecutor(
+        result=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    )
+    template = shell_template(project_id=project_id, actor_id=actor_id).model_copy(
+        update={
+            "risk_level": "high",
+            "environment_key": "prod",
+            "image_ref": "registry.example/aegis/runtime:7-alpine",
+            "image_digest": digest,
+            "image_registry_digest": digest,
+            "image_admission_status": "would_reject",
+            "image_admission_reason": "dry-run would reject: cosign evidence missing",
+        }
+    )
+    gateway = ShellExecutionGatewayService(
+        template_store=InMemoryShellTemplateStore(
+            policy=shell_image_policy(project_id=project_id, actor_id=actor_id),
+            template=template,
+        ),
+        invocation_store=invocation_store,
+        command_executor=command_executor,
+    )
+
+    with pytest.raises(ShellExecutionGatewayError, match="approved shell image admission"):
+        await gateway.run_shell(
+            ShellExecutionRequest(
+                project_id=project_id,
+                actor_id=actor_id,
+                template_ref="echo-shell",
+                template_version=1,
+                environment="prod",
+                parameters={"message": "hello"},
+            )
+        )
+
+    assert command_executor.command is None
+    assert invocation_store.invocations == []
+
+
+@pytest.mark.asyncio
 async def test_shell_execution_gateway_records_sanitized_failure_summary() -> None:
     project_id = uuid4()
     actor_id = uuid4()
@@ -216,8 +261,35 @@ async def test_shell_execution_gateway_records_sanitized_failure_summary() -> No
 
 
 class InMemoryShellTemplateStore:
-    def __init__(self, *, template: ShellTemplateRead | None) -> None:
+    def __init__(
+        self,
+        *,
+        policy: ShellImageAdmissionPolicyRead | None = None,
+        template: ShellTemplateRead | None,
+    ) -> None:
+        self.policy = policy
         self.template = template
+
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
+        if self.policy is not None:
+            return self.policy
+        return ShellImageAdmissionPolicyRead(
+            id=None,
+            configured=False,
+            project_id=project_id,
+            enforcement_mode="dry_run",
+            cosign_required=False,
+            notation_enabled=False,
+            notation_trust_policy={"version": "1.0", "trustPolicies": []},
+            sbom_artifact_retention_enabled=False,
+            scan_report_retention_enabled=False,
+            artifact_store_prefix="shell-image-admissions",
+            artifact_retention_days=30,
+            blocked_severities=["HIGH", "CRITICAL"],
+        )
 
     async def get_active_shell_template(
         self,
@@ -291,4 +363,30 @@ def shell_template(*, project_id: UUID, actor_id: UUID) -> ShellTemplateRead:
             "additionalProperties": False,
         },
         timeout_seconds=7,
+    )
+
+
+def shell_image_policy(
+    *,
+    project_id: UUID,
+    actor_id: UUID,
+) -> ShellImageAdmissionPolicyRead:
+    now = datetime.now(UTC)
+    return ShellImageAdmissionPolicyRead(
+        id=uuid4(),
+        configured=True,
+        project_id=project_id,
+        enforcement_mode="enforce",
+        cosign_required=True,
+        notation_enabled=False,
+        notation_trust_policy={"version": "1.0", "trustPolicies": []},
+        sbom_artifact_retention_enabled=False,
+        scan_report_retention_enabled=False,
+        artifact_store_prefix="shell-image-admissions",
+        artifact_retention_days=30,
+        blocked_severities=["HIGH", "CRITICAL"],
+        created_by=actor_id,
+        updated_by=actor_id,
+        created_at=now,
+        updated_at=now,
     )

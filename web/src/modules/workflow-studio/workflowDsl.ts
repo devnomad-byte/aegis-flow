@@ -536,6 +536,14 @@ function createDefaultNodeData(nodeType: NodeDefinition["type"]) {
     };
   }
 
+  if (nodeType === "shell") {
+    return {
+      template_ref: "collect-pod-logs",
+      template_version: 1,
+      environment: "staging",
+    };
+  }
+
   if (nodeType === "human_approval") {
     return {
       approval_policy_ref: "approval.default",

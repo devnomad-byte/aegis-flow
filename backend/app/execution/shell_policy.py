@@ -36,7 +36,19 @@ class ShellTemplatePolicyDecision:
     approval_required: bool
     digest_required: bool
     allowlisted: bool
+    runtime_admission_status: str = "not_required"
+    runtime_recheck_required: bool = False
+    runtime_blocked: bool = False
+    runtime_reason: str = ""
     reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ShellImageRuntimePosture:
+    admission_status: str
+    recheck_required: bool
+    blocked: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -69,10 +81,15 @@ class ShellTemplatePolicyInput:
 def validate_shell_template_policy(
     template: ShellTemplatePolicyInput,
     *,
+    admission_enforcement_mode: str = "dry_run",
     image_policy: ShellImagePolicy | None = None,
 ) -> ShellTemplatePolicyDecision:
     image_policy = image_policy or ShellImagePolicy()
-    decision = evaluate_shell_template_policy(template, image_policy=image_policy)
+    decision = evaluate_shell_template_policy(
+        template,
+        admission_enforcement_mode=admission_enforcement_mode,
+        image_policy=image_policy,
+    )
     if not _has_executable_metadata(template):
         return decision
     if image_policy.forbid_latest and _uses_latest_or_missing_tag(template.image_ref):
@@ -83,12 +100,15 @@ def validate_shell_template_policy(
         raise ShellTemplatePolicyError("Shell template image digest is required")
     if template.image_digest and not _IMAGE_DIGEST_PATTERN.fullmatch(template.image_digest):
         raise ShellTemplatePolicyError("Shell template image digest is invalid")
+    if decision.runtime_blocked:
+        raise ShellTemplatePolicyError(decision.runtime_reason)
     return decision
 
 
 def evaluate_shell_template_policy(
     template: ShellTemplatePolicyInput,
     *,
+    admission_enforcement_mode: str = "dry_run",
     image_policy: ShellImagePolicy | None = None,
 ) -> ShellTemplatePolicyDecision:
     image_policy = image_policy or ShellImagePolicy()
@@ -100,6 +120,12 @@ def evaluate_shell_template_policy(
         reasons.append("Production or high risk shell templates require approval")
     if image_policy.require_digest:
         reasons.append("Shell images must carry a sha256 digest")
+    runtime_posture = evaluate_shell_image_runtime_posture(
+        template,
+        admission_enforcement_mode=admission_enforcement_mode,
+    )
+    if runtime_posture.reason:
+        reasons.append(runtime_posture.reason)
     return ShellTemplatePolicyDecision(
         approval_required=bool(
             template.environment_key.lower() in {"prod", "production"}
@@ -107,7 +133,69 @@ def evaluate_shell_template_policy(
         ),
         digest_required=image_policy.require_digest,
         allowlisted=_image_is_allowlisted(template, image_policy),
+        runtime_admission_status=runtime_posture.admission_status,
+        runtime_recheck_required=runtime_posture.recheck_required,
+        runtime_blocked=runtime_posture.blocked,
+        runtime_reason=runtime_posture.reason,
         reasons=reasons,
+    )
+
+
+def evaluate_shell_image_runtime_posture(
+    template: ShellTemplatePolicyInput,
+    *,
+    admission_enforcement_mode: str = "dry_run",
+) -> ShellImageRuntimePosture:
+    if not _requires_image_admission_for_runtime(template):
+        return ShellImageRuntimePosture(
+            admission_status=template.image_admission_status or "not_required",
+            recheck_required=False,
+            blocked=False,
+            reason="",
+        )
+
+    admission_status = template.image_admission_status or "not_checked"
+    digest_matches_snapshot = bool(template.image_registry_digest) and (
+        template.image_registry_digest == template.image_digest
+    )
+    digest_changed = bool(template.image_registry_digest) and not digest_matches_snapshot
+    has_approved_snapshot = admission_status == "approved" and digest_matches_snapshot
+
+    if admission_enforcement_mode == "enforce" and not has_approved_snapshot:
+        return ShellImageRuntimePosture(
+            admission_status=admission_status,
+            recheck_required=True,
+            blocked=True,
+            reason=(
+                "Runtime requires approved shell image admission under enforce mode; "
+                "re-resolve image admission before running this shell template"
+            ),
+        )
+
+    if admission_status == "would_reject" or digest_changed:
+        return ShellImageRuntimePosture(
+            admission_status=admission_status,
+            recheck_required=True,
+            blocked=False,
+            reason=(
+                "Dry-run shell image admission would reject this image; enforce mode "
+                "will block runtime until image admission is re-resolved and approved"
+            ),
+        )
+
+    if admission_status not in {"approved", "not_required"}:
+        return ShellImageRuntimePosture(
+            admission_status=admission_status,
+            recheck_required=True,
+            blocked=False,
+            reason="Shell image admission should be re-resolved before runtime",
+        )
+
+    return ShellImageRuntimePosture(
+        admission_status=admission_status,
+        recheck_required=False,
+        blocked=False,
+        reason="",
     )
 
 
@@ -117,6 +205,7 @@ def build_shell_template_preview(
     parameters: dict[str, Any],
     run_id: str = "",
     trace_id: str = "",
+    admission_enforcement_mode: str = "dry_run",
     image_policy: ShellImagePolicy | None = None,
     sandbox_policy: DockerSandboxPolicy | None = None,
 ) -> ShellTemplatePreview:
@@ -131,7 +220,11 @@ def build_shell_template_preview(
         argv=rendered_argv,
     )
     command = build_docker_run_command(invocation, sandbox_policy)
-    decision = evaluate_shell_template_policy(template, image_policy=image_policy)
+    decision = evaluate_shell_template_policy(
+        template,
+        admission_enforcement_mode=admission_enforcement_mode,
+        image_policy=image_policy,
+    )
     return ShellTemplatePreview(
         rendered_argv=[redact_sensitive_text(item) for item in rendered_argv],
         command_preview=redact_sensitive_text(build_shell_command_preview(invocation)),
@@ -190,6 +283,13 @@ def _render_template_arg(template: str, parameters: dict[str, Any]) -> str:
 
 def _has_executable_metadata(template: ShellTemplatePolicyInput) -> bool:
     return bool(template.image_ref or template.entrypoint or template.argv_template)
+
+
+def _requires_image_admission_for_runtime(template: ShellTemplatePolicyInput) -> bool:
+    return template.environment_key.lower() in {"prod", "production"} or template.risk_level in {
+        "high",
+        "critical",
+    }
 
 
 def _image_is_allowlisted(

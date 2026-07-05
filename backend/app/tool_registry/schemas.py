@@ -344,6 +344,10 @@ class ShellTemplatePolicySummary(BaseModel):
     approval_required: bool
     digest_required: bool
     allowlisted: bool
+    runtime_admission_status: str = "not_required"
+    runtime_recheck_required: bool = False
+    runtime_blocked: bool = False
+    runtime_reason: str = ""
     reasons: list[str] = Field(default_factory=list)
 
 

@@ -174,6 +174,12 @@ const NODE_LIBRARY_ITEMS: NodeLibraryItem[] = [
     icon: Bot,
   },
   {
+    type: "shell",
+    label: "Shell",
+    description: "Docker sandbox",
+    icon: ShieldAlert,
+  },
+  {
     type: "human_approval",
     label: "Human Approval",
     description: "Risk gate",
@@ -1007,6 +1013,10 @@ export function WorkflowStudio({ project }: WorkflowStudioProps) {
           <LlmControlsPanel node={selectedNode} onChange={handleNodeDataChange} />
         ) : null}
 
+        {selectedNode.type === "shell" ? (
+          <ShellControlsPanel node={selectedNode} onChange={handleNodeDataChange} />
+        ) : null}
+
         {selectedEdge ? (
           <SelectedEdgePanel
             edge={selectedEdge}
@@ -1246,6 +1256,55 @@ function LlmControlsPanel({
         onChange={(value) => onChange({ output_schema_ref: value })}
         value={data.output_schema_ref ?? ""}
       />
+    </section>
+  );
+}
+
+function ShellControlsPanel({
+  node,
+  onChange,
+}: {
+  node: WorkflowDefinition["nodes"][number];
+  onChange: (dataPatch: Record<string, unknown>) => void;
+}) {
+  const templateRef = readString(node.data?.template_ref);
+  const templateVersion = readNumber(node.data?.template_version) ?? 1;
+  const environment = readString(node.data?.environment);
+  const admissionStatus = readString(node.data?.image_admission_status) || "not_checked";
+  const admissionReason = readString(node.data?.image_admission_reason);
+  const needsReResolve = admissionStatus === "would_reject";
+
+  return (
+    <section className="inspector-section">
+      <div className="telemetry">Shell Controls</div>
+      <TextControl
+        label="Shell Template Ref"
+        onChange={(value) => onChange({ template_ref: value })}
+        value={templateRef}
+      />
+      <NumberControl
+        label="Shell Template Version"
+        min={1}
+        onChange={(value) => onChange({ template_version: value })}
+        value={templateVersion}
+      />
+      <TextControl
+        label="Shell Environment"
+        onChange={(value) => onChange({ environment: value })}
+        value={environment}
+      />
+      <div className="node-detail-grid">
+        <DetailItem label="template" value={templateRef ? `${templateRef}@${templateVersion}` : "not bound"} />
+        <DetailItem label="admission" value={admissionStatus} />
+      </div>
+      {needsReResolve ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          Re-resolve required before runtime. This Shell node references a dry-run image admission that would reject under enforce mode.
+        </div>
+      ) : null}
+      {admissionReason ? (
+        <div className="preview-alert preview-alert-danger">{admissionReason}</div>
+      ) : null}
     </section>
   );
 }
@@ -1915,6 +1974,10 @@ function readPendingApproval(value: Record<string, unknown> | undefined): Workfl
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function workflowRunStatusClass(status: WorkflowRunStatus | WorkflowNodeStatus | "idle") {

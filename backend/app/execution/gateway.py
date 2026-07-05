@@ -38,7 +38,11 @@ from backend.app.security.egress_proxy import (
     build_egress_proxy_plan,
 )
 from backend.app.security.redaction import redact_sensitive_text
-from backend.app.tool_registry.schemas import EnvironmentRead, ShellTemplateRead
+from backend.app.tool_registry.schemas import (
+    EnvironmentRead,
+    ShellImageAdmissionPolicyRead,
+    ShellTemplateRead,
+)
 from backend.app.tool_registry.store import (
     ToolRegistryEgressPolicyError,
     ToolRegistryResourceNotFoundError,
@@ -125,6 +129,12 @@ class HttpExecutionResult(BaseModel):
 
 
 class ShellTemplateStore(Protocol):
+    async def get_shell_image_admission_policy(
+        self,
+        project_id: UUID,
+    ) -> ShellImageAdmissionPolicyRead:
+        raise NotImplementedError
+
     async def get_active_shell_template(
         self,
         *,
@@ -226,7 +236,10 @@ class ShellExecutionGatewayService:
         )
         if template is None:
             raise ToolRegistryResourceNotFoundError("shell template not found")
-        _validate_executable_template(template, request)
+        admission_policy = await self.template_store.get_shell_image_admission_policy(
+            request.project_id,
+        )
+        _validate_executable_template(template, request, admission_policy)
         _validate_parameters(template, request.parameters)
 
         invocation_id = f"shell_{uuid4().hex}"
@@ -431,6 +444,7 @@ class HttpExecutionGatewayService:
 def _validate_executable_template(
     template: ShellTemplateRead,
     request: ShellExecutionRequest,
+    admission_policy: ShellImageAdmissionPolicyRead,
 ) -> None:
     if template.environment_key != request.environment:
         raise ShellExecutionGatewayError("shell template environment does not match node")
@@ -452,7 +466,8 @@ def _validate_executable_template(
                 timeout_seconds=template.timeout_seconds,
                 image_registry_digest=template.image_registry_digest,
                 image_admission_status=template.image_admission_status,
-            )
+            ),
+            admission_enforcement_mode=admission_policy.enforcement_mode,
         )
     except ShellTemplatePolicyError as exc:
         raise ShellExecutionGatewayError(str(exc)) from exc

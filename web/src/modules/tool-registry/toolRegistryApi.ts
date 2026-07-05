@@ -143,6 +143,10 @@ export type ShellTemplatePreviewResponse = {
     approval_required: boolean;
     digest_required: boolean;
     allowlisted: boolean;
+    runtime_admission_status?: string;
+    runtime_recheck_required?: boolean;
+    runtime_blocked?: boolean;
+    runtime_reason?: string;
     reasons: string[];
   };
   trace_link: string;

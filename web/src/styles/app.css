@@ -1237,6 +1237,14 @@ select {
   grid-column: 1 / -1;
 }
 
+.shell-template-row-warning {
+  border-color: rgba(255, 176, 32, 0.72);
+}
+
+.shell-template-runtime-warning {
+  grid-column: 1 / -1;
+}
+
 .tool-registry-form-grid {
   display: grid;
   gap: var(--space-md);
