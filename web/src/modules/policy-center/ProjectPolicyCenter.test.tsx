@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,9 +12,81 @@ describe("ProjectPolicyCenter", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders policy posture, RBAC, risk surfaces and pending approvals without raw payload", async () => {
+  it("renders policy posture, RBAC, risk surfaces and runtime approvals without raw payload", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
+      if (url.includes("/runtime-approvals")) {
+        return new Response(
+          JSON.stringify({
+            tasks: [
+              {
+                id: "runtime-approval-shell",
+                project_id: "ops-command",
+                actor_id: "acct-1",
+                target_kind: "shell_execution",
+                target_ref: "diagnose-service",
+                invocation_ref: "shell-invocation-1",
+                workflow_ref: "ops-diagnosis:3",
+                run_id: "run-runtime-shell",
+                node_id: "shell_1",
+                trace_id: "trace-runtime-shell",
+                risk_level: "high",
+                status: "pending",
+                decision: "",
+                decision_reason: "",
+                public_payload: {
+                  template_ref: "diagnose-service",
+                  parameter_summary: "sha256:public-shell",
+                },
+                target_snapshot: {
+                  template_ref: "diagnose-service",
+                },
+                expires_at: "2026-07-06T09:30:00Z",
+                decided_by: null,
+                decided_at: null,
+                resumed_at: null,
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-06T09:00:00Z",
+                updated_at: "2026-07-06T09:00:00Z",
+              },
+              {
+                id: "runtime-approval-model",
+                project_id: "ops-command",
+                actor_id: "acct-1",
+                target_kind: "model_invocation",
+                target_ref: "default",
+                invocation_ref: "model-invocation-1",
+                workflow_ref: "ops-diagnosis:3",
+                run_id: "run-runtime-model",
+                node_id: "llm_1",
+                trace_id: "trace-runtime-model",
+                risk_level: "medium",
+                status: "pending",
+                decision: "",
+                decision_reason: "",
+                public_payload: {
+                  model_policy_ref: "default",
+                  prompt_summary: "sha256:public-model",
+                },
+                target_snapshot: {
+                  model_policy_ref: "default",
+                },
+                expires_at: "2026-07-06T09:30:00Z",
+                decided_by: null,
+                decided_at: null,
+                resumed_at: null,
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-06T09:00:00Z",
+                updated_at: "2026-07-06T09:00:00Z",
+              },
+            ],
+            count: 2,
+          }),
+          { status: 200 },
+        );
+      }
       if (url.endsWith("/approval-policies/versions")) {
         return new Response(
           JSON.stringify({
@@ -210,6 +283,7 @@ describe("ProjectPolicyCenter", () => {
     expect(screen.getByText("Risk Surfaces")).toBeInTheDocument();
     expect(screen.getByText("Recent Policy Decisions")).toBeInTheDocument();
     expect(screen.getByText("Pending Approvals")).toBeInTheDocument();
+    expect(await screen.findByText("Runtime Approval Inbox")).toBeInTheDocument();
     expect(await screen.findByText("Approval Policy")).toBeInTheDocument();
     expect(screen.getByText("Default approval policy")).toBeInTheDocument();
     expect(screen.getByText("v2")).toBeInTheDocument();
@@ -219,14 +293,122 @@ describe("ProjectPolicyCenter", () => {
     expect(screen.getByText("Kubernetes Admin")).toBeInTheDocument();
     expect(screen.getByText("ops_admin")).toBeInTheDocument();
     expect(screen.getAllByText("mcp-k8s.delete_pod").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("diagnose-service")).toBeInTheDocument();
+    expect(screen.getByText("default")).toBeInTheDocument();
+    expect(screen.getByText(/shell_execution/)).toBeInTheDocument();
+    expect(screen.getByText(/model_invocation/)).toBeInTheDocument();
+    expect(screen.getByText(/sha256:public-shell/)).toBeInTheDocument();
+    expect(screen.getByText(/sha256:public-model/)).toBeInTheDocument();
     const policyEvent = screen.getByTestId("policy-center-event-policy-event-1");
     expect(within(policyEvent).getByText("secret=[redacted]")).toBeInTheDocument();
     expect(screen.queryByText("must-not-return")).not.toBeInTheDocument();
+    expect(screen.queryByText("raw-runtime-token")).not.toBeInTheDocument();
+  });
+
+  it("decides runtime approval tasks and refreshes the project-scoped inbox", async () => {
+    const user = userEvent.setup();
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/runtime-approvals/runtime-approval-shell/decide")) {
+        return new Response(
+          JSON.stringify({
+            id: "runtime-approval-shell",
+            project_id: "ops-command",
+            actor_id: "acct-1",
+            target_kind: "shell_execution",
+            target_ref: "diagnose-service",
+            invocation_ref: "shell-invocation-1",
+            workflow_ref: "ops-diagnosis:3",
+            run_id: "run-runtime-shell",
+            node_id: "shell_1",
+            trace_id: "trace-runtime-shell",
+            risk_level: "high",
+            status: "approved",
+            decision: "approved",
+            decision_reason: "approved for current run",
+            public_payload: {},
+            target_snapshot: {},
+            expires_at: "2026-07-06T09:30:00Z",
+            decided_by: "acct-2",
+            decided_at: "2026-07-06T09:10:00Z",
+            resumed_at: null,
+            created_by: "acct-1",
+            updated_by: "acct-2",
+            created_at: "2026-07-06T09:00:00Z",
+            updated_at: "2026-07-06T09:10:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/runtime-approvals")) {
+        return new Response(
+          JSON.stringify({
+            tasks: [
+              {
+                id: "runtime-approval-shell",
+                project_id: "ops-command",
+                actor_id: "acct-1",
+                target_kind: "shell_execution",
+                target_ref: "diagnose-service",
+                invocation_ref: "shell-invocation-1",
+                workflow_ref: "ops-diagnosis:3",
+                run_id: "run-runtime-shell",
+                node_id: "shell_1",
+                trace_id: "trace-runtime-shell",
+                risk_level: "high",
+                status: "pending",
+                decision: "",
+                decision_reason: "",
+                public_payload: { parameter_summary: "sha256:public-shell" },
+                target_snapshot: {},
+                expires_at: "2026-07-06T09:30:00Z",
+                decided_by: null,
+                decided_at: null,
+                resumed_at: null,
+                created_by: "acct-1",
+                updated_by: "acct-1",
+                created_at: "2026-07-06T09:00:00Z",
+                updated_at: "2026-07-06T09:00:00Z",
+              },
+            ],
+            count: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/approval-policies/versions")) {
+        return new Response(JSON.stringify({ current: null, versions: [], count: 0 }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(emptyPolicyCenterOverview()), { status: 200 });
+    });
+
+    renderWithClient(<ProjectPolicyCenter project={defaultProjectContext} />);
+
+    expect(await screen.findByText("Runtime Approval Inbox")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Runtime approval decision reason"));
+    await user.type(screen.getByLabelText("Runtime approval decision reason"), "approved for current run");
+    await user.click(screen.getByRole("button", { name: "Approve diagnose-service" }));
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/runtime-approvals/runtime-approval-shell/decide",
+      expect.objectContaining({
+        body: JSON.stringify({
+          decision: "approved",
+          reason: "approved for current run",
+        }),
+        method: "POST",
+      }),
+    );
   });
 
   it("renders empty policy states from real API responses", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
+      if (url.includes("/runtime-approvals")) {
+        return new Response(JSON.stringify({ tasks: [], count: 0 }), { status: 200 });
+      }
       if (url.endsWith("/approval-policies/versions")) {
         return new Response(JSON.stringify({ current: null, versions: [], count: 0 }), {
           status: 200,
@@ -267,10 +449,38 @@ describe("ProjectPolicyCenter", () => {
     expect(screen.getByText("No risk surfaces detected")).toBeInTheDocument();
     expect(screen.getByText("No recent policy decisions")).toBeInTheDocument();
     expect(screen.getByText("No pending approvals")).toBeInTheDocument();
+    expect(screen.getByText("No runtime approvals pending")).toBeInTheDocument();
     expect(screen.getByText("No approval policy published")).toBeInTheDocument();
     expect(screen.getByText("High and critical tool approvals remain enforced by default")).toBeInTheDocument();
   });
 });
+
+function emptyPolicyCenterOverview() {
+  return {
+    project: {
+      project_id: "ops-command",
+      project_name: "Ops Command",
+      project_slug: "ops-command",
+      status: "active",
+    },
+    summary: {
+      role_count: 0,
+      permission_count: 0,
+      member_count: 0,
+      pending_approval_count: 0,
+      recent_policy_event_count: 0,
+      high_risk_surface_count: 0,
+      model_policy_count: 0,
+      egress_profile_count: 0,
+      shell_policy_status: "not_configured",
+    },
+    roles: [],
+    permission_groups: [],
+    risk_surfaces: [],
+    pending_approvals: [],
+    recent_policy_events: [],
+  };
+}
 
 function renderWithClient(element: ReactElement) {
   const queryClient = new QueryClient({

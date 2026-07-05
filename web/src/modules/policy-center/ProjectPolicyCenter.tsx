@@ -5,19 +5,23 @@ import {
   GitCompareArrows,
   KeyRound,
   Network,
+  PlayCircle,
   RotateCcw,
   ShieldCheck,
   UsersRound,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import type { ProjectContext } from "../../shell/projectContext";
 import {
+  decideRuntimeApproval,
   getApprovalPolicyVersions,
   getPolicyCenterOverview,
+  getRuntimeApprovalTasks,
   policyCenterApprovalPolicyVersionsQueryKey,
   policyCenterOverviewQueryKey,
   rollbackApprovalPolicy,
+  runtimeApprovalTasksQueryKey,
   type ApprovalPolicyImpactSummary,
   type ApprovalPolicyVersion,
   type PolicyCenterOverviewResponse,
@@ -25,6 +29,8 @@ import {
   type PolicyCenterPolicyEvent,
   type PolicyCenterRiskSurface,
   type PolicyCenterRoleItem,
+  type RuntimeApprovalDecision,
+  type RuntimeApprovalTask,
 } from "./policyCenterApi";
 
 type ProjectPolicyCenterProps = {
@@ -33,6 +39,9 @@ type ProjectPolicyCenterProps = {
 
 export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
   const queryClient = useQueryClient();
+  const [runtimeDecisionReason, setRuntimeDecisionReason] = useState(
+    "Reviewed in Policy Center runtime approval inbox",
+  );
   const overviewQuery = useQuery({
     queryFn: () => getPolicyCenterOverview(project.projectId),
     queryKey: policyCenterOverviewQueryKey(project.projectId),
@@ -44,6 +53,12 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
     queryKey: policyCenterApprovalPolicyVersionsQueryKey(project.projectId),
     retry: false,
     refetchInterval: 60_000,
+  });
+  const runtimeApprovalsQuery = useQuery({
+    queryFn: () => getRuntimeApprovalTasks(project.projectId, { limit: 50, status: "pending" }),
+    queryKey: runtimeApprovalTasksQueryKey(project.projectId, "pending"),
+    retry: false,
+    refetchInterval: 30_000,
   });
   const rollbackMutation = useMutation({
     mutationFn: (version: ApprovalPolicyVersion) =>
@@ -60,8 +75,27 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
       ]);
     },
   });
+  const runtimeDecisionMutation = useMutation({
+    mutationFn: (variables: { decision: RuntimeApprovalDecision; task: RuntimeApprovalTask }) =>
+      decideRuntimeApproval(project.projectId, variables.task.id, {
+        decision: variables.decision,
+        reason: runtimeDecisionReason.trim(),
+      }),
+    onSuccess: async (task) => {
+      if (task.project_id !== project.projectId) {
+        return;
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: runtimeApprovalTasksQueryKey(project.projectId, "pending"),
+        }),
+        queryClient.invalidateQueries({ queryKey: policyCenterOverviewQueryKey(project.projectId) }),
+      ]);
+    },
+  });
   const overview = overviewQuery.data;
   const approvalPolicies = approvalPoliciesQuery.data;
+  const runtimeApprovals = runtimeApprovalsQuery.data;
 
   return (
     <main className="aegis-main policy-center-main">
@@ -88,9 +122,19 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
           {(approvalPoliciesQuery.error as Error).message}
         </div>
       ) : null}
+      {runtimeApprovalsQuery.isError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(runtimeApprovalsQuery.error as Error).message}
+        </div>
+      ) : null}
       {rollbackMutation.isError ? (
         <div className="preview-alert preview-alert-danger" role="alert">
           {(rollbackMutation.error as Error).message}
+        </div>
+      ) : null}
+      {runtimeDecisionMutation.isError ? (
+        <div className="preview-alert preview-alert-danger" role="alert">
+          {(runtimeDecisionMutation.error as Error).message}
         </div>
       ) : null}
 
@@ -195,6 +239,21 @@ export function ProjectPolicyCenter({ project }: ProjectPolicyCenterProps) {
             )}
           </section>
 
+          <section className="global-panel policy-runtime-approval-panel">
+            <PanelHeader
+              eyebrow="RUNTIME APPROVALS"
+              title="Runtime Approval Inbox"
+              count={runtimeApprovals?.count ?? 0}
+            />
+            <RuntimeApprovalInbox
+              decisionPending={runtimeDecisionMutation.isPending}
+              decisionReason={runtimeDecisionReason}
+              onDecision={(task, decision) => runtimeDecisionMutation.mutate({ decision, task })}
+              onReasonChange={setRuntimeDecisionReason}
+              tasks={runtimeApprovals?.tasks ?? []}
+            />
+          </section>
+
           <section className="global-panel policy-editor-panel">
             <PanelHeader
               eyebrow="APPROVAL POLICY"
@@ -270,6 +329,106 @@ function ApprovalPolicyPanel({
         )}
       </div>
     </div>
+  );
+}
+
+function RuntimeApprovalInbox({
+  decisionPending,
+  decisionReason,
+  onDecision,
+  onReasonChange,
+  tasks,
+}: {
+  decisionPending: boolean;
+  decisionReason: string;
+  onDecision: (task: RuntimeApprovalTask, decision: RuntimeApprovalDecision) => void;
+  onReasonChange: (reason: string) => void;
+  tasks: RuntimeApprovalTask[];
+}) {
+  return (
+    <div className="runtime-approval-stack">
+      <label className="runtime-approval-reason">
+        <span>Decision reason</span>
+        <input
+          aria-label="Runtime approval decision reason"
+          onChange={(event) => onReasonChange(event.target.value)}
+          value={decisionReason}
+        />
+      </label>
+      {tasks.length ? (
+        <div className="runtime-approval-list">
+          {tasks.map((task) => (
+            <RuntimeApprovalRow
+              decisionDisabled={decisionPending || !decisionReason.trim() || task.status !== "pending"}
+              key={task.id}
+              onDecision={onDecision}
+              task={task}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="global-empty-row">No runtime approvals pending</div>
+      )}
+    </div>
+  );
+}
+
+function RuntimeApprovalRow({
+  decisionDisabled,
+  onDecision,
+  task,
+}: {
+  decisionDisabled: boolean;
+  onDecision: (task: RuntimeApprovalTask, decision: RuntimeApprovalDecision) => void;
+  task: RuntimeApprovalTask;
+}) {
+  const safePayload = summarizePublicPayload(task.public_payload);
+  const runHref = buildRunObservatoryHref(task);
+
+  return (
+    <article className="runtime-approval-row">
+      <PlayCircle aria-hidden="true" size={16} />
+      <div>
+        <strong>{task.target_ref}</strong>
+        <small className="telemetry">
+          {task.target_kind} / {task.run_id || "run n/a"} / {task.node_id || "node n/a"}
+        </small>
+        {safePayload ? <p>{safePayload}</p> : null}
+        {runHref ? (
+          <a className="runtime-approval-link" href={runHref}>
+            Open Run Observatory
+          </a>
+        ) : null}
+      </div>
+      <span className={`status-pill workflow-risk-${task.risk_level}`}>{task.risk_level}</span>
+      <span className="status-pill">{task.status}</span>
+      <div className="runtime-approval-actions">
+        <button
+          className="toolbar-button"
+          disabled={decisionDisabled}
+          onClick={() => onDecision(task, "approved")}
+          type="button"
+        >
+          Approve {task.target_ref}
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={decisionDisabled}
+          onClick={() => onDecision(task, "rejected")}
+          type="button"
+        >
+          Reject {task.target_ref}
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={decisionDisabled}
+          onClick={() => onDecision(task, "revoked")}
+          type="button"
+        >
+          Revoke {task.target_ref}
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -383,6 +542,34 @@ function PendingApprovalRow({ approval }: { approval: PolicyCenterPendingApprova
       <span className="status-pill">{approval.status}</span>
     </article>
   );
+}
+
+function summarizePublicPayload(payload: Record<string, unknown>): string {
+  const entries = Object.entries(payload).filter(([, value]) => {
+    const valueType = typeof value;
+    return value === null || ["string", "number", "boolean"].includes(valueType);
+  });
+  return entries
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" / ");
+}
+
+function buildRunObservatoryHref(task: RuntimeApprovalTask): string {
+  if (!task.run_id && !task.trace_id) {
+    return "";
+  }
+  const params = new URLSearchParams();
+  if (task.run_id) {
+    params.set("run_id", task.run_id);
+  }
+  if (task.trace_id) {
+    params.set("trace_id", task.trace_id);
+  }
+  if (task.node_id) {
+    params.set("node_id", task.node_id);
+  }
+  return `/projects/${encodeURIComponent(task.project_id)}/runs?${params.toString()}`;
 }
 
 function PostureRow({

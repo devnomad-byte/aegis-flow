@@ -2452,11 +2452,13 @@ select {
 .policy-risk-panel,
 .policy-event-panel,
 .policy-approval-panel,
+.policy-runtime-approval-panel,
 .policy-editor-panel {
   min-width: 0;
 }
 
 .policy-event-panel,
+.policy-runtime-approval-panel,
 .policy-editor-panel {
   grid-column: 1 / -1;
 }
@@ -2472,7 +2474,9 @@ select {
 
 .policy-editor-stack,
 .policy-version-list,
-.policy-empty-state {
+.policy-empty-state,
+.runtime-approval-stack,
+.runtime-approval-list {
   display: grid;
   gap: var(--space-sm);
 }
@@ -2583,6 +2587,77 @@ select {
 
 .policy-approval-row {
   grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.runtime-approval-reason {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.runtime-approval-reason span {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runtime-approval-reason input {
+  background: rgba(11, 15, 14, 0.82);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  min-height: 40px;
+  padding: 0 var(--space-md);
+}
+
+.runtime-approval-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content minmax(260px, max-content);
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.runtime-approval-row strong,
+.runtime-approval-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.runtime-approval-row small,
+.runtime-approval-row p {
+  color: var(--color-text-muted);
+}
+
+.runtime-approval-row p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.runtime-approval-link {
+  color: var(--color-info);
+  display: inline-flex;
+  font-size: 12px;
+  margin-top: 6px;
+  text-decoration: none;
+}
+
+.runtime-approval-link:hover {
+  text-decoration: underline;
+}
+
+.runtime-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
+
+.runtime-approval-actions .toolbar-button {
+  min-height: 34px;
 }
 
 .policy-empty-state {
@@ -3112,9 +3187,14 @@ select {
   .policy-surface-row,
   .policy-event-row,
   .policy-approval-row,
+  .runtime-approval-row,
   .policy-current-version,
   .policy-version-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtime-approval-actions {
+    justify-content: stretch;
   }
 
   .policy-center-hero {

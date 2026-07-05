@@ -8,7 +8,10 @@ import {
   policyCenterOverviewQueryKey,
   publishApprovalPolicyDraft,
   rollbackApprovalPolicy,
+  decideRuntimeApproval,
   validateApprovalPolicyDraft,
+  getRuntimeApprovalTasks,
+  runtimeApprovalTasksQueryKey,
 } from "./policyCenterApi";
 
 describe("policyCenterApi", () => {
@@ -63,6 +66,12 @@ describe("policyCenterApi", () => {
       "policy-center",
       "approval-policies",
       "versions",
+    ]);
+    expect(runtimeApprovalTasksQueryKey("ops-command", "pending")).toEqual([
+      "project",
+      "ops-command",
+      "runtime-approvals",
+      "pending",
     ]);
   });
 
@@ -141,6 +150,42 @@ describe("policyCenterApi", () => {
       4,
       "/api/v1/projects/ops-command/policy-center/approval-policies/default/rollback",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("uses project-scoped runtime approval list and decision endpoints", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          tasks: [],
+          count: 0,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await getRuntimeApprovalTasks("ops-command", { status: "pending", limit: 25 }, fetcher);
+    await decideRuntimeApproval(
+      "ops-command",
+      "approval-1",
+      { decision: "approved", reason: "approved for current run" },
+      fetcher,
+    );
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/projects/ops-command/runtime-approvals?status=pending&limit=25",
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/projects/ops-command/runtime-approvals/approval-1/decide",
+      expect.objectContaining({
+        body: JSON.stringify({
+          decision: "approved",
+          reason: "approved for current run",
+        }),
+        method: "POST",
+      }),
     );
   });
 });

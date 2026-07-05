@@ -41,7 +41,7 @@ async def list_runtime_approvals(
         project_access,
         current_account,
         project_id,
-        "tool-registry:view",
+        "policy-center:view",
     )
     tasks = await approval_store.list_approval_tasks(
         project_id=project_id,
@@ -128,11 +128,17 @@ def _require_project_permission(
 ) -> None:
     if current_account.is_super_admin:
         return
-    project = project_access.get_project_for_account(
-        current_account,
-        project_id,
-        required_permission,
-    )
+    try:
+        project = project_access.get_project_for_account(
+            current_account,
+            project_id,
+            required_permission,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient project permission",
+        ) from exc
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

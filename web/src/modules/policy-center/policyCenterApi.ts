@@ -156,6 +156,53 @@ export type ApprovalPolicyVersionListResponse = {
   count: number;
 };
 
+export type RuntimeApprovalTargetKind = "shell_execution" | "model_invocation";
+export type RuntimeApprovalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "revoked"
+  | "expired"
+  | "resumed";
+export type RuntimeApprovalDecision = "approved" | "rejected" | "revoked";
+
+export type RuntimeApprovalTask = {
+  id: string;
+  project_id: string;
+  actor_id: string;
+  target_kind: RuntimeApprovalTargetKind;
+  target_ref: string;
+  invocation_ref: string;
+  workflow_ref: string;
+  run_id: string;
+  node_id: string;
+  trace_id: string;
+  risk_level: string;
+  status: RuntimeApprovalStatus;
+  decision: string;
+  decision_reason: string;
+  public_payload: Record<string, unknown>;
+  target_snapshot: Record<string, unknown>;
+  expires_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  resumed_at: string | null;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RuntimeApprovalTaskListResponse = {
+  tasks: RuntimeApprovalTask[];
+  count: number;
+};
+
+export type RuntimeApprovalDecisionRequest = {
+  decision: RuntimeApprovalDecision;
+  reason: string;
+};
+
 export type ApprovalPolicyDraftCreateRequest = {
   policy_ref: string;
   title: string;
@@ -174,6 +221,11 @@ export const policyCenterOverviewQueryKey = (projectId: string) =>
 
 export const policyCenterApprovalPolicyVersionsQueryKey = (projectId: string) =>
   ["project", projectId, "policy-center", "approval-policies", "versions"] as const;
+
+export const runtimeApprovalTasksQueryKey = (
+  projectId: string,
+  status: RuntimeApprovalStatus | "all" = "pending",
+) => ["project", projectId, "runtime-approvals", status] as const;
 
 export async function getPolicyCenterOverview(
   projectId: string,
@@ -256,6 +308,56 @@ export async function rollbackApprovalPolicy(
     request,
     fetcher,
   ) as Promise<ApprovalPolicyVersion>;
+}
+
+export async function getRuntimeApprovalTasks(
+  projectId: string,
+  filters: { limit?: number; status?: RuntimeApprovalStatus } = {},
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RuntimeApprovalTaskListResponse> {
+  const params = new URLSearchParams();
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (typeof filters.limit === "number") {
+    params.set("limit", String(filters.limit));
+  }
+  const query = params.toString();
+  const response = await fetcher(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/runtime-approvals${
+      query ? `?${query}` : ""
+    }`,
+  );
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  return (await response.json()) as RuntimeApprovalTaskListResponse;
+}
+
+export async function decideRuntimeApproval(
+  projectId: string,
+  approvalTaskId: string,
+  request: RuntimeApprovalDecisionRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<RuntimeApprovalTask> {
+  const response = await fetcher(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/runtime-approvals/${encodeURIComponent(
+      approvalTaskId,
+    )}/decide`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await readApiError(response));
+  }
+
+  return (await response.json()) as RuntimeApprovalTask;
 }
 
 async function postPolicyCenterJson(
