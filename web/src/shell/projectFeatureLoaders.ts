@@ -8,6 +8,7 @@ export type ProjectFeatureView =
   | "debug-chat"
   | "knowledge-center"
   | "template-gallery"
+  | "policy-center"
   | "workflows"
   | "tool-registry"
   | "model-gateway-settings"
@@ -39,6 +40,10 @@ export const PROJECT_FEATURE_LOADERS: Record<
   "template-gallery": () =>
     import("../modules/template-gallery/ProjectTemplateGallery").then((module) => ({
       default: module.ProjectTemplateGallery,
+    })),
+  "policy-center": () =>
+    import("../modules/policy-center/ProjectPolicyCenter").then((module) => ({
+      default: module.ProjectPolicyCenter,
     })),
   workflows: () =>
     import("../modules/workflow-studio/WorkflowStudio").then((module) => ({

@@ -2405,6 +2405,177 @@ select {
   text-decoration: none;
 }
 
+.policy-center-main {
+  display: grid;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+
+.policy-center-hero {
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(255, 176, 32, 0.13), transparent 52%),
+    var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  display: grid;
+  gap: var(--space-xl);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr);
+  padding: var(--space-xl);
+}
+
+.policy-center-hero h2 {
+  font-size: 34px;
+  line-height: 1.15;
+  margin: 8px 0;
+}
+
+.policy-center-hero p {
+  color: var(--color-text-muted);
+  margin: 0;
+  max-width: 760px;
+}
+
+.policy-hero-metrics {
+  display: grid;
+  gap: var(--space-sm);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.policy-center-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: minmax(0, 0.85fr) minmax(360px, 1.15fr);
+}
+
+.policy-rbac-panel,
+.policy-risk-panel,
+.policy-event-panel,
+.policy-approval-panel {
+  min-width: 0;
+}
+
+.policy-event-panel {
+  grid-column: 1 / -1;
+}
+
+.policy-posture-list,
+.policy-role-list,
+.policy-surface-list,
+.policy-event-list,
+.policy-approval-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.policy-posture-row,
+.policy-role-row,
+.policy-surface-row,
+.policy-event-row,
+.policy-approval-row {
+  align-items: center;
+  background: rgba(24, 33, 31, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-md);
+  min-width: 0;
+  padding: var(--space-md);
+}
+
+.policy-posture-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content;
+  min-height: 48px;
+}
+
+.policy-posture-row svg {
+  color: var(--color-accent);
+}
+
+.policy-posture-row span {
+  color: var(--color-text-muted);
+}
+
+.policy-posture-row strong {
+  font-family: var(--font-mono);
+}
+
+.policy-role-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.policy-role-row p,
+.policy-surface-row p,
+.policy-event-row p {
+  color: var(--color-text-muted);
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.policy-role-row strong,
+.policy-role-row small,
+.policy-surface-row strong,
+.policy-surface-row small,
+.policy-event-row strong,
+.policy-event-row small,
+.policy-approval-row strong,
+.policy-approval-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.policy-role-row small,
+.policy-approval-row small {
+  color: var(--color-text-muted);
+}
+
+.policy-chip-row,
+.policy-permission-cloud {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.policy-chip-row {
+  grid-column: 2 / -1;
+}
+
+.policy-chip-row code {
+  background: rgba(11, 15, 14, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 7px;
+}
+
+.policy-surface-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
+.policy-surface-row.workflow-risk-critical {
+  border-color: rgba(255, 77, 94, 0.52);
+}
+
+.policy-surface-row.workflow-risk-high {
+  border-color: rgba(255, 176, 32, 0.52);
+}
+
+.policy-event-row {
+  grid-template-columns: minmax(0, 1fr) max-content max-content 72px;
+}
+
+.policy-event-row > strong {
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.policy-approval-row {
+  grid-template-columns: 22px minmax(0, 1fr) max-content max-content;
+}
+
 @media (max-width: 1180px) {
   .aegis-shell {
     grid-template-areas:
@@ -2522,12 +2693,15 @@ select {
   }
 
   .template-gallery-hero,
-  .template-gallery-grid {
+  .template-gallery-grid,
+  .policy-center-hero,
+  .policy-center-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .template-gallery-metrics,
-  .template-detail-stat-grid {
+  .template-detail-stat-grid,
+  .policy-hero-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2658,8 +2832,25 @@ select {
   }
 
   .template-gallery-metrics,
-  .template-detail-stat-grid {
+  .template-detail-stat-grid,
+  .policy-hero-metrics,
+  .policy-role-row,
+  .policy-surface-row,
+  .policy-event-row,
+  .policy-approval-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .policy-center-hero {
+    padding: var(--space-lg);
+  }
+
+  .policy-center-hero h2 {
+    font-size: 24px;
+  }
+
+  .policy-chip-row {
+    grid-column: auto;
   }
 
   .agent-console-hero-metrics,

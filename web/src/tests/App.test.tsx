@@ -201,6 +201,44 @@ describe("App", () => {
     expect(await screen.findByText("No workflow templates")).toBeInTheDocument();
   });
 
+  it("renders policy center for project policy routes", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          project: {
+            project_id: "ops-command",
+            project_name: "Ops Command",
+            project_slug: "ops-command",
+            status: "active",
+          },
+          summary: {
+            role_count: 0,
+            permission_count: 0,
+            member_count: 0,
+            pending_approval_count: 0,
+            recent_policy_event_count: 0,
+            high_risk_surface_count: 0,
+            model_policy_count: 0,
+            egress_profile_count: 0,
+            shell_policy_status: "not_configured",
+          },
+          roles: [],
+          permission_groups: [],
+          risk_surfaces: [],
+          pending_approvals: [],
+          recent_policy_events: [],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    render(<App initialPath="/projects/ops-command/policies" />);
+
+    expect(await screen.findByText("御流 AegisFlow")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Policy Center" })).toBeInTheDocument();
+    expect(await screen.findByText("No recent policy decisions")).toBeInTheDocument();
+  });
+
   it("shows forbidden instead of global data for regular project members", async () => {
     render(<App account={DEMO_ACCOUNTS.projectMember} initialPath="/global" />);
 

@@ -126,3 +126,42 @@ test("renders the template gallery workspace", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Template Gallery" })).toBeVisible();
   await expect(page.getByText("No workflow templates")).toBeVisible();
 });
+
+test("renders the policy center workspace", async ({ page }) => {
+  await page.route("**/api/v1/projects/ops-command/policy-center/overview", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        project: {
+          project_id: "ops-command",
+          project_name: "Ops Command",
+          project_slug: "ops-command",
+          status: "active",
+        },
+        summary: {
+          role_count: 0,
+          permission_count: 0,
+          member_count: 0,
+          pending_approval_count: 0,
+          recent_policy_event_count: 0,
+          high_risk_surface_count: 0,
+          model_policy_count: 0,
+          egress_profile_count: 0,
+          shell_policy_status: "not_configured",
+        },
+        roles: [],
+        permission_groups: [],
+        risk_surfaces: [],
+        pending_approvals: [],
+        recent_policy_events: [],
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
+  await page.goto("/projects/ops-command/policies");
+
+  await expect(page.getByRole("heading", { name: "Policy Center" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Policy Posture" })).toBeVisible();
+  await expect(page.getByText("No recent policy decisions")).toBeVisible();
+});

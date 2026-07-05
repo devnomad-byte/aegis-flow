@@ -92,7 +92,16 @@ export function ProjectCommandCenter({ project }: ProjectCommandCenterProps) {
                 <SlidersHorizontal aria-hidden="true" size={16} />
                 Model Gateway
               </button>
-              <button className="toolbar-button" disabled type="button">
+              <button
+                className="toolbar-button"
+                onClick={() =>
+                  void router.navigate({
+                    params: { projectId: project.projectId },
+                    to: "/projects/$projectId/policies",
+                  })
+                }
+                type="button"
+              >
                 <ShieldAlert aria-hidden="true" size={16} />
                 Policy Center
               </button>
