@@ -6,6 +6,7 @@ import type { ProjectContext } from "../../shell/projectContext";
 import {
   createNotationTrustCertificate,
   createShellTemplate,
+  decideShellImageArtifactLifecycleRemediationApproval,
   getShellImageAdmissionGovernance,
   getShellImageArtifactCleanupGovernance,
   getShellImageArtifactLifecycleRemediationPlan,
@@ -16,8 +17,10 @@ import {
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
+  requestShellImageArtifactLifecycleRemediationApproval,
   resolveShellImageAdmission,
   runShellImageArtifactCleanup,
+  runShellImageArtifactLifecycleRemediation,
   shellImageArtifactCleanupRunsQueryKey,
   shellImageArtifactCleanupScheduleQueryKey,
   shellImageArtifactLifecycleRemediationPlanQueryKey,
@@ -29,7 +32,9 @@ import {
   type ShellImageArtifactCleanupRun,
   type ShellImageArtifactCleanupSchedule,
   type ShellImageArtifactCleanupScheduleUpdateRequest,
+  type ShellImageArtifactLifecycleRemediationApproval,
   type ShellImageArtifactLifecycleRemediationPlan,
+  type ShellImageArtifactLifecycleRemediationRun,
   type ShellImageAdmissionPolicy,
   type ShellImageAdmissionPolicyUpdateRequest,
   shellImageArtifactGovernanceQueryKey,
@@ -143,6 +148,10 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
   const [preview, setPreview] = useState<ShellTemplatePreviewResponse | null>(null);
   const [admission, setAdmission] = useState<ShellImageAdmission | null>(null);
   const [artifactCleanupRun, setArtifactCleanupRun] = useState<ShellImageArtifactCleanupRun | null>(null);
+  const [lifecycleApproval, setLifecycleApproval] =
+    useState<ShellImageArtifactLifecycleRemediationApproval | null>(null);
+  const [lifecycleRun, setLifecycleRun] =
+    useState<ShellImageArtifactLifecycleRemediationRun | null>(null);
 
   const templatesQuery = useQuery({
     queryFn: () => listShellTemplates(project.projectId),
@@ -257,6 +266,57 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
       void queryClient.invalidateQueries({ queryKey: artifactCleanupScheduleQueryKey });
     },
   });
+  const lifecycleApprovalRequestMutation = useMutation({
+    mutationFn: (projectId: string) =>
+      requestShellImageArtifactLifecycleRemediationApproval(projectId, {
+        reason: "Expire project-scoped shell image artifacts through managed lifecycle rule",
+      }),
+    onSuccess: (approval, projectId) => {
+      if (projectId !== project.projectId || approval.project_id !== project.projectId) {
+        return;
+      }
+      setLifecycleApproval(approval);
+      setLifecycleRun(null);
+    },
+  });
+  const lifecycleApprovalDecisionMutation = useMutation({
+    mutationFn: (variables: { approvalId: string; projectId: string }) =>
+      decideShellImageArtifactLifecycleRemediationApproval(
+        variables.projectId,
+        variables.approvalId,
+        {
+          decision: "approved",
+          reason: "Reviewed generated lifecycle remediation plan",
+        },
+      ),
+    onSuccess: (approval, variables) => {
+      if (variables.projectId !== project.projectId || approval.project_id !== project.projectId) {
+        return;
+      }
+      setLifecycleApproval(approval);
+    },
+  });
+  const lifecycleRunMutation = useMutation({
+    mutationFn: (variables: { dryRun: boolean; approvalId?: string | null; projectId: string }) =>
+      runShellImageArtifactLifecycleRemediation(variables.projectId, {
+        approval_id: variables.approvalId,
+        dry_run: variables.dryRun,
+      }),
+    onSuccess: (run, variables) => {
+      if (variables.projectId !== project.projectId || run.project_id !== project.projectId) {
+        return;
+      }
+      setLifecycleRun(run);
+      if (run.status === "applied") {
+        setLifecycleApproval((current) =>
+          current && current.id === run.approval_id ? { ...current, status: "used" } : current,
+        );
+      }
+      void queryClient.invalidateQueries({ queryKey: artifactLifecycleRemediationPlanQueryKey });
+      void queryClient.invalidateQueries({ queryKey: artifactGovernanceQueryKey });
+      void queryClient.invalidateQueries({ queryKey: artifactCleanupRunsQueryKey });
+    },
+  });
 
   useEffect(() => {
     const firstTemplate = templatesQuery.data?.[0];
@@ -271,6 +331,8 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
 
   useEffect(() => {
     setArtifactCleanupRun(null);
+    setLifecycleApproval(null);
+    setLifecycleRun(null);
   }, [project.projectId]);
 
   useEffect(() => {
@@ -304,6 +366,9 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
     notationTrustMutation.error ||
     artifactCleanupMutation.error ||
     artifactCleanupScheduleMutation.error ||
+    lifecycleApprovalRequestMutation.error ||
+    lifecycleApprovalDecisionMutation.error ||
+    lifecycleRunMutation.error ||
     notationTrustQuery.error ||
     artifactCleanupRunsQuery.error ||
     artifactCleanupScheduleQuery.error ||
@@ -476,7 +541,33 @@ export function ProjectToolRegistry({ project }: ProjectToolRegistryProps) {
               isLoading={artifactGovernanceQuery.isLoading}
               isRemediationLoading={artifactLifecycleRemediationPlanQuery.isLoading}
               isRunning={artifactCleanupMutation.isPending}
+              isRemediationActing={
+                lifecycleApprovalRequestMutation.isPending ||
+                lifecycleApprovalDecisionMutation.isPending ||
+                lifecycleRunMutation.isPending
+              }
               isSavingSchedule={artifactCleanupScheduleMutation.isPending}
+              lifecycleApproval={lifecycleApproval}
+              lifecycleRun={lifecycleRun}
+              onApproveLifecycle={() => {
+                if (!lifecycleApproval) {
+                  return;
+                }
+                lifecycleApprovalDecisionMutation.mutate({
+                  approvalId: lifecycleApproval.id,
+                  projectId: project.projectId,
+                });
+              }}
+              onRequestLifecycleApproval={() =>
+                lifecycleApprovalRequestMutation.mutate(project.projectId)
+              }
+              onRunLifecycle={(dryRun) =>
+                lifecycleRunMutation.mutate({
+                  approvalId: lifecycleApproval?.id,
+                  dryRun,
+                  projectId: project.projectId,
+                })
+              }
               onRun={(dryRun) => artifactCleanupMutation.mutate({ dryRun, projectId: project.projectId })}
               onSaveSchedule={() => artifactCleanupScheduleMutation.mutate(cleanupScheduleForm)}
               remediationPlan={artifactLifecycleRemediationPlanQuery.data ?? null}
@@ -839,10 +930,16 @@ function ArtifactCleanupPanel({
   governance,
   history,
   isLoading,
+  isRemediationActing,
   isRemediationLoading,
   isRunning,
   isSavingSchedule,
+  lifecycleApproval,
+  lifecycleRun,
+  onApproveLifecycle,
+  onRequestLifecycleApproval,
   onRun,
+  onRunLifecycle,
   onSaveSchedule,
   remediationPlan,
   run,
@@ -853,10 +950,16 @@ function ArtifactCleanupPanel({
   governance: ShellImageArtifactCleanupGovernance | null;
   history: ShellImageArtifactCleanupRun[];
   isLoading: boolean;
+  isRemediationActing: boolean;
   isRemediationLoading: boolean;
   isRunning: boolean;
   isSavingSchedule: boolean;
+  lifecycleApproval: ShellImageArtifactLifecycleRemediationApproval | null;
+  lifecycleRun: ShellImageArtifactLifecycleRemediationRun | null;
+  onApproveLifecycle: () => void;
+  onRequestLifecycleApproval: () => void;
   onRun: (dryRun: boolean) => void;
+  onRunLifecycle: (dryRun: boolean) => void;
   onSaveSchedule: () => void;
   remediationPlan: ShellImageArtifactLifecycleRemediationPlan | null;
   run: ShellImageArtifactCleanupRun | null;
@@ -919,8 +1022,14 @@ function ArtifactCleanupPanel({
         </div>
       ) : null}
       <LifecycleRemediationPlanPanel
+        approval={lifecycleApproval}
         isLoading={isRemediationLoading}
+        isMutating={isRemediationActing}
+        onApprove={onApproveLifecycle}
+        onRequestApproval={onRequestLifecycleApproval}
+        onRun={onRunLifecycle}
         plan={remediationPlan}
+        run={lifecycleRun}
       />
       <div className="preview-alert artifact-cleanup-row">
         <strong>Schedule dry-run</strong>
@@ -1034,11 +1143,23 @@ function ArtifactCleanupPanel({
 }
 
 function LifecycleRemediationPlanPanel({
+  approval,
   isLoading,
+  isMutating,
+  onApprove,
+  onRequestApproval,
+  onRun,
   plan,
+  run,
 }: {
+  approval: ShellImageArtifactLifecycleRemediationApproval | null;
   isLoading: boolean;
+  isMutating: boolean;
+  onApprove: () => void;
+  onRequestApproval: () => void;
+  onRun: (dryRun: boolean) => void;
   plan: ShellImageArtifactLifecycleRemediationPlan | null;
+  run: ShellImageArtifactLifecycleRemediationRun | null;
 }) {
   if (isLoading) {
     return <div className="preview-alert">Loading lifecycle remediation plan</div>;
@@ -1048,12 +1169,16 @@ function LifecycleRemediationPlanPanel({
   const proposals = plan?.rule_proposals ?? [];
   const objectLockRisks = plan?.object_lock_risks ?? [];
   const impact = plan?.versioned_object_impact;
+  const approvalStatus = approval?.status ?? "none";
+  const canRequestApproval = Boolean(plan?.apply_allowed && proposals.some((proposal) => proposal.safe_to_apply));
+  const canApprove = approval?.status === "pending";
+  const canApply = approval?.status === "approved" && plan?.apply_allowed === true;
 
   return (
     <div className="preview-alert artifact-cleanup-remediation">
       <div className="global-panel-header">
         <div>
-          <div className="telemetry">READ-ONLY REMEDIATION</div>
+          <div className="telemetry">CONTROLLED REMEDIATION</div>
           <h4>Lifecycle remediation plan</h4>
         </div>
         <span className={`status-pill ${status === "ready" ? "status-ready" : "status-warning"}`}>
@@ -1061,12 +1186,56 @@ function LifecycleRemediationPlanPanel({
         </span>
       </div>
       <div className="shell-governance-grid">
-        <Detail label="Apply gate" value={plan?.apply_allowed ? "apply enabled" : "read-only plan"} />
+        <Detail label="Apply gate" value={plan?.apply_allowed ? "approval gated" : "manual review"} />
         <Detail label="Approval" value={plan?.approval_required ? "required" : "not required"} />
+        <Detail label="Approval status" value={approvalStatus} />
         <Detail label="Proposals" value={String(proposals.length)} />
         <Detail label="Noncurrent versions" value={String(impact?.noncurrent_version_count ?? 0)} />
         <Detail label="Delete markers" value={String(impact?.delete_marker_count ?? 0)} />
       </div>
+      <div className="release-action-row">
+        <button
+          className="toolbar-button"
+          disabled={isMutating || !canRequestApproval || Boolean(approval)}
+          onClick={onRequestApproval}
+          type="button"
+        >
+          <ShieldCheck aria-hidden="true" size={16} />
+          Request lifecycle approval
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={isMutating || !canApprove}
+          onClick={onApprove}
+          type="button"
+        >
+          <ShieldCheck aria-hidden="true" size={16} />
+          Approve lifecycle plan
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={isMutating || !plan?.apply_allowed}
+          onClick={() => onRun(true)}
+          type="button"
+        >
+          <Play aria-hidden="true" size={16} />
+          Dry run lifecycle apply
+        </button>
+        <button
+          className="toolbar-button"
+          disabled={isMutating || !canApply}
+          onClick={() => onRun(false)}
+          type="button"
+        >
+          <Save aria-hidden="true" size={16} />
+          Apply lifecycle rule
+        </button>
+      </div>
+      {run ? (
+        <div className={`preview-alert ${run.status === "blocked" ? "preview-alert-danger" : "preview-alert-success"}`}>
+          Lifecycle apply: {run.status} / {run.rule_action} / {run.merged_rule_count} merged rules
+        </div>
+      ) : null}
       {proposals.length === 0 ? (
         <div className="preview-alert">No lifecycle rule changes proposed</div>
       ) : null}
@@ -1389,10 +1558,10 @@ function applyCleanupSchedule(
   setScheduleForm: (value: ShellImageArtifactCleanupScheduleUpdateRequest) => void,
 ) {
   setScheduleForm({
-    enabled: schedule.enabled,
-    interval_hours: schedule.interval_hours,
-    limit: schedule.limit,
-    next_run_at: schedule.next_run_at,
+    enabled: schedule.enabled ?? defaultCleanupScheduleForm.enabled,
+    interval_hours: schedule.interval_hours ?? defaultCleanupScheduleForm.interval_hours,
+    limit: schedule.limit ?? defaultCleanupScheduleForm.limit,
+    next_run_at: schedule.next_run_at ?? null,
   });
 }
 

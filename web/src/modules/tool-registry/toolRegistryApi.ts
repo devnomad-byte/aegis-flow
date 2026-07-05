@@ -198,7 +198,7 @@ export type ShellImageArtifactCleanupSchedule = {
 };
 
 export type ShellImageArtifactLifecycleRuleProposal = {
-  proposal_type: "add_rule" | "manual_review";
+  proposal_type: "add_rule" | "update_managed_rule" | "manual_review";
   rule_id: string;
   prefix: string;
   expiration_days: number;
@@ -233,6 +233,58 @@ export type ShellImageArtifactLifecycleRemediationPlan = {
   rule_proposals: ShellImageArtifactLifecycleRuleProposal[];
   object_lock_risks: ShellImageArtifactObjectLockRisk[];
   versioned_object_impact: ShellImageArtifactVersionedObjectImpact;
+  rollback_hints: string[];
+  generated_at: string;
+};
+
+export type ShellImageArtifactLifecycleRemediationApproval = {
+  id: string;
+  project_id: string;
+  status: "pending" | "approved" | "rejected" | "used";
+  rule_id: string;
+  prefixes: string[];
+  proposal_type: ShellImageArtifactLifecycleRuleProposal["proposal_type"];
+  reason: string;
+  decision_reason: string;
+  requested_by: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  used_at?: string | null;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ShellImageArtifactLifecycleRemediationApprovalCreateRequest = {
+  reason: string;
+};
+
+export type ShellImageArtifactLifecycleRemediationApprovalDecisionRequest = {
+  decision: "approved" | "rejected";
+  reason: string;
+};
+
+export type ShellImageArtifactLifecycleRemediationRunRequest = {
+  dry_run: boolean;
+  approval_id?: string | null;
+};
+
+export type ShellImageArtifactLifecycleRemediationRun = {
+  project_id: string;
+  status: "planned" | "applied" | "blocked";
+  dry_run: boolean;
+  apply_allowed: boolean;
+  approval_required: boolean;
+  approval_id?: string | null;
+  rule_id: string;
+  rule_action: "add_managed_rule" | "update_managed_rule" | "blocked" | "none";
+  prefixes: string[];
+  expiration_days?: number | null;
+  noncurrent_expiration_days?: number | null;
+  preserved_rule_count: number;
+  merged_rule_count: number;
+  blocked_reasons: string[];
   rollback_hints: string[];
   generated_at: string;
 };
@@ -451,6 +503,55 @@ export async function getShellImageArtifactLifecycleRemediationPlan(
   return requestJson<ShellImageArtifactLifecycleRemediationPlan>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/lifecycle-remediation-plan`,
     undefined,
+    fetcher,
+  );
+}
+
+export async function requestShellImageArtifactLifecycleRemediationApproval(
+  projectId: string,
+  request: ShellImageArtifactLifecycleRemediationApprovalCreateRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactLifecycleRemediationApproval> {
+  return requestJson<ShellImageArtifactLifecycleRemediationApproval>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function decideShellImageArtifactLifecycleRemediationApproval(
+  projectId: string,
+  approvalId: string,
+  request: ShellImageArtifactLifecycleRemediationApprovalDecisionRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactLifecycleRemediationApproval> {
+  return requestJson<ShellImageArtifactLifecycleRemediationApproval>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals/${encodeURIComponent(approvalId)}/decision`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    fetcher,
+  );
+}
+
+export async function runShellImageArtifactLifecycleRemediation(
+  projectId: string,
+  request: ShellImageArtifactLifecycleRemediationRunRequest,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<ShellImageArtifactLifecycleRemediationRun> {
+  return requestJson<ShellImageArtifactLifecycleRemediationRun>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/tool-registry/shell-images/artifacts/lifecycle-remediation-runs`,
+    {
+      body: JSON.stringify(request),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
     fetcher,
   );
 }

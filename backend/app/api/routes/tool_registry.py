@@ -21,7 +21,9 @@ from backend.app.tool_registry.image_artifact_cleanup import (
     ShellImageArtifactCleanupService,
 )
 from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
+    ShellImageArtifactLifecycleRemediationApprovalError,
     ShellImageArtifactLifecycleRemediationPlanner,
+    ShellImageArtifactLifecycleRemediationService,
 )
 from backend.app.tool_registry.image_artifacts import (
     ShellImageArtifactObjectStore,
@@ -70,7 +72,12 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
     ShellImageArtifactLifecycleDriftRead,
+    ShellImageArtifactLifecycleRemediationApprovalCreateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalDecisionRequest,
+    ShellImageArtifactLifecycleRemediationApprovalRead,
     ShellImageArtifactLifecycleRemediationPlanRead,
+    ShellImageArtifactLifecycleRemediationRunRead,
+    ShellImageArtifactLifecycleRemediationRunRequest,
     ShellImageArtifactRetentionControlsRead,
     ShellImageArtifactVersionReconciliationRead,
     ShellTemplateCreateRequest,
@@ -1184,6 +1191,162 @@ async def get_shell_image_artifact_lifecycle_remediation_plan(
     return plan
 
 
+@router.post(
+    "/shell-images/artifacts/lifecycle-remediation-approvals",
+    response_model=ShellImageArtifactLifecycleRemediationApprovalRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def request_shell_image_artifact_lifecycle_remediation_approval(
+    project_id: UUID,
+    request: ShellImageArtifactLifecycleRemediationApprovalCreateRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    artifact_object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=registry_store,
+        object_store=artifact_object_store,
+    )
+    try:
+        approval = await service.request_approval(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ShellImageArtifactLifecycleRemediationApprovalError as exc:
+        await _record_lifecycle_remediation_failure(
+            audit_store,
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            action="tool_registry.shell_image_artifact.lifecycle_remediation_approval.request",
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.lifecycle_remediation_approval.request",
+        target_type="tool_registry_image_admission_artifact_lifecycle_remediation_approval",
+        target_id=str(approval.id),
+        risk_level="high",
+        metadata=_lifecycle_remediation_approval_metadata(approval),
+    )
+    return approval
+
+
+@router.post(
+    "/shell-images/artifacts/lifecycle-remediation-approvals/{approval_id}/decision",
+    response_model=ShellImageArtifactLifecycleRemediationApprovalRead,
+)
+async def decide_shell_image_artifact_lifecycle_remediation_approval(
+    project_id: UUID,
+    approval_id: UUID,
+    request: ShellImageArtifactLifecycleRemediationApprovalDecisionRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    artifact_object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=registry_store,
+        object_store=artifact_object_store,
+    )
+    try:
+        approval = await service.decide_approval(
+            project_id=project_id,
+            approval_id=approval_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ShellImageArtifactLifecycleRemediationApprovalError as exc:
+        await _record_lifecycle_remediation_failure(
+            audit_store,
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            action="tool_registry.shell_image_artifact.lifecycle_remediation_approval.decide",
+            target_id=str(approval_id),
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.lifecycle_remediation_approval.decide",
+        target_type="tool_registry_image_admission_artifact_lifecycle_remediation_approval",
+        target_id=str(approval.id),
+        risk_level="high",
+        metadata=_lifecycle_remediation_approval_metadata(approval),
+    )
+    return approval
+
+
+@router.post(
+    "/shell-images/artifacts/lifecycle-remediation-runs",
+    response_model=ShellImageArtifactLifecycleRemediationRunRead,
+)
+async def run_shell_image_artifact_lifecycle_remediation(
+    project_id: UUID,
+    request: ShellImageArtifactLifecycleRemediationRunRequest,
+    current_account: AccountPrincipal = CurrentAccount,
+    project_access: ProjectAccessProvider = ProjectAccess,
+    registry_store: ToolRegistryStore = RegistryStore,
+    audit_store: AuditEventStore = AuditStore,
+    artifact_object_store: ShellImageArtifactObjectStore = ShellImageArtifactObjectStoreDependency,
+) -> ShellImageArtifactLifecycleRemediationRunRead:
+    _require_project_permission(
+        project_access,
+        current_account,
+        project_id,
+        "tool-registry:write",
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=registry_store,
+        object_store=artifact_object_store,
+    )
+    try:
+        run = await service.run_remediation(
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            request=request,
+        )
+    except ShellImageArtifactLifecycleRemediationApprovalError as exc:
+        await _record_lifecycle_remediation_failure(
+            audit_store,
+            project_id=project_id,
+            actor_id=current_account.account_id,
+            action="tool_registry.shell_image_artifact.lifecycle_remediation_run",
+            target_id=str(request.approval_id or project_id),
+            detail=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=current_account.account_id,
+        action="tool_registry.shell_image_artifact.lifecycle_remediation_run",
+        target_type="tool_registry_image_admission_artifact_lifecycle_remediation_run",
+        target_id=str(run.approval_id or project_id),
+        result="failure" if run.status == "blocked" else "success",
+        risk_level="high" if not run.dry_run else "medium",
+        metadata=_lifecycle_remediation_run_metadata(run),
+    )
+    return run
+
+
 @router.get(
     "/shell-images/artifacts/cleanup-schedule",
     response_model=ShellImageArtifactCleanupScheduleRead,
@@ -1659,6 +1822,58 @@ def _artifact_cleanup_candidate_metadata(
         }
         for candidate in candidates
     ]
+
+
+def _lifecycle_remediation_approval_metadata(
+    approval: ShellImageArtifactLifecycleRemediationApprovalRead,
+) -> dict[str, object]:
+    return {
+        "status": approval.status,
+        "rule_id": approval.rule_id,
+        "proposal_type": approval.proposal_type,
+        "prefix_count": len(approval.prefixes),
+        "decided": approval.decided_at is not None,
+        "used": approval.used_at is not None,
+    }
+
+
+def _lifecycle_remediation_run_metadata(
+    run: ShellImageArtifactLifecycleRemediationRunRead,
+) -> dict[str, object]:
+    return {
+        "status": run.status,
+        "dry_run": run.dry_run,
+        "apply_allowed": run.apply_allowed,
+        "approval_required": run.approval_required,
+        "approval_id": str(run.approval_id) if run.approval_id else "",
+        "rule_id": run.rule_id,
+        "rule_action": run.rule_action,
+        "prefix_count": len(run.prefixes),
+        "preserved_rule_count": run.preserved_rule_count,
+        "merged_rule_count": run.merged_rule_count,
+        "blocked_reasons": run.blocked_reasons,
+    }
+
+
+async def _record_lifecycle_remediation_failure(
+    audit_store: AuditEventStore,
+    *,
+    project_id: UUID,
+    actor_id: UUID,
+    action: str,
+    detail: str,
+    target_id: str = "",
+) -> None:
+    await audit_store.record_project_event(
+        project_id=project_id,
+        actor_id=actor_id,
+        action=action,
+        target_type="tool_registry_image_admission_artifact_lifecycle_remediation",
+        target_id=target_id or str(project_id),
+        result="failure",
+        risk_level="high",
+        metadata={"error": detail[:120]},
+    )
 
 
 async def _record_egress_denied_event(

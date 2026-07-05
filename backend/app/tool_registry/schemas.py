@@ -57,8 +57,26 @@ ShellImageArtifactLifecycleRemediationStatus = Literal[
     "manual_review",
     "unknown",
 ]
-ShellImageArtifactLifecycleRuleProposalType = Literal["add_rule", "manual_review"]
+ShellImageArtifactLifecycleRuleProposalType = Literal[
+    "add_rule",
+    "update_managed_rule",
+    "manual_review",
+]
 ShellImageArtifactLifecycleRiskSeverity = Literal["low", "medium", "high"]
+ShellImageArtifactLifecycleRemediationApprovalStatus = Literal[
+    "pending",
+    "approved",
+    "rejected",
+    "used",
+]
+ShellImageArtifactLifecycleRemediationApprovalDecision = Literal["approved", "rejected"]
+ShellImageArtifactLifecycleRemediationRunStatus = Literal["planned", "applied", "blocked"]
+ShellImageArtifactLifecycleRemediationRuleAction = Literal[
+    "add_managed_rule",
+    "update_managed_rule",
+    "blocked",
+    "none",
+]
 
 DEFAULT_NOTATION_TRUST_POLICY: dict[str, Any] = {"version": "1.0", "trustPolicies": []}
 DEFAULT_BLOCKED_SEVERITIES = ["HIGH", "CRITICAL"]
@@ -673,6 +691,66 @@ class ShellImageArtifactLifecycleRemediationPlanRead(BaseModel):
     versioned_object_impact: ShellImageArtifactVersionedObjectImpactRead = Field(
         default_factory=ShellImageArtifactVersionedObjectImpactRead
     )
+    rollback_hints: list[str] = Field(default_factory=list)
+    generated_at: datetime
+
+
+class ShellImageArtifactLifecycleRemediationApprovalCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ShellImageArtifactLifecycleRemediationApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ShellImageArtifactLifecycleRemediationApprovalDecision
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ShellImageArtifactLifecycleRemediationApprovalRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    status: ShellImageArtifactLifecycleRemediationApprovalStatus = "pending"
+    rule_id: str
+    prefixes: list[str] = Field(default_factory=list)
+    proposal_type: ShellImageArtifactLifecycleRuleProposalType
+    reason: str
+    decision_reason: str = ""
+    requested_by: UUID
+    decided_by: UUID | None = None
+    decided_at: datetime | None = None
+    used_at: datetime | None = None
+    created_by: UUID
+    updated_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ShellImageArtifactLifecycleRemediationRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool = True
+    approval_id: UUID | None = None
+
+
+class ShellImageArtifactLifecycleRemediationRunRead(BaseModel):
+    project_id: UUID
+    status: ShellImageArtifactLifecycleRemediationRunStatus
+    dry_run: bool
+    apply_allowed: bool
+    approval_required: bool = True
+    approval_id: UUID | None = None
+    rule_id: str = ""
+    rule_action: ShellImageArtifactLifecycleRemediationRuleAction = "none"
+    prefixes: list[str] = Field(default_factory=list)
+    expiration_days: int | None = None
+    noncurrent_expiration_days: int | None = None
+    preserved_rule_count: int = 0
+    merged_rule_count: int = 0
+    blocked_reasons: list[str] = Field(default_factory=list)
     rollback_hints: list[str] = Field(default_factory=list)
     generated_at: datetime
 

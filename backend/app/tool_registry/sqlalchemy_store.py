@@ -45,6 +45,7 @@ from backend.app.tool_registry.models import (
     ToolRegistryImageAdmission,
     ToolRegistryImageArtifactCleanupRun,
     ToolRegistryImageArtifactCleanupSchedule,
+    ToolRegistryImageArtifactLifecycleRemediationApproval,
     ToolRegistryMcpServer,
     ToolRegistryNotationTrustCertificate,
     ToolRegistrySecretLease,
@@ -86,6 +87,7 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
     ShellImageArtifactLifecycleDriftRead,
+    ShellImageArtifactLifecycleRemediationApprovalRead,
     ShellImageArtifactRetentionControlsRead,
     ShellImageArtifactVersionReconciliationRead,
     ShellTemplateCreateRequest,
@@ -123,6 +125,7 @@ ModelT = TypeVar(
     ToolRegistryCredentialRef,
     ToolRegistrySecretLease,
     ToolRegistryNotationTrustCertificate,
+    ToolRegistryImageArtifactLifecycleRemediationApproval,
 )
 
 
@@ -621,6 +624,84 @@ class SqlAlchemyToolRegistryStore:
         await self._session.commit()
         await self._session.refresh(schedule)
         return _cleanup_schedule_read(schedule)
+
+    async def create_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval: ShellImageArtifactLifecycleRemediationApprovalRead,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        resource = ToolRegistryImageArtifactLifecycleRemediationApproval(
+            id=approval.id,
+            project_id=project_id,
+            status=approval.status,
+            rule_id=approval.rule_id,
+            prefixes=approval.prefixes,
+            proposal_type=approval.proposal_type,
+            reason=approval.reason,
+            decision_reason=approval.decision_reason,
+            requested_by=approval.requested_by,
+            decided_by=approval.decided_by,
+            decided_at=approval.decided_at,
+            used_at=approval.used_at,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        self._session.add(resource)
+        await self._session.commit()
+        await self._session.refresh(resource)
+        return ShellImageArtifactLifecycleRemediationApprovalRead.model_validate(resource)
+
+    async def get_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead | None:
+        resource = await self._session.scalar(
+            select(ToolRegistryImageArtifactLifecycleRemediationApproval).where(
+                ToolRegistryImageArtifactLifecycleRemediationApproval.project_id == project_id,
+                ToolRegistryImageArtifactLifecycleRemediationApproval.id == approval_id,
+            )
+        )
+        if resource is None:
+            return None
+        return ShellImageArtifactLifecycleRemediationApprovalRead.model_validate(resource)
+
+    async def update_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+        actor_id: UUID,
+        status: str,
+        decision_reason: str = "",
+        decided_by: UUID | None = None,
+        decided_at: datetime | None = None,
+        used_at: datetime | None = None,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        resource = await self._session.scalar(
+            select(ToolRegistryImageArtifactLifecycleRemediationApproval).where(
+                ToolRegistryImageArtifactLifecycleRemediationApproval.project_id == project_id,
+                ToolRegistryImageArtifactLifecycleRemediationApproval.id == approval_id,
+            )
+        )
+        if resource is None:
+            raise ToolRegistryResourceNotFoundError("lifecycle remediation approval not found")
+        resource.status = status
+        if decision_reason:
+            resource.decision_reason = decision_reason
+        if decided_by is not None:
+            resource.decided_by = decided_by
+        if decided_at is not None:
+            resource.decided_at = decided_at
+        if used_at is not None:
+            resource.used_at = used_at
+        resource.updated_by = actor_id
+        await self._session.commit()
+        await self._session.refresh(resource)
+        return ShellImageArtifactLifecycleRemediationApprovalRead.model_validate(resource)
 
     async def upsert_shell_image_admission_policy(
         self,

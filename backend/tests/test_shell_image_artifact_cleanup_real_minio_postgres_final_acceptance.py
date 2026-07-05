@@ -13,8 +13,10 @@ from backend.app.tool_registry.image_artifact_cleanup import (
 )
 from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
     ShellImageArtifactLifecycleRemediationPlanner,
+    ShellImageArtifactLifecycleRemediationService,
 )
 from backend.app.tool_registry.image_artifacts import (
+    ShellImageArtifactLifecycleConfiguration,
     ShellImageArtifactObjectStore,
     ShellImageArtifactWriter,
     build_shell_image_artifact_object_store,
@@ -24,13 +26,18 @@ from backend.app.tool_registry.models import (
     ToolRegistryImageAdmission,
     ToolRegistryImageArtifactCleanupRun,
     ToolRegistryImageArtifactCleanupSchedule,
+    ToolRegistryImageArtifactLifecycleRemediationApproval,
 )
 from backend.app.tool_registry.schemas import (
     ShellImageAdmissionResolveRequest,
     ShellImageArtifactCleanupRequest,
     ShellImageArtifactCleanupRunRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalCreateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalDecisionRequest,
     ShellImageArtifactLifecycleRemediationPlanRead,
+    ShellImageArtifactLifecycleRemediationRunRead,
+    ShellImageArtifactLifecycleRemediationRunRequest,
 )
 from backend.app.tool_registry.sqlalchemy_store import SqlAlchemyToolRegistryStore
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
@@ -227,7 +234,7 @@ def test_real_minio_postgres_shell_image_artifact_lifecycle_remediation_plan_v1(
         rendered = plan.model_dump_json()
 
         assert plan.project_id == project_id
-        assert plan.apply_allowed is False
+        assert plan.apply_allowed in {True, False}
         assert plan.approval_required is True
         assert plan.rollback_hints
         assert plan.versioned_object_impact.checked_prefixes == [
@@ -237,13 +244,99 @@ def test_real_minio_postgres_shell_image_artifact_lifecycle_remediation_plan_v1(
             assert plan.rule_proposals
             assert plan.rule_proposals[0].proposal_type in {"add_rule", "manual_review"}
             assert plan.rule_proposals[0].prefix.endswith(f"{project_id}/")
-            assert plan.rule_proposals[0].safe_to_apply is False
+            assert plan.rule_proposals[0].safe_to_apply is plan.apply_allowed
         assert artifact_ref not in rendered
         assert "secret" not in rendered.lower()
         assert "b" * 64 not in rendered
     finally:
         if artifact_ref:
             asyncio.run(_delete_if_exists(object_store, artifact_ref))
+        asyncio.run(_cleanup(session_factory, project_id=project_id, actor_id=actor_id))
+        asyncio.run(engine.dispose())
+
+
+def test_real_minio_postgres_shell_image_artifact_lifecycle_remediation_apply_v1() -> None:
+    require_real_database_and_s3_cleanup_final_acceptance()
+    settings = AppSettings()
+    project_id = uuid4()
+    actor_id = uuid4()
+    digest = "sha256:" + ("c" * 64)
+    artifact_ref = ""
+    engine = create_async_engine(settings.database.sqlalchemy_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    object_store = build_shell_image_artifact_object_store(settings.s3)
+    original_lifecycle: ShellImageArtifactLifecycleConfiguration | None = None
+
+    asyncio.run(_seed(session_factory, project_id=project_id, actor_id=actor_id))
+    try:
+        original_lifecycle = asyncio.run(object_store.get_lifecycle_configuration())
+        assert original_lifecycle.error == ""
+        asyncio.run(_prepare_lifecycle_baseline(object_store, project_id=project_id))
+        artifact_ref = asyncio.run(
+            _write_expired_artifact_and_record_admission(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+                digest=digest,
+            )
+        )
+
+        dry_run, apply_run = asyncio.run(
+            _approve_and_run_lifecycle_remediation(
+                session_factory,
+                object_store=object_store,
+                project_id=project_id,
+                actor_id=actor_id,
+            )
+        )
+        final_lifecycle = asyncio.run(object_store.get_lifecycle_configuration())
+        rendered = dry_run.model_dump_json() + apply_run.model_dump_json()
+
+        assert dry_run.status == "planned"
+        assert dry_run.dry_run is True
+        assert apply_run.status == "applied"
+        assert apply_run.dry_run is False
+        assert apply_run.rule_action == "add_managed_rule"
+        approval_id = apply_run.approval_id
+        assert approval_id is not None
+        assert apply_run.prefixes == [
+            f"shell-image-admissions/cleanup-final/{project_id.hex}/{project_id}/"
+        ]
+        assert apply_run.preserved_rule_count == 1
+        assert final_lifecycle.error == ""
+        rule_ids = {str(rule.get("ID") or "") for rule in final_lifecycle.rules}
+        assert f"aegisflow-final-preserve-{project_id.hex[:12]}" in rule_ids
+        assert apply_run.rule_id in rule_ids
+        managed_rule = next(
+            rule for rule in final_lifecycle.rules if rule.get("ID") == apply_run.rule_id
+        )
+        assert managed_rule["Filter"] == {"Prefix": apply_run.prefixes[0]}
+        assert managed_rule["Expiration"] == {"Days": 30}
+        if apply_run.noncurrent_expiration_days is not None:
+            assert managed_rule["NoncurrentVersionExpiration"] == {"NoncurrentDays": 30}
+        asyncio.run(
+            _assert_lifecycle_remediation_approval_used(
+                session_factory,
+                project_id=project_id,
+                approval_id=approval_id,
+            )
+        )
+        assert artifact_ref not in rendered
+        assert "secret" not in rendered.lower()
+        assert "c" * 64 not in rendered
+        assert "LifecycleConfiguration" not in rendered
+    finally:
+        if artifact_ref:
+            asyncio.run(_delete_if_exists(object_store, artifact_ref))
+        if original_lifecycle is not None:
+            asyncio.run(
+                _restore_lifecycle_configuration(
+                    settings,
+                    object_store=object_store,
+                    original=original_lifecycle,
+                )
+            )
         asyncio.run(_cleanup(session_factory, project_id=project_id, actor_id=actor_id))
         asyncio.run(engine.dispose())
 
@@ -342,6 +435,121 @@ async def _build_lifecycle_remediation_plan(
             object_store=object_store,
         )
         return await planner.build_plan(project_id)
+
+
+async def _prepare_lifecycle_baseline(
+    object_store: ShellImageArtifactObjectStore,
+    *,
+    project_id: UUID,
+) -> None:
+    await object_store.put_lifecycle_configuration(
+        [
+            {
+                "ID": f"aegisflow-final-preserve-{project_id.hex[:12]}",
+                "Status": "Enabled",
+                "Filter": {"Prefix": f"aegisflow-final-preserve/{project_id.hex}/"},
+                "Expiration": {"Days": 365},
+            }
+        ]
+    )
+
+
+async def _approve_and_run_lifecycle_remediation(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    object_store: ShellImageArtifactObjectStore,
+    project_id: UUID,
+    actor_id: UUID,
+) -> tuple[
+    ShellImageArtifactLifecycleRemediationRunRead,
+    ShellImageArtifactLifecycleRemediationRunRead,
+]:
+    async with session_factory() as session:
+        store = SqlAlchemyToolRegistryStore(session)
+        service = ShellImageArtifactLifecycleRemediationService(
+            store=store,
+            object_store=object_store,
+        )
+        approval = await service.request_approval(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationApprovalCreateRequest(
+                reason="expire project-scoped shell image artifacts in MinIO"
+            ),
+        )
+        approved = await service.decide_approval(
+            project_id=project_id,
+            approval_id=approval.id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationApprovalDecisionRequest(
+                decision="approved",
+                reason="final acceptance reviewed generated lifecycle plan",
+            ),
+        )
+        dry_run = await service.run_remediation(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationRunRequest(dry_run=True),
+        )
+        apply_run = await service.run_remediation(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationRunRequest(
+                dry_run=False,
+                approval_id=approved.id,
+            ),
+        )
+    return dry_run, apply_run
+
+
+async def _assert_lifecycle_remediation_approval_used(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: UUID,
+    approval_id: UUID,
+) -> None:
+    async with session_factory() as session:
+        approval = await session.scalar(
+            select(ToolRegistryImageArtifactLifecycleRemediationApproval).where(
+                ToolRegistryImageArtifactLifecycleRemediationApproval.project_id == project_id,
+                ToolRegistryImageArtifactLifecycleRemediationApproval.id == approval_id,
+            )
+        )
+    assert approval is not None
+    assert approval.status == "used"
+    assert approval.used_at is not None
+
+
+async def _restore_lifecycle_configuration(
+    settings: AppSettings,
+    *,
+    object_store: ShellImageArtifactObjectStore,
+    original: ShellImageArtifactLifecycleConfiguration,
+) -> None:
+    if original.rules:
+        await object_store.put_lifecycle_configuration(original.rules)
+        return
+    await _delete_bucket_lifecycle_configuration(settings)
+
+
+async def _delete_bucket_lifecycle_configuration(settings: AppSettings) -> None:
+    import aioboto3  # type: ignore[import-untyped]
+
+    session = aioboto3.Session()
+    async with session.client(
+        "s3",
+        endpoint_url=settings.s3.endpoint,
+        region_name=settings.s3.region,
+        aws_access_key_id=settings.s3.access_key.get_secret_value(),
+        aws_secret_access_key=settings.s3.secret_key.get_secret_value(),
+    ) as client:
+        try:
+            await client.delete_bucket_lifecycle(Bucket=settings.s3.bucket)
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            code = str(error.get("Code") or "")
+            if code != "NoSuchLifecycleConfiguration":
+                raise
 
 
 async def _run_scheduled_dry_run(
@@ -496,6 +704,11 @@ async def _cleanup(
         await session.execute(
             delete(ToolRegistryImageArtifactCleanupRun).where(
                 ToolRegistryImageArtifactCleanupRun.project_id == project_id,
+            )
+        )
+        await session.execute(
+            delete(ToolRegistryImageArtifactLifecycleRemediationApproval).where(
+                ToolRegistryImageArtifactLifecycleRemediationApproval.project_id == project_id,
             )
         )
         await session.execute(

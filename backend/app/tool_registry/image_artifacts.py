@@ -59,6 +59,13 @@ class ShellImageArtifactVersionReconciliation:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ShellImageArtifactLifecycleConfiguration:
+    bucket: str
+    rules: list[dict[str, Any]]
+    error: str = ""
+
+
 class ShellImageArtifactObjectStore(Protocol):
     async def put_artifact(
         self,
@@ -94,6 +101,12 @@ class ShellImageArtifactObjectStore(Protocol):
     ) -> ShellImageArtifactVersionReconciliation:
         raise NotImplementedError
 
+    async def get_lifecycle_configuration(self) -> ShellImageArtifactLifecycleConfiguration:
+        raise NotImplementedError
+
+    async def put_lifecycle_configuration(self, rules: list[dict[str, Any]]) -> None:
+        raise NotImplementedError
+
 
 class InMemoryShellImageArtifactObjectStore:
     def __init__(
@@ -123,6 +136,7 @@ class InMemoryShellImageArtifactObjectStore:
         self.version_reconciliation = version_reconciliation or {}
         self.version_reconciliation_error = version_reconciliation_error
         self.objects: dict[str, StoredShellImageArtifact] = {}
+        self.lifecycle_put_calls: list[list[dict[str, Any]]] = []
 
     async def put_artifact(
         self,
@@ -248,6 +262,23 @@ class InMemoryShellImageArtifactObjectStore:
             noncurrent_version_count=noncurrent,
             delete_marker_count=delete_markers,
         )
+
+    async def get_lifecycle_configuration(self) -> ShellImageArtifactLifecycleConfiguration:
+        if self.lifecycle_error:
+            return ShellImageArtifactLifecycleConfiguration(
+                bucket=self.bucket,
+                rules=[],
+                error=self.lifecycle_error,
+            )
+        return ShellImageArtifactLifecycleConfiguration(
+            bucket=self.bucket,
+            rules=[dict(rule) for rule in self.lifecycle_rules],
+        )
+
+    async def put_lifecycle_configuration(self, rules: list[dict[str, Any]]) -> None:
+        copied_rules = [dict(rule) for rule in rules]
+        self.lifecycle_put_calls.append(copied_rules)
+        self.lifecycle_rules = copied_rules
 
 
 class S3ShellImageArtifactObjectStore:
@@ -527,6 +558,55 @@ class S3ShellImageArtifactObjectStore:
             noncurrent_version_count=noncurrent_count,
             delete_marker_count=delete_marker_count,
         )
+
+    async def get_lifecycle_configuration(self) -> ShellImageArtifactLifecycleConfiguration:
+        import aioboto3
+        from botocore.exceptions import ClientError
+
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            try:
+                response = await client.get_bucket_lifecycle_configuration(
+                    Bucket=self._settings.bucket
+                )
+            except ClientError as exc:
+                if _s3_error_code(exc) == "NoSuchLifecycleConfiguration":
+                    return ShellImageArtifactLifecycleConfiguration(
+                        bucket=self._settings.bucket,
+                        rules=[],
+                    )
+                return ShellImageArtifactLifecycleConfiguration(
+                    bucket=self._settings.bucket,
+                    rules=[],
+                    error=_public_s3_error(exc),
+                )
+        rules = [dict(rule) for rule in response.get("Rules", []) if isinstance(rule, dict)]
+        return ShellImageArtifactLifecycleConfiguration(
+            bucket=self._settings.bucket,
+            rules=rules,
+        )
+
+    async def put_lifecycle_configuration(self, rules: list[dict[str, Any]]) -> None:
+        import aioboto3
+
+        session = aioboto3.Session()
+        async with session.client(
+            "s3",
+            endpoint_url=self._settings.endpoint,
+            region_name=self._settings.region,
+            aws_access_key_id=self._settings.access_key.get_secret_value(),
+            aws_secret_access_key=self._settings.secret_key.get_secret_value(),
+        ) as client:
+            await client.put_bucket_lifecycle_configuration(
+                Bucket=self._settings.bucket,
+                LifecycleConfiguration={"Rules": rules},
+            )
 
 
 @dataclass(frozen=True)

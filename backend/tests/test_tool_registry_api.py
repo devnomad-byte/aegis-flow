@@ -65,6 +65,7 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupRunRead,
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalRead,
     ShellTemplateCreateRequest,
     ShellTemplatePolicySummary,
     ShellTemplatePreviewRequest,
@@ -131,6 +132,9 @@ class InMemoryToolRegistryStore:
             UUID, ShellImageArtifactCleanupScheduleRead
         ] = {}
         self.image_artifact_cleanup_schedule_claims: list[dict[str, object]] = []
+        self.image_artifact_lifecycle_remediation_approvals: dict[
+            UUID, ShellImageArtifactLifecycleRemediationApprovalRead
+        ] = {}
         self.notation_trust_certificates: dict[UUID, list[NotationTrustCertificateRead]] = {}
         self.fail_next_sync = False
 
@@ -845,6 +849,59 @@ class InMemoryToolRegistryStore:
         )
         self.image_artifact_cleanup_schedules[project_id] = schedule
         return schedule
+
+    async def create_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval: ShellImageArtifactLifecycleRemediationApprovalRead,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        self.image_artifact_lifecycle_remediation_approvals[approval.id] = approval
+        return approval
+
+    async def get_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead | None:
+        approval = self.image_artifact_lifecycle_remediation_approvals.get(approval_id)
+        if approval is None or approval.project_id != project_id:
+            return None
+        return approval
+
+    async def update_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+        actor_id: UUID,
+        status: str,
+        decision_reason: str = "",
+        decided_by: UUID | None = None,
+        decided_at: datetime | None = None,
+        used_at: datetime | None = None,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        approval = await self.get_shell_image_artifact_lifecycle_remediation_approval(
+            project_id=project_id,
+            approval_id=approval_id,
+        )
+        if approval is None:
+            raise ToolRegistryResourceNotFoundError("lifecycle remediation approval not found")
+        updated = approval.model_copy(
+            update={
+                "status": status,
+                "decision_reason": decision_reason or approval.decision_reason,
+                "decided_by": decided_by if decided_by is not None else approval.decided_by,
+                "decided_at": decided_at if decided_at is not None else approval.decided_at,
+                "used_at": used_at if used_at is not None else approval.used_at,
+                "updated_by": actor_id,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.image_artifact_lifecycle_remediation_approvals[approval_id] = updated
+        return updated
 
     async def claim_due_shell_image_artifact_cleanup_schedules(
         self,
@@ -2744,7 +2801,7 @@ def test_tool_registry_shell_image_artifact_lifecycle_plan_is_read_only_and_audi
     body = response.json()
     assert body["project_id"] == str(project.id)
     assert body["status"] == "action_required"
-    assert body["apply_allowed"] is False
+    assert body["apply_allowed"] is True
     assert body["approval_required"] is True
     assert body["rule_proposals"][0]["proposal_type"] == "add_rule"
     assert body["rule_proposals"][0]["prefix"] == f"shell-image-admissions/{project.id}/"
@@ -2761,12 +2818,134 @@ def test_tool_registry_shell_image_artifact_lifecycle_plan_is_read_only_and_audi
         "proposal_count": 1,
         "risk_count": 1,
         "checked_prefix_count": 1,
-        "apply_allowed": False,
+        "apply_allowed": True,
     }
     rendered = response.text + repr(audit_store.events)
     assert artifact_ref not in rendered
     assert "redaction-canary-value" not in rendered
     assert "c" * 64 not in rendered
+
+
+def test_tool_registry_lifecycle_remediation_apply_is_approved_and_audited() -> None:
+    project = make_project(permissions=["tool-registry:view", "tool-registry:write"])
+    registry_store = InMemoryToolRegistryStore()
+    audit_store = InMemoryAuditEventStore()
+    now = datetime.now(UTC)
+    artifact_ref = f"s3://capievo/shell-image-admissions/{project.id}/2026/07/05/sbom.json"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        lifecycle_rules=[
+            {
+                "ID": "company-audit-logs",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "audit-logs/"},
+                "Expiration": {"Days": 365},
+            }
+        ],
+    )
+    registry_store.image_admissions[project.id] = [
+        ShellImageAdmissionRead(
+            id=uuid4(),
+            project_id=project.id,
+            image_ref="registry.example/aegis/runtime:7-alpine",
+            image_digest="sha256:" + ("d" * 64),
+            registry_url="https://registry.example/v2/aegis/runtime/manifests/7-alpine",
+            registry_digest="sha256:" + ("d" * 64),
+            digest_match=True,
+            signature_status="passed",
+            sbom_status="passed",
+            vulnerability_status="passed",
+            policy_decision="approved",
+            decision_reason="registry digest, SBOM, and vulnerability evidence passed",
+            checked_at=now,
+            evidence={
+                "sbom": {
+                    "artifact_ref": artifact_ref,
+                    "artifact_sha256": "d" * 64,
+                    "artifact_size_bytes": 17,
+                    "artifact_retention_days": 30,
+                    "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                    "raw_sbom": {"token": "raw-lifecycle-approval-secret"},
+                }
+            },
+            created_by=uuid4(),
+            updated_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    client = build_client(
+        account=make_account(),
+        provider=PermissionAwareProjectProvider([project]),
+        registry_store=registry_store,
+        audit_store=audit_store,
+        artifact_object_store=object_store,
+    )
+
+    premature_apply = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+        json={"dry_run": False},
+    )
+    approval = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals",
+        json={"reason": "expire only project-scoped shell image artifacts"},
+    )
+    decision = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals/{approval.json()['id']}/decision",
+        json={"decision": "approved", "reason": "reviewed generated plan"},
+    )
+    dry_run = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+        json={"dry_run": True},
+    )
+    assert object_store.lifecycle_put_calls == []
+
+    apply = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+        json={"dry_run": False, "approval_id": approval.json()["id"]},
+    )
+    repeat_apply = client.post(
+        f"/api/v1/projects/{project.id}/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+        json={"dry_run": False, "approval_id": approval.json()["id"]},
+    )
+
+    assert premature_apply.status_code == 409
+    assert approval.status_code == 201
+    assert approval.json()["status"] == "pending"
+    assert decision.status_code == 200
+    assert decision.json()["status"] == "approved"
+    assert dry_run.status_code == 200
+    assert dry_run.json()["status"] == "planned"
+    assert dry_run.json()["dry_run"] is True
+    assert dry_run.json()["preserved_rule_count"] == 1
+    assert apply.status_code == 200
+    assert apply.json()["status"] == "applied"
+    assert apply.json()["approval_id"] == approval.json()["id"]
+    assert apply.json()["rule_action"] == "add_managed_rule"
+    assert apply.json()["preserved_rule_count"] == 1
+    assert repeat_apply.status_code == 409
+    assert len(object_store.lifecycle_put_calls) == 1
+    assert object_store.lifecycle_put_calls[0][0]["ID"] == "company-audit-logs"
+    assert object_store.lifecycle_put_calls[0][1]["Filter"] == {
+        "Prefix": f"shell-image-admissions/{project.id}/"
+    }
+    actions = [event["action"] for event in audit_store.events]
+    assert "tool_registry.shell_image_artifact.lifecycle_remediation_approval.request" in actions
+    assert "tool_registry.shell_image_artifact.lifecycle_remediation_approval.decide" in actions
+    assert actions.count("tool_registry.shell_image_artifact.lifecycle_remediation_run") == 4
+    rendered = (
+        premature_apply.text
+        + approval.text
+        + decision.text
+        + dry_run.text
+        + apply.text
+        + repr(audit_store.events)
+    )
+    assert artifact_ref not in rendered
+    assert "raw-lifecycle-approval-secret" not in rendered
+    assert "d" * 64 not in rendered
+    assert "LifecycleConfiguration" not in rendered
 
 
 def test_tool_registry_shell_image_artifact_cleanup_history_is_project_scoped() -> None:

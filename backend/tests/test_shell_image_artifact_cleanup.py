@@ -7,7 +7,9 @@ from backend.app.tool_registry.image_artifact_cleanup import (
     ShellImageArtifactCleanupService,
 )
 from backend.app.tool_registry.image_artifact_lifecycle_remediation import (
+    ShellImageArtifactLifecycleRemediationApprovalError,
     ShellImageArtifactLifecycleRemediationPlanner,
+    ShellImageArtifactLifecycleRemediationService,
 )
 from backend.app.tool_registry.image_artifacts import (
     InMemoryShellImageArtifactObjectStore,
@@ -19,6 +21,10 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupRunRead,
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalCreateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalDecisionRequest,
+    ShellImageArtifactLifecycleRemediationApprovalRead,
+    ShellImageArtifactLifecycleRemediationRunRequest,
 )
 
 
@@ -660,14 +666,14 @@ async def test_shell_image_artifact_lifecycle_remediation_plan_adds_project_rule
     plan = await planner.build_plan(project_id)
 
     assert plan.status == "action_required"
-    assert plan.apply_allowed is False
+    assert plan.apply_allowed is True
     assert plan.approval_required is True
     assert plan.rule_proposals[0].proposal_type == "add_rule"
     assert plan.rule_proposals[0].prefix == f"shell-image-admissions/{project_id}/"
     assert plan.rule_proposals[0].expiration_days == 30
     assert plan.rule_proposals[0].noncurrent_expiration_days == 30
     assert plan.rule_proposals[0].expired_object_delete_marker is True
-    assert plan.rule_proposals[0].safe_to_apply is False
+    assert plan.rule_proposals[0].safe_to_apply is True
     assert "missing_lifecycle_rule" in plan.rule_proposals[0].reason_codes
     assert plan.versioned_object_impact.noncurrent_version_count == 3
     assert plan.versioned_object_impact.delete_marker_count == 1
@@ -733,6 +739,259 @@ async def test_shell_image_artifact_lifecycle_remediation_plan_reports_object_lo
     assert plan.object_lock_risks[0].severity == "medium"
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_remediation_dry_run_fetch_merges_without_put() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    prefix = f"shell-image-admissions/{project_id}/"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        lifecycle_rules=[
+            {
+                "ID": "company-audit-logs",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "audit-logs/"},
+                "Expiration": {"Days": 365},
+            }
+        ],
+    )
+    store = _CleanupStore(
+        [
+            _admission(
+                project_id=project_id,
+                actor_id=actor_id,
+                now=now,
+                evidence={
+                    "sbom": {
+                        "artifact_ref": f"s3://capievo/{prefix}2026/07/05/sbom.json",
+                        "artifact_sha256": "a" * 64,
+                        "artifact_size_bytes": 17,
+                        "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                    }
+                },
+            )
+        ]
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=store,
+        object_store=object_store,
+        clock=lambda: now,
+    )
+
+    run = await service.run_remediation(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactLifecycleRemediationRunRequest(dry_run=True),
+    )
+
+    assert run.status == "planned"
+    assert run.dry_run is True
+    assert run.rule_action == "add_managed_rule"
+    assert run.rule_id == f"aegisflow-shell-image-artifacts-{project_id.hex[:12]}"
+    assert run.prefixes == [prefix]
+    assert run.preserved_rule_count == 1
+    assert run.merged_rule_count == 2
+    assert run.blocked_reasons == []
+    assert object_store.lifecycle_rules == [
+        {
+            "ID": "company-audit-logs",
+            "Status": "Enabled",
+            "Filter": {"Prefix": "audit-logs/"},
+            "Expiration": {"Days": 365},
+        }
+    ]
+    assert object_store.lifecycle_put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_remediation_apply_requires_approved_approval() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=_CleanupStore(
+            [
+                _admission(
+                    project_id=project_id,
+                    actor_id=actor_id,
+                    now=now,
+                    evidence={
+                        "sbom": {
+                            "artifact_ref": f"s3://capievo/shell-image-admissions/{project_id}/sbom.json",
+                            "artifact_sha256": "b" * 64,
+                            "artifact_size_bytes": 17,
+                            "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                        }
+                    },
+                )
+            ]
+        ),
+        object_store=InMemoryShellImageArtifactObjectStore(bucket="capievo"),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ShellImageArtifactLifecycleRemediationApprovalError):
+        await service.run_remediation(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationRunRequest(dry_run=False),
+        )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_remediation_apply_fetch_merge_put_and_marks_approval_used() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    approver_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    prefix = f"shell-image-admissions/{project_id}/"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        lifecycle_rules=[
+            {
+                "ID": "company-audit-logs",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "audit-logs/"},
+                "Expiration": {"Days": 365},
+            }
+        ],
+    )
+    store = _CleanupStore(
+        [
+            _admission(
+                project_id=project_id,
+                actor_id=actor_id,
+                now=now,
+                evidence={
+                    "sbom": {
+                        "artifact_ref": f"s3://capievo/{prefix}2026/07/05/sbom.json",
+                        "artifact_sha256": "c" * 64,
+                        "artifact_size_bytes": 17,
+                        "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                    }
+                },
+            )
+        ]
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=store,
+        object_store=object_store,
+        clock=lambda: now,
+    )
+    approval = await service.request_approval(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactLifecycleRemediationApprovalCreateRequest(
+            reason="expire project-scoped shell image artifacts",
+        ),
+    )
+    approved = await service.decide_approval(
+        project_id=project_id,
+        approval_id=approval.id,
+        actor_id=approver_id,
+        request=ShellImageArtifactLifecycleRemediationApprovalDecisionRequest(
+            decision="approved",
+            reason="approved after reviewing lifecycle plan",
+        ),
+    )
+
+    run = await service.run_remediation(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactLifecycleRemediationRunRequest(
+            dry_run=False,
+            approval_id=approved.id,
+        ),
+    )
+
+    assert run.status == "applied"
+    assert run.dry_run is False
+    assert run.approval_id == approval.id
+    assert run.rule_action == "add_managed_rule"
+    assert run.preserved_rule_count == 1
+    assert run.merged_rule_count == 2
+    assert len(object_store.lifecycle_put_calls) == 1
+    merged_rules = object_store.lifecycle_put_calls[0]
+    assert merged_rules[0]["ID"] == "company-audit-logs"
+    assert merged_rules[1] == {
+        "ID": f"aegisflow-shell-image-artifacts-{project_id.hex[:12]}",
+        "Status": "Enabled",
+        "Filter": {"Prefix": prefix},
+        "Expiration": {"Days": 30},
+        "NoncurrentVersionExpiration": {"NoncurrentDays": 30},
+    }
+    used = await store.get_shell_image_artifact_lifecycle_remediation_approval(
+        project_id=project_id,
+        approval_id=approval.id,
+    )
+    assert used is not None
+    assert used.status == "used"
+    with pytest.raises(ShellImageArtifactLifecycleRemediationApprovalError):
+        await service.run_remediation(
+            project_id=project_id,
+            actor_id=actor_id,
+            request=ShellImageArtifactLifecycleRemediationRunRequest(
+                dry_run=False,
+                approval_id=approval.id,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_remediation_blocks_unknown_overlapping_rule() -> None:
+    project_id = uuid4()
+    actor_id = uuid4()
+    now = datetime(2026, 7, 5, 12, tzinfo=UTC)
+    prefix = f"shell-image-admissions/{project_id}/"
+    object_store = InMemoryShellImageArtifactObjectStore(
+        bucket="capievo",
+        versioning_status="Enabled",
+        lifecycle_rules=[
+            {
+                "ID": "company-wide-retention",
+                "Status": "Enabled",
+                "Filter": {"Prefix": "shell-image-admissions/"},
+                "Expiration": {"Days": 365},
+            }
+        ],
+    )
+    service = ShellImageArtifactLifecycleRemediationService(
+        store=_CleanupStore(
+            [
+                _admission(
+                    project_id=project_id,
+                    actor_id=actor_id,
+                    now=now,
+                    evidence={
+                        "sbom": {
+                            "artifact_ref": f"s3://capievo/{prefix}2026/07/05/sbom.json",
+                            "artifact_sha256": "d" * 64,
+                            "artifact_size_bytes": 17,
+                            "artifact_retention_expires_at": (now + timedelta(days=1)).isoformat(),
+                        }
+                    },
+                )
+            ]
+        ),
+        object_store=object_store,
+        clock=lambda: now,
+    )
+
+    run = await service.run_remediation(
+        project_id=project_id,
+        actor_id=actor_id,
+        request=ShellImageArtifactLifecycleRemediationRunRequest(dry_run=True),
+    )
+
+    assert run.status == "blocked"
+    assert run.rule_action == "blocked"
+    assert "unknown_existing_lifecycle_rule" in run.blocked_reasons
+    assert object_store.lifecycle_put_calls == []
+
+
 def _stored_json(
     body: bytes,
     *,
@@ -781,6 +1040,10 @@ class _CleanupStore:
         self.cleanup_runs: list[ShellImageArtifactCleanupRunRead] = []
         self.schedules: dict[UUID, ShellImageArtifactCleanupScheduleRead] = {}
         self.claims: list[dict[str, object]] = []
+        self.lifecycle_approvals: dict[
+            UUID,
+            ShellImageArtifactLifecycleRemediationApprovalRead,
+        ] = {}
 
     async def list_shell_image_admissions(self, project_id: UUID) -> list[ShellImageAdmissionRead]:
         return [admission for admission in self.admissions if admission.project_id == project_id]
@@ -939,4 +1202,57 @@ class _CleanupStore:
             }
         )
         self.schedules[project_id] = updated
+        return updated
+
+    async def create_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval: ShellImageArtifactLifecycleRemediationApprovalRead,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        self.lifecycle_approvals[approval.id] = approval
+        return approval
+
+    async def get_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead | None:
+        approval = self.lifecycle_approvals.get(approval_id)
+        if approval is None or approval.project_id != project_id:
+            return None
+        return approval
+
+    async def update_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+        actor_id: UUID,
+        status: str,
+        decision_reason: str = "",
+        decided_by: UUID | None = None,
+        decided_at: datetime | None = None,
+        used_at: datetime | None = None,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        approval = await self.get_shell_image_artifact_lifecycle_remediation_approval(
+            project_id=project_id,
+            approval_id=approval_id,
+        )
+        if approval is None:
+            raise LookupError("approval not found")
+        updated = approval.model_copy(
+            update={
+                "status": status,
+                "decision_reason": decision_reason or approval.decision_reason,
+                "decided_by": decided_by if decided_by is not None else approval.decided_by,
+                "decided_at": decided_at if decided_at is not None else approval.decided_at,
+                "used_at": used_at if used_at is not None else approval.used_at,
+                "updated_by": actor_id,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.lifecycle_approvals[approval_id] = updated
         return updated

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createNotationTrustCertificate,
   createShellTemplate,
+  decideShellImageArtifactLifecycleRemediationApproval,
   getShellImageAdmissionGovernance,
   getShellImageArtifactCleanupGovernance,
   getShellImageAdmissionPolicy,
@@ -13,8 +14,10 @@ import {
   listShellTemplates,
   notationTrustCertificatesQueryKey,
   previewShellTemplate,
+  requestShellImageArtifactLifecycleRemediationApproval,
   resolveShellImageAdmission,
   runShellImageArtifactCleanup,
+  runShellImageArtifactLifecycleRemediation,
   shellImageArtifactCleanupRunsQueryKey,
   shellImageArtifactCleanupScheduleQueryKey,
   shellImageArtifactGovernanceQueryKey,
@@ -159,7 +162,7 @@ describe("toolRegistryApi", () => {
           JSON.stringify({
             project_id: "ops-command",
             status: "action_required",
-            apply_allowed: false,
+            apply_allowed: true,
             approval_required: true,
             rule_proposals: [
               {
@@ -171,7 +174,7 @@ describe("toolRegistryApi", () => {
                 expired_object_delete_marker: true,
                 matched_rule_ids: [],
                 reason_codes: ["missing_lifecycle_rule"],
-                safe_to_apply: false,
+                safe_to_apply: true,
                 notes: ["Review before apply"],
               },
             ],
@@ -192,6 +195,82 @@ describe("toolRegistryApi", () => {
             },
             rollback_hints: ["Approval is required before any future apply."],
             generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals") &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify({
+            id: "approval-1",
+            project_id: "ops-command",
+            status: "pending",
+            rule_id: "aegisflow-shell-image-artifacts-ops-command",
+            prefixes: ["shell-image-admissions/ops-command/"],
+            proposal_type: "add_rule",
+            reason: "expire project artifacts",
+            decision_reason: "",
+            requested_by: "acct-1",
+            decided_by: null,
+            decided_at: null,
+            used_at: null,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 201 },
+        );
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals/approval-1/decision") &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify({
+            id: "approval-1",
+            project_id: "ops-command",
+            status: "approved",
+            rule_id: "aegisflow-shell-image-artifacts-ops-command",
+            prefixes: ["shell-image-admissions/ops-command/"],
+            proposal_type: "add_rule",
+            reason: "expire project artifacts",
+            decision_reason: "reviewed",
+            requested_by: "acct-1",
+            decided_by: "acct-1",
+            decided_at: "2026-07-05T00:01:00Z",
+            used_at: null,
+            created_by: "acct-1",
+            updated_by: "acct-1",
+            created_at: "2026-07-05T00:00:00Z",
+            updated_at: "2026-07-05T00:01:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-runs")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { dry_run?: boolean };
+        return new Response(
+          JSON.stringify({
+            project_id: "ops-command",
+            status: body.dry_run ? "planned" : "applied",
+            dry_run: Boolean(body.dry_run),
+            apply_allowed: true,
+            approval_required: true,
+            approval_id: body.dry_run ? null : "approval-1",
+            rule_id: "aegisflow-shell-image-artifacts-ops-command",
+            rule_action: "add_managed_rule",
+            prefixes: ["shell-image-admissions/ops-command/"],
+            expiration_days: 30,
+            noncurrent_expiration_days: 30,
+            preserved_rule_count: 1,
+            merged_rule_count: 2,
+            blocked_reasons: [],
+            rollback_hints: ["Revert managed lifecycle rule through S3 bucket lifecycle configuration."],
+            generated_at: "2026-07-05T00:02:00Z",
           }),
           { status: 200 },
         );
@@ -453,10 +532,32 @@ describe("toolRegistryApi", () => {
     await expect(
       getShellImageArtifactLifecycleRemediationPlan("ops-command", fetcher),
     ).resolves.toMatchObject({
-      apply_allowed: false,
+      apply_allowed: true,
       rule_proposals: [{ proposal_type: "add_rule", prefix: "shell-image-admissions/ops-command/" }],
       versioned_object_impact: { noncurrent_version_count: 2, delete_marker_count: 1 },
     });
+    await expect(
+      requestShellImageArtifactLifecycleRemediationApproval(
+        "ops-command",
+        { reason: "expire project artifacts" },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ id: "approval-1", status: "pending" });
+    await expect(
+      decideShellImageArtifactLifecycleRemediationApproval(
+        "ops-command",
+        "approval-1",
+        { decision: "approved", reason: "reviewed" },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ id: "approval-1", status: "approved" });
+    await expect(
+      runShellImageArtifactLifecycleRemediation(
+        "ops-command",
+        { dry_run: false, approval_id: "approval-1" },
+        fetcher,
+      ),
+    ).resolves.toMatchObject({ rule_action: "add_managed_rule", status: "applied" });
     await expect(
       runShellImageArtifactCleanup("ops-command", { dry_run: false, limit: 10 }, fetcher),
     ).resolves.toMatchObject({ deleted_count: 1, dry_run: false });
@@ -577,6 +678,18 @@ describe("toolRegistryApi", () => {
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-plan",
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals/approval-1/decision",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+      expect.objectContaining({ method: "POST" }),
     );
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/cleanup-runs",

@@ -9,7 +9,9 @@ import { defaultProjectContext } from "../../shell/projectContext";
 import { ProjectToolRegistry } from "./ProjectToolRegistry";
 import type {
   ShellImageArtifactCleanupGovernance,
+  ShellImageArtifactLifecycleRemediationApproval,
   ShellImageArtifactLifecycleRemediationPlan,
+  ShellImageArtifactLifecycleRemediationRun,
 } from "./toolRegistryApi";
 
 describe("ProjectToolRegistry", () => {
@@ -139,6 +141,31 @@ describe("ProjectToolRegistry", () => {
       }
       if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
         return new Response(JSON.stringify(remediationPlanFixture()), { status: 200 });
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals") &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify(remediationApprovalFixture("pending")),
+          { status: 201 },
+        );
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals/approval-1/decision") &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify(remediationApprovalFixture("approved")),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-runs")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { dry_run?: boolean };
+        return new Response(
+          JSON.stringify(remediationRunFixture(Boolean(body.dry_run))),
+          { status: 200 },
+        );
       }
       if (url.endsWith("/shell-images/artifacts/cleanup-runs") && init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as { dry_run: boolean };
@@ -488,7 +515,9 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("CN=AegisFlow Root")).toBeInTheDocument();
 
     const certificatePem = "-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----";
-    await user.type(screen.getByLabelText("Certificate PEM bundle"), certificatePem);
+    fireEvent.change(screen.getByLabelText("Certificate PEM bundle"), {
+      target: { value: certificatePem },
+    });
     await user.click(screen.getByRole("button", { name: "Save certificate" }));
     await waitFor(() => {
       expect(screen.getByLabelText("Certificate PEM bundle")).toHaveValue("");
@@ -498,18 +527,17 @@ describe("ProjectToolRegistry", () => {
     await user.click(screen.getByLabelText("Enable Notation"));
     await user.click(screen.getByLabelText("Retain SBOM artifact"));
     await user.click(screen.getByLabelText("Retain scan report"));
-    await user.clear(screen.getByLabelText("Artifact prefix"));
-    await user.type(screen.getByLabelText("Artifact prefix"), "shell-image-admissions/prod");
-    await user.clear(screen.getByLabelText("Retention days"));
-    await user.type(screen.getByLabelText("Retention days"), "90");
+    fireEvent.change(screen.getByLabelText("Artifact prefix"), {
+      target: { value: "shell-image-admissions/prod" },
+    });
+    fireEvent.change(screen.getByLabelText("Retention days"), {
+      target: { value: "90" },
+    });
     await user.click(screen.getByRole("button", { name: "Save policy" }));
 
-    await user.clear(screen.getByLabelText("Version"));
-    await user.type(screen.getByLabelText("Version"), "2");
-    await user.clear(screen.getByLabelText("Environment"));
-    await user.type(screen.getByLabelText("Environment"), "prod");
-    await user.clear(screen.getByLabelText("Risk"));
-    await user.type(screen.getByLabelText("Risk"), "high");
+    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "prod" } });
+    fireEvent.change(screen.getByLabelText("Risk"), { target: { value: "high" } });
     fireEvent.change(screen.getByLabelText("Test parameters"), {
       target: { value: '{"message":"hello","token":"raw-token"}' },
     });
@@ -531,6 +559,7 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getByText("Lifecycle remediation plan")).toBeInTheDocument();
     expect(screen.getByText("add_rule")).toBeInTheDocument();
     expect(screen.getByText("shell-image-admissions/ops-command/")).toBeInTheDocument();
+    expect(screen.getByText("approval gated")).toBeInTheDocument();
     const noncurrentVersions = screen.getByText("Noncurrent versions").closest(".detail-item");
     expect(noncurrentVersions).not.toBeNull();
     expect(within(noncurrentVersions as HTMLElement).getByText("2")).toBeInTheDocument();
@@ -697,6 +726,124 @@ describe("ProjectToolRegistry", () => {
     expect(screen.getAllByText("would_reject")[0]).toBeInTheDocument();
     expect(screen.getAllByText(/Re-resolve required before runtime/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/dry-run would reject: cosign evidence missing/i)).toBeInTheDocument();
+
+    fetchSpy.mockRestore();
+  });
+
+  it("runs lifecycle remediation through approval, dry-run, and apply controls", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/shell-templates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/admission-policy")) {
+        return new Response(
+          JSON.stringify({
+            id: null,
+            configured: false,
+            project_id: "ops-command",
+            enforcement_mode: "dry_run",
+            cosign_required: false,
+            notation_enabled: false,
+            notation_trust_policy: { version: "1.0", trustPolicies: [] },
+            sbom_artifact_retention_enabled: false,
+            scan_report_retention_enabled: false,
+            artifact_store_prefix: "shell-image-admissions",
+            artifact_retention_days: 30,
+            blocked_severities: ["HIGH", "CRITICAL"],
+            updated_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/admissions/governance")) {
+        return new Response(
+          JSON.stringify({
+            total_admissions: 0,
+            policy_decisions: { approved: 0, would_reject: 0, rejected: 0 },
+            evidence_statuses: {
+              signature: { not_checked: 0, passed: 0, failed: 0 },
+              sbom: { not_checked: 0, passed: 0, failed: 0 },
+              vulnerabilities: { not_checked: 0, passed: 0, failed: 0 },
+            },
+            artifact_counts: { sbom: 0, scan_report: 0, expired: 0 },
+            blocked_vulnerability_count: 0,
+            top_block_reasons: [],
+            generated_at: "2026-07-05T00:00:00Z",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/shell-images/artifacts/governance")) {
+        return new Response(JSON.stringify(emptyArtifactGovernance()), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-plan")) {
+        return new Response(JSON.stringify(remediationPlanFixture()), { status: 200 });
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals") &&
+        init?.method === "POST"
+      ) {
+        return new Response(JSON.stringify(remediationApprovalFixture("pending")), {
+          status: 201,
+        });
+      }
+      if (
+        url.endsWith("/shell-images/artifacts/lifecycle-remediation-approvals/approval-1/decision") &&
+        init?.method === "POST"
+      ) {
+        return new Response(JSON.stringify(remediationApprovalFixture("approved")), {
+          status: 200,
+        });
+      }
+      if (url.endsWith("/shell-images/artifacts/lifecycle-remediation-runs")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { dry_run?: boolean };
+        return new Response(JSON.stringify(remediationRunFixture(Boolean(body.dry_run))), {
+          status: 200,
+        });
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-runs") && !init) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/artifacts/cleanup-schedule") && !init) {
+        return new Response(JSON.stringify(null), { status: 200 });
+      }
+      if (url.endsWith("/shell-images/notation/trust-certificates")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response(JSON.stringify({ detail: "unexpected request" }), { status: 500 });
+    });
+    const runtime = createAegisRuntime({ queryClient: new QueryClient() });
+
+    render(
+      <AppProviders runtime={runtime}>
+        <ProjectToolRegistry project={defaultProjectContext} />
+      </AppProviders>,
+    );
+
+    expect(await screen.findByText("Lifecycle remediation plan")).toBeInTheDocument();
+    expect(screen.getByText("approval gated")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request lifecycle approval" }));
+    expect(await screen.findByText("pending")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve lifecycle plan" }));
+    expect(await screen.findByText("approved")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dry run lifecycle apply" }));
+    expect(await screen.findByText(/Lifecycle apply: planned/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apply lifecycle rule" }));
+    expect(await screen.findByText(/Lifecycle apply: applied \/ add_managed_rule \/ 2 merged rules/)).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-approvals/approval-1/decision",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/v1/projects/ops-command/tool-registry/shell-images/artifacts/lifecycle-remediation-runs",
+      expect.objectContaining({ method: "POST" }),
+    );
 
     fetchSpy.mockRestore();
   });
@@ -951,7 +1098,7 @@ function remediationPlanFixture(): ShellImageArtifactLifecycleRemediationPlan {
   return {
     project_id: "ops-command",
     status: "action_required",
-    apply_allowed: false,
+    apply_allowed: true,
     approval_required: true,
     rule_proposals: [
       {
@@ -963,7 +1110,7 @@ function remediationPlanFixture(): ShellImageArtifactLifecycleRemediationPlan {
         expired_object_delete_marker: true,
         matched_rule_ids: [],
         reason_codes: ["missing_lifecycle_rule"],
-        safe_to_apply: false,
+        safe_to_apply: true,
         notes: ["Review bucket lifecycle configuration before apply."],
       },
     ],
@@ -984,6 +1131,50 @@ function remediationPlanFixture(): ShellImageArtifactLifecycleRemediationPlan {
     },
     rollback_hints: ["Approval is required before any future apply."],
     generated_at: "2026-07-05T00:00:00Z",
+  };
+}
+
+function remediationApprovalFixture(
+  status: ShellImageArtifactLifecycleRemediationApproval["status"],
+): ShellImageArtifactLifecycleRemediationApproval {
+  return {
+    id: "approval-1",
+    project_id: "ops-command",
+    status,
+    rule_id: "aegisflow-shell-image-artifacts-ops-command",
+    prefixes: ["shell-image-admissions/ops-command/"],
+    proposal_type: "add_rule",
+    reason: "expire project-scoped shell image artifacts",
+    decision_reason: status === "pending" ? "" : "reviewed generated lifecycle plan",
+    requested_by: "acct-1",
+    decided_by: status === "pending" ? null : "acct-1",
+    decided_at: status === "pending" ? null : "2026-07-05T00:01:00Z",
+    used_at: status === "used" ? "2026-07-05T00:02:00Z" : null,
+    created_by: "acct-1",
+    updated_by: "acct-1",
+    created_at: "2026-07-05T00:00:00Z",
+    updated_at: "2026-07-05T00:01:00Z",
+  };
+}
+
+function remediationRunFixture(dryRun: boolean): ShellImageArtifactLifecycleRemediationRun {
+  return {
+    project_id: "ops-command",
+    status: dryRun ? "planned" : "applied",
+    dry_run: dryRun,
+    apply_allowed: true,
+    approval_required: true,
+    approval_id: dryRun ? null : "approval-1",
+    rule_id: "aegisflow-shell-image-artifacts-ops-command",
+    rule_action: "add_managed_rule",
+    prefixes: ["shell-image-admissions/ops-command/"],
+    expiration_days: 30,
+    noncurrent_expiration_days: 30,
+    preserved_rule_count: 1,
+    merged_rule_count: 2,
+    blocked_reasons: [],
+    rollback_hints: ["Revert managed lifecycle rule through S3 bucket lifecycle configuration."],
+    generated_at: "2026-07-05T00:02:00Z",
   };
 }
 

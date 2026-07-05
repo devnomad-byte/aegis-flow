@@ -331,6 +331,42 @@ class ToolRegistryImageArtifactCleanupSchedule(Base, TimestampMixin):
     updated_at: Mapped[datetime]
 
 
+class ToolRegistryImageArtifactLifecycleRemediationApproval(Base, TimestampMixin):
+    __tablename__ = "tool_registry_image_artifact_lifecycle_remediation_approvals"
+    __table_args__ = (
+        Index(
+            "ix_tool_img_lifecycle_approvals_project_status",
+            "project_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    rule_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    prefixes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    proposal_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    requested_by: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+    )
+    decided_by: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    updated_by: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+
 class ToolRegistryCredentialRef(Base, TimestampMixin):
     __tablename__ = "tool_registry_credential_refs"
     __table_args__ = (

@@ -29,6 +29,7 @@ from backend.app.tool_registry.schemas import (
     ShellImageArtifactCleanupRunRead,
     ShellImageArtifactCleanupScheduleRead,
     ShellImageArtifactCleanupScheduleUpdateRequest,
+    ShellImageArtifactLifecycleRemediationApprovalRead,
     ShellTemplateCreateRequest,
     ShellTemplatePreviewRequest,
     ShellTemplatePreviewResponse,
@@ -239,6 +240,37 @@ class ToolRegistryStore(Protocol):
         run_id: UUID,
         completed_at: datetime,
     ) -> ShellImageArtifactCleanupScheduleRead:
+        raise NotImplementedError
+
+    async def create_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        actor_id: UUID,
+        approval: ShellImageArtifactLifecycleRemediationApprovalRead,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
+        raise NotImplementedError
+
+    async def get_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead | None:
+        raise NotImplementedError
+
+    async def update_shell_image_artifact_lifecycle_remediation_approval(
+        self,
+        *,
+        project_id: UUID,
+        approval_id: UUID,
+        actor_id: UUID,
+        status: str,
+        decision_reason: str = "",
+        decided_by: UUID | None = None,
+        decided_at: datetime | None = None,
+        used_at: datetime | None = None,
+    ) -> ShellImageArtifactLifecycleRemediationApprovalRead:
         raise NotImplementedError
 
     async def upsert_shell_image_admission_policy(
